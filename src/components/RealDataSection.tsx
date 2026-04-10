@@ -66,7 +66,7 @@ export default function RealDataSection() {
                 <Image
                   src="/images/data-section-bg.png"
                   alt="Real data visualization"
-                  fill
+                  fill sizes="100vw"
                   className="object-cover object-center"
                 />
               </div>

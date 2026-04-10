@@ -74,7 +74,7 @@ export default function FooterSection() {
               <Image
                 src="/images/footer-bg.jpg"
                 alt=""
-                fill
+                fill sizes="100vw" priority
                 className="object-cover"
               />
             </div>
