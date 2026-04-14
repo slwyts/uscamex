@@ -14,8 +14,8 @@ html {
 }
 
 body {
-  background: #f5f5f5;
-  color: #121111;
+  background: #0a0a0f;
+  color: #ffffff;
 }
 
 /* Scrollbar */
@@ -23,7 +23,7 @@ body {
   width: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #000;
+  background: #0a0a0f;
 }
 ::-webkit-scrollbar-thumb {
   background: #333;
@@ -44,8 +44,16 @@ body {
   animation: marquee 25s linear infinite;
 }
 
-/* Gradient heading text - white (for dark backgrounds) */
+/* Gradient heading text - gold/amber (for dark backgrounds) */
 .gradient-text {
+  background: linear-gradient(180deg, #f5c842 0%, rgba(245, 200, 66, 0.55) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Gradient heading text - white (for dark backgrounds) */
+.gradient-text-white {
   background: linear-gradient(180deg, #fff 0%, rgba(255, 255, 255, 0.45) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -73,7 +81,7 @@ body {
   opacity: 0.03;
 }
 
-/* Background vertical stripes */
+/* Background vertical stripes - dark theme */
 .bg-stripes {
   position: fixed;
   top: 0;
@@ -84,8 +92,8 @@ body {
   max-width: 1260px;
   z-index: 2;
   pointer-events: none;
-  border-left: 1px solid rgba(0, 0, 0, 0.04);
-  border-right: 1px solid rgba(0, 0, 0, 0.04);
+  border-left: 1px solid rgba(255, 255, 255, 0.03);
+  border-right: 1px solid rgba(255, 255, 255, 0.03);
 }
 
 .bg-stripes::before,
@@ -95,7 +103,7 @@ body {
   top: 0;
   bottom: 0;
   width: 1px;
-  background: rgba(0, 0, 0, 0.04);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .bg-stripes::before {
@@ -106,14 +114,25 @@ body {
   left: 66.666%;
 }
 
-/* Glow effect */
+/* Glow effect - gold */
 .glow-effect {
   position: absolute;
   width: 600px;
   height: 600px;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(59, 130, 246, 0.15) 0%, transparent 70%);
+  background: radial-gradient(circle, rgba(245, 200, 66, 0.12) 0%, transparent 70%);
   filter: blur(80px);
+  pointer-events: none;
+}
+
+/* Green glow for prediction/win */
+.glow-green {
+  position: absolute;
+  width: 400px;
+  height: 400px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(16, 185, 129, 0.1) 0%, transparent 70%);
+  filter: blur(60px);
   pointer-events: none;
 }
 
@@ -126,3 +145,41 @@ body {
   transform: translateY(-4px);
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
 }
+
+/* Prediction card glow border */
+.prediction-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.prediction-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, rgba(245, 200, 66, 0.3), transparent 50%, rgba(16, 185, 129, 0.3));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* Pulse animation for live indicators */
+@keyframes pulse-glow {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Flag stripe decorative element */
+.flag-stripe-us { background: #3C3B6E; }
+.flag-stripe-ca { background: #FF0000; }
+.flag-stripe-mx { background: #006847; }

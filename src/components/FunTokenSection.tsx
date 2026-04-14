@@ -1,16 +1,17 @@
 "use client";
 
-import { useRef, useState, useCallback } from "react";
+import { useRef, useCallback } from "react";
 import Image from "next/image";
 import { motion, useSpring, useTransform, MotionValue } from "framer-motion";
 import { FadeUp } from "./Animations";
+import { useLocale } from "@/i18n/context";
+import type { TranslationKey } from "@/i18n/locales";
 
 interface CardItem {
-  label: string;
+  labelKey: TranslationKey;
   image: string;
   width: number;
   height: number;
-  // Position as percentage from center
   x: string;
   y: string;
   rotate: number;
@@ -20,7 +21,7 @@ interface CardItem {
 
 const cards: CardItem[] = [
   {
-    label: "Hold $FUN in-game",
+    labelKey: "token.card1",
     image: "/images/card-hold-fun.png",
     width: 400,
     height: 400,
@@ -31,7 +32,7 @@ const cards: CardItem[] = [
     parallaxFactor: 1.2,
   },
   {
-    label: "Earn points everyday",
+    labelKey: "token.card2",
     image: "/images/card-earn-points.png",
     width: 400,
     height: 400,
@@ -42,7 +43,7 @@ const cards: CardItem[] = [
     parallaxFactor: 0.8,
   },
   {
-    label: "Get your share of the Rewards Pool",
+    labelKey: "token.card3",
     image: "/images/card-rewards-pool.png",
     width: 400,
     height: 400,
@@ -53,7 +54,7 @@ const cards: CardItem[] = [
     parallaxFactor: 1.0,
   },
   {
-    label: "Weekly Seasons",
+    labelKey: "token.card4",
     image: "/images/card-weekly-seasons.jpg",
     width: 400,
     height: 400,
@@ -64,7 +65,7 @@ const cards: CardItem[] = [
     parallaxFactor: 1.1,
   },
   {
-    label: "Scouting",
+    labelKey: "token.card5",
     image: "/images/card-scouting.png",
     width: 400,
     height: 400,
@@ -75,7 +76,7 @@ const cards: CardItem[] = [
     parallaxFactor: 0.7,
   },
   {
-    label: "TP Boosts",
+    labelKey: "token.card6",
     image: "/images/card-tp-boosts.png",
     width: 400,
     height: 400,
@@ -89,10 +90,12 @@ const cards: CardItem[] = [
 
 function FloatingCard({
   card,
+  label,
   mouseX,
   mouseY,
 }: {
   card: CardItem;
+  label: string;
   mouseX: MotionValue<number>;
   mouseY: MotionValue<number>;
 }) {
@@ -138,18 +141,18 @@ function FloatingCard({
           rotate: card.rotate,
           transformStyle: "preserve-3d",
         }}
-        className="rounded-2xl overflow-hidden shadow-[0_8px_30px_rgba(0,0,0,0.12)] border border-black/[0.06]"
+        className="rounded-2xl overflow-hidden shadow-[0_8px_30px_rgba(0,0,0,0.3)] border border-white/[0.06]"
       >
         <Image
           src={card.image}
-          alt={card.label}
+          alt={label}
           width={card.width}
           height={card.height}
           className="w-full h-auto"
         />
-        <div className="absolute bottom-0 left-0 right-0 px-3 py-2 bg-gradient-to-t from-black/40 to-transparent">
+        <div className="absolute bottom-0 left-0 right-0 px-3 py-2 bg-gradient-to-t from-black/60 to-transparent">
           <span className="text-white text-[12px] font-medium drop-shadow-sm">
-            {card.label}
+            {label}
           </span>
         </div>
       </motion.div>
@@ -159,6 +162,7 @@ function FloatingCard({
 
 export default function FunTokenSection() {
   const sectionRef = useRef<HTMLDivElement>(null);
+  const { t } = useLocale();
 
   const springConfig = { stiffness: 150, damping: 30 };
   const mouseXSpring = useSpring(0, springConfig);
@@ -182,7 +186,7 @@ export default function FunTokenSection() {
   }, [mouseXSpring, mouseYSpring]);
 
   return (
-    <section className="relative px-5 py-20">
+    <section id="fan-tokens" className="relative px-5 py-20">
       <div className="max-w-[1200px] mx-auto">
         <div
           ref={sectionRef}
@@ -192,27 +196,37 @@ export default function FunTokenSection() {
         >
           {/* Heading */}
           <FadeUp className="text-center relative z-10">
-            <h2 className="text-[28px] md:text-[36px] lg:text-[48px] font-bold tracking-[-0.03em] leading-[1.15] gradient-text-dark">
-              $FUN is here - now why
+            <h2 className="text-[28px] md:text-[36px] lg:text-[48px] font-bold tracking-[-0.03em] leading-[1.15] gradient-text">
+              {t("token.title1")}
               <br />
-              holding matters.
+              {t("token.title2")}
             </h2>
           </FadeUp>
 
           {/* Description */}
           <FadeUp delay={0.1} className="text-center relative z-10 mt-6">
-            <p className="text-[#121111]/50 text-[15px] max-w-[460px] mx-auto leading-[1.6]">
-              From competition to rewards, $FUN powers long-term incentives,
-              seasonal rewards, and ecosystem-wide perks across Sport.Fun.
+            <p className="text-white/45 text-[15px] max-w-[520px] mx-auto leading-[1.6]">
+              {t("token.desc")}
             </p>
+          </FadeUp>
+
+          {/* CTA */}
+          <FadeUp delay={0.2} className="relative z-10 mt-8">
+            <a
+              href="#buy"
+              className="inline-flex items-center gap-2 px-8 py-3.5 rounded-full bg-[#f5c842] text-[#0a0a0f] font-bold text-[15px] hover:bg-[#f5c842]/90 transition-colors duration-200 shadow-[0_0_30px_rgba(245,200,66,0.25)]"
+            >
+              {t("token.cta")}
+            </a>
           </FadeUp>
 
           {/* Floating 3D cards */}
           <div className="absolute inset-0 pointer-events-none hidden md:block">
             {cards.map((card) => (
               <FloatingCard
-                key={card.label}
+                key={card.labelKey}
                 card={card}
+                label={t(card.labelKey)}
                 mouseX={mouseXSpring}
                 mouseY={mouseYSpring}
               />
@@ -223,12 +237,12 @@ export default function FunTokenSection() {
           <div className="md:hidden mt-10 grid grid-cols-2 gap-3">
             {cards.map((card) => (
               <div
-                key={card.label}
-                className="rounded-2xl overflow-hidden shadow-md border border-black/[0.06]"
+                key={card.labelKey}
+                className="rounded-2xl overflow-hidden shadow-md border border-white/[0.06]"
               >
                 <Image
                   src={card.image}
-                  alt={card.label}
+                  alt={t(card.labelKey)}
                   width={card.width}
                   height={card.height}
                   className="w-full h-auto"

@@ -7,18 +7,18 @@ import FooterSection from "@/components/FooterSection";
 
 export default function Home() {
   return (
-    <main className="noise-overlay relative">
+    <main className="noise-overlay relative bg-[#0a0a0f]">
       {/* Vertical stripe lines */}
       <div className="bg-stripes" />
       <Navbar />
       <Hero />
       {/* Dark sections */}
-      <div className="bg-[#121212] rounded-t-[32px]">
+      <div className="bg-[#0d0d14] rounded-t-[32px]">
         <ArenaSection />
         <RealDataSection />
       </div>
       <FunTokenSection />
-      <div className="bg-[#121212] rounded-t-[32px]">
+      <div className="bg-[#0d0d14] rounded-t-[32px]">
         <FooterSection />
       </div>
     </main>
