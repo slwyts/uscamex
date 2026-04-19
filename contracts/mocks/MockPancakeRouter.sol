@@ -156,6 +156,29 @@ contract MockPancakeRouter {
         address to,
         uint256
     ) external returns (uint256[] memory amounts) {
+        uint256 amountOut = _swapExactTokensForETH(amountIn, amountOutMin, path, to);
+
+        amounts = new uint256[](2);
+        amounts[0] = amountIn;
+        amounts[1] = amountOut;
+    }
+
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256
+    ) external {
+        _swapExactTokensForETH(amountIn, amountOutMin, path, to);
+    }
+
+    function _swapExactTokensForETH(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to
+    ) internal returns (uint256 amountOut) {
         require(path.length == 2, "Invalid path");
         require(path[1] == WETH, "Path must end with WETH");
 
@@ -163,20 +186,20 @@ contract MockPancakeRouter {
         address pair = IPancakeFactory(factory).getPair(tokenIn, WETH);
         require(pair != address(0), "Pair not found");
 
-        uint256 amountOut = _previewAmountOut(pair, tokenIn, WETH, amountIn);
-        require(amountOut >= amountOutMin, "Insufficient output amount");
+        (uint256 reserveIn, uint256 reserveOut, ) = _getSwapReserves(pair, tokenIn, WETH);
+        uint256 pairBalanceBefore = IERC20(tokenIn).balanceOf(pair);
 
         IERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn);
         IERC20(tokenIn).transfer(pair, amountIn);
+
+        uint256 actualAmountIn = IERC20(tokenIn).balanceOf(pair) - pairBalanceBefore;
+        amountOut = getAmountOut(actualAmountIn, reserveIn, reserveOut);
+        require(amountOut >= amountOutMin, "Insufficient output amount");
 
         _swapOut(pair, tokenIn, amountOut, address(this));
 
         IWBNB(WETH).withdraw(amountOut);
         payable(to).transfer(amountOut);
-
-        amounts = new uint256[](2);
-        amounts[0] = amountIn;
-        amounts[1] = amountOut;
     }
 
     function swapETHForExactTokens(

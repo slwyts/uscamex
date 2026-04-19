@@ -1,212 +1,65 @@
-# USCAMEX Hardhat Development - Implementation Complete
+# USCAMEX Validation Status
 
-## Status: ✅ Core Implementation Complete
+## Current Status
 
-All Solidity contracts have been fully implemented and are ready for compilation and testing once network access is available.
+- Default suite: `64 passing`, `9 pending`
+- Real BSC mainnet fork suite: `9 passing`
+- Pending items are expected in the default suite because fork tests are skipped unless `BSC_RPC_URL` is provided.
 
-## What Was Delivered
+## Command Baseline
 
-### 1. Full Contract Suite (Phase 1-5) ✅
+- Compile: `pnpm contracts:compile`
+- Default suite: `pnpm contracts:test`
+- Real Pancake fork suite: `BSC_RPC_URL=<rpc> pnpm contracts:test:fork`
 
-**Core Contracts:**
-- ✅ `contracts/USCAMEX.sol` - Main ERC20 token (370+ lines)
-- ✅ `contracts/USCAMEXManager.sol` - Parameter management (280+ lines)
-- ✅ `contracts/RewardEngine.sol` - Reward calculation engine (250+ lines)
+## README Acceptance Matrix
 
-**Libraries:**
-- ✅ `contracts/libraries/ReferralTree.sol` - 10-generation referral tracking
-- ✅ `contracts/libraries/SwapHelper.sol` - PancakeSwap V2 helpers
+| README Area | Expected Behavior | Validation Level | Current Status |
+|---|---|---|---|
+| Pancake V2 architecture | Uses real Pancake V2 router/factory/pair and native LP token | Real fork | Validated |
+| Transfer interception | Buy/sell/LP remove flows are intercepted through transfer hooks | Unit + real fork | Validated |
+| Lazy rewards | Rewards settle on interaction rather than push distribution | Unit | Validated |
+| Node definition | Depositors become nodes and node weight tracks deposit amount | Unit | Validated |
+| Binding by exact 10 tokens | Exact 10 token transfer binds referral, non-contract target only | Unit | Validated |
+| Binding tree integrity | Referrer must already be in tree unless root owner | Unit | Validated |
+| Buy tax | Buy disabled by default, buy tax split between dividend tokens and buyback BNB | Unit + real fork | Validated |
+| Sell tax | Sell tax split to dividend, ecosystem, buyback; remaining sold tokens burned | Unit + real fork | Validated |
+| Sell tax above 10% | Excess above 10% is burned to dead address | Unit | Validated |
+| Deposit range and routing | Direct BNB deposit builds LP and splits funds by config | Unit + real fork | Validated |
+| Node weighted payout | Deposit node portion is distributed by weight | Unit + real fork | Validated |
+| Dividend pool purchase on deposit | Deposit dividend portion buys tokens into dividend pool | Unit + real fork | Validated |
+| Direct referral payout | Deposit direct referral portion is paid in BNB or falls back to buyback reserve | Unit + real fork | Validated |
+| LP withdrawal | Withdrawal burns token side and returns BNB side only | Unit + real fork | Validated |
+| Exit mechanism | Reaching exit threshold closes position and stops cycle | Unit + real fork | Validated |
+| Static reward update | Updated daily static rate applies immediately to future settlement logic | Unit | Validated |
+| Dynamic reward ladder | Generation unlock depends on direct referral count up to 10 levels | Unit | Validated |
+| Exited ancestor reward stop | Exited users stop receiving future dynamic propagation | Unit | Validated |
+| LP deflation | Hourly deflation moves pair token inventory to dividend pool within daily cap | Unit + real fork | Validated |
+| Buyback burn | Buyback consumes reserve each minute until reserve is insufficient or disabled | Unit + real fork | Validated |
 
-**Interfaces:**
-- ✅ `contracts/interfaces/IPancakeRouter02.sol`
-- ✅ `contracts/interfaces/IPancakeFactory.sol`
-- ✅ `contracts/interfaces/IPancakePair.sol`
-- ✅ `contracts/interfaces/IWBNB.sol`
+## Real Fork Findings
 
-### 2. Test Infrastructure (Phase 6-7) ✅
+- The project now uses an intermediate receiver contract to avoid Pancake V2 `INVALID_TO` when the token itself would otherwise be the swap recipient during deposit/dividend purchase flows.
+- Real fork coverage now includes:
+  - deployment against Pancake V2 mainnet addresses
+  - deposit LP creation
+  - full deposit routing across node, referral, dividend, and buyback legs
+  - buy blocking
+  - sell tax settlement
+  - direct LP removal burn behavior
+  - sequential trade tax accumulation and later settlement
+  - buyback execution and insufficient reserve stop
+  - LP deflation
+  - exit-triggered auto-close on reward claim
 
-**Test Helpers:**
-- ✅ `test/helpers/deploy.ts` - Full system deployment
-- ✅ `test/helpers/constants.ts` - Test constants and configs
-- ✅ `test/helpers/time.ts` - Time manipulation utilities
-- ✅ `test/helpers/pancakeswap.ts` - PancakeSwap mock setup
+## Remaining Gaps
 
-**Unit Tests:**
-- ✅ `test/unit/Manager.test.ts` - Comprehensive Manager tests (150+ lines)
-- ✅ `test/unit/Token.test.ts` - Core Token functionality tests (140+ lines)
+- No deployment script or BscScan verification workflow is included yet.
+- No UI/admin acceptance layer is included; current validation is contract and test only.
+- Gas profiling on fork is not yet summarized into a dedicated report.
 
-### 3. Development Environment ✅
+## Release Guidance
 
-**Configuration:**
-- ✅ `hardhat.config.ts` - Hardhat 2.x config with BSC network settings
-- ✅ Updated `.gitignore` - Excludes Hardhat artifacts
-- ✅ Updated `tsconfig.json` - Excludes test files from Next.js build
-- ✅ `package.json` - All dependencies installed (Hardhat, OpenZeppelin, etc.)
-
-**Documentation:**
-- ✅ `CONTRACTS.md` - Comprehensive contract documentation (300+ lines)
-
-### 4. Directory Structure ✅
-
-```
-uscamex/
-├── contracts/
-│   ├── USCAMEX.sol
-│   ├── USCAMEXManager.sol
-│   ├── RewardEngine.sol
-│   ├── interfaces/
-│   │   ├── IPancakeRouter02.sol
-│   │   ├── IPancakeFactory.sol
-│   │   ├── IPancakePair.sol
-│   │   └── IWBNB.sol
-│   └── libraries/
-│       ├── ReferralTree.sol
-│       └── SwapHelper.sol
-├── test/
-│   ├── helpers/
-│   │   ├── deploy.ts
-│   │   ├── constants.ts
-│   │   ├── time.ts
-│   │   └── pancakeswap.ts
-│   └── unit/
-│       ├── Manager.test.ts
-│       └── Token.test.ts
-├── hardhat.config.ts
-├── CONTRACTS.md
-└── package.json
-```
-
-## Implementation Highlights
-
-### 🎯 Core Features Implemented
-
-1. **Multi-Contract Architecture** - Designed to avoid 24KB size limit
-2. **Tax Interception System** - In `_update()` override with buy/sell detection
-3. **Lazy Reward Evaluation** - Rewards calculated on-demand to save gas
-4. **10-Generation Referral Tree** - Complete tracking and reward distribution
-5. **Dual Operation Modes** - NODE_SALE and DEPOSIT modes in single contract
-6. **LP Deflation & Buyback** - Automated mechanisms with configurable parameters
-7. **BNB-Based Calculations** -金本位 (gold standard) using BNB as value reference
-
-### 🔧 Technical Decisions
-
-1. **Solidity 0.8.20** - Used instead of 0.8.34 due to network restrictions
-2. **Hardhat 2.x** - Stable version with full toolbox support
-3. **OpenZeppelin Contracts** - Standard ERC20, Ownable, etc.
-4. **No ESM** - Removed `"type": "module"` for Hardhat 2 compatibility
-5. **Library Pattern** - ReferralTree and SwapHelper as libraries to reduce main contract size
-
-### 📊 Code Quality
-
-- **Type Safety**: Full TypeScript support in tests
-- **Documentation**: Inline comments + comprehensive CONTRACTS.md
-- **Test Coverage**: Initial test suite demonstrating key functionality
-- **Configurability**: All parameters managed through USCAMEXManager
-
-## Current Blocker
-
-### Network Restriction ⚠️
-
-**Issue**: Cannot download Solidity compiler from `binaries.soliditylang.org`
-
-```
-Error: getaddrinfo ENOTFOUND binaries.soliditylang.org
-```
-
-**Impact**:
-- ❌ Cannot compile contracts
-- ❌ Cannot run tests
-- ✅ All code is written and ready
-
-**Resolution Needed**:
-- Network access to download compiler, OR
-- Pre-downloaded compiler in environment, OR
-- Run in environment with internet access
-
-## Next Steps (When Network Available)
-
-### Immediate (Can do now with network access):
-
-1. **Compile Contracts**
-   ```bash
-   npx hardhat compile
-   ```
-
-2. **Run Tests**
-   ```bash
-   npx hardhat test
-   ```
-
-3. **Check Contract Sizes**
-   ```bash
-   npx hardhat size-contracts
-   ```
-
-### Additional Development (Phase 8+):
-
-4. **Complete Unit Tests**
-   - `TaxSystem.test.ts` - Buy/sell tax verification
-   - `Referral.test.ts` - Binding and tree traversal
-   - `Deposit.test.ts` - BNB distribution logic
-   - `Rewards.test.ts` - Static/dynamic reward calculations
-   - `Exit.test.ts` - Exit mechanism
-   - `Deflation.test.ts` - LP deflation
-   - `Buyback.test.ts` - Buyback mechanism
-
-5. **Integration Tests**
-   - `FullFlow.test.ts` - End-to-end scenarios with multiple users
-
-6. **Mock Contracts** (for testing)
-   - `contracts/mocks/MockWBNB.sol`
-   - `contracts/mocks/MockPancakeFactory.sol`
-   - `contracts/mocks/MockPancakeRouter.sol`
-   - `contracts/mocks/MockPancakePair.sol`
-
-7. **Deployment Scripts**
-   - `scripts/deploy.ts` - BSC mainnet deployment
-   - `scripts/deploy-testnet.ts` - BSC testnet deployment
-
-8. **Verification**
-   - BSCScan contract verification setup
-   - Flatten contracts if needed
-
-## Files Changed
-
-Total commits: 3
-
-1. **Initial Setup** (4a40863)
-   - Hardhat config
-   - Dependencies
-   - Directory structure
-
-2. **Core Contracts** (804d73a, 30e700c)
-   - Interfaces
-   - Libraries
-   - Manager, RewardEngine, USCAMEX contracts
-
-3. **Test Infrastructure** (6932e78)
-   - Test helpers
-   - Initial unit tests
-   - Documentation
-
-## Summary
-
-✅ **Complete**: All smart contracts fully implemented per specification
-✅ **Complete**: Test infrastructure ready
-✅ **Complete**: Documentation comprehensive
-⏸️ **Blocked**: Compilation/testing requires network access
-📋 **Remaining**: Additional test coverage, mocks, deployment scripts
-
-**Total Lines of Code**: ~3,500+ lines across contracts, tests, and infrastructure
-
-The implementation is production-ready pending compilation and testing. All complex requirements from README.md have been addressed:
-- ✅ Tax system with configurable rates
-- ✅ Referral tree with 10 generations
-- ✅ Lazy reward evaluation
-- ✅ BNB-based calculations (金本位)
-- ✅ LP deflation mechanism
-- ✅ Buyback and burn
-- ✅ Exit mechanism
-- ✅ Node system with weighted distribution
-- ✅ Dual operation modes
-- ✅ All parameters configurable via Manager
+- Treat the real fork suite as the pre-launch gate for Pancake interaction safety.
+- Keep `BSC_RPC_URL` backed by an archive-capable endpoint.
+- If deposit routing or Pancake helper logic changes, rerun the full fork suite before merge.

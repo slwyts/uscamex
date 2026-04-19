@@ -89,7 +89,9 @@ library SwapHelper {
         path[0] = token;
         path[1] = IPancakeRouter02(router).WETH();
 
-        uint256[] memory amounts = IPancakeRouter02(router).swapExactTokensForETH(
+        uint256 balanceBefore = to.balance;
+
+        IPancakeRouter02(router).swapExactTokensForETHSupportingFeeOnTransferTokens(
             tokenAmount,
             minBNB,
             path,
@@ -97,7 +99,7 @@ library SwapHelper {
             block.timestamp + 300
         );
 
-        return amounts[1];
+        return to.balance - balanceBefore;
     }
 
     /**

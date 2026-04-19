@@ -5,6 +5,10 @@ import { deployPancakeSwap } from "./pancakeswap";
 
 const { ethers } = hre;
 
+export const PANCAKE_V2_ROUTER = "0x10ED43C718714eb63d5aA57B78B54704E256024E";
+export const PANCAKE_V2_FACTORY = "0xca143ce32fe78f1f7019d7d551a6402fc5350c73";
+export const WBNB_MAINNET = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";
+
 export interface DeploymentResult {
   token: Contract;
   manager: Contract;
@@ -19,17 +23,11 @@ export interface DeploymentResult {
   buybackWallet: SignerWithAddress;
 }
 
-/**
- * Deploy all USCAMEX contracts along with PancakeSwap mocks
- */
-export async function deployFullSystem(): Promise<DeploymentResult> {
-  const [owner, dividendPool, ecosystemFund, buybackWallet, ...users] =
-    await ethers.getSigners();
+async function deployManagementContracts(
+  routerAddress: string
+): Promise<Omit<DeploymentResult, "router" | "factory" | "wbnb" | "pair"> & { token: Contract }> {
+  const [owner, dividendPool, ecosystemFund, buybackWallet] = await ethers.getSigners();
 
-  // Deploy PancakeSwap
-  const { factory, router, wbnb } = await deployPancakeSwap();
-
-  // Deploy Manager
   const Manager = await ethers.getContractFactory("USCAMEXManager");
   const manager = await Manager.deploy(
     dividendPool.address,
@@ -38,49 +36,79 @@ export async function deployFullSystem(): Promise<DeploymentResult> {
   );
   await manager.waitForDeployment();
 
-  // Deploy RewardEngine
   const RewardEngine = await ethers.getContractFactory("RewardEngine");
   const rewardEngine = await RewardEngine.deploy(await manager.getAddress());
   await rewardEngine.waitForDeployment();
 
-  // Deploy Token
   const Token = await ethers.getContractFactory("USCAMEX");
   const token = await Token.deploy(
     await manager.getAddress(),
     await rewardEngine.getAddress(),
-    await router.getAddress()
+    routerAddress
   );
   await token.waitForDeployment();
 
-  // Authorize token in manager and reward engine
   await manager.setTokenContract(await token.getAddress());
-
-  // Set token contract in reward engine
   await rewardEngine.setTokenContract(await token.getAddress());
-
-  // Create pair and add initial liquidity
-  const initialBNB = ethers.parseEther("10"); // 10 BNB initial liquidity
-  await token.createPairAndAddLiquidity({ value: initialBNB });
-
-  // Get pair address
-  const pairAddress = await factory.getPair(
-    await token.getAddress(),
-    await wbnb.getAddress()
-  );
-  const pair = await ethers.getContractAt("IPancakePair", pairAddress);
 
   return {
     token,
     manager,
     rewardEngine,
-    router,
-    factory,
-    wbnb,
-    pair,
     owner,
     dividendPool,
     ecosystemFund,
     buybackWallet,
+  };
+}
+
+/**
+ * Deploy all USCAMEX contracts along with PancakeSwap mocks
+ */
+export async function deployFullSystem(): Promise<DeploymentResult> {
+  const { factory, router, wbnb } = await deployPancakeSwap();
+  const deployment = await deployManagementContracts(await router.getAddress());
+
+  // Create pair and add initial liquidity
+  const initialBNB = ethers.parseEther("10"); // 10 BNB initial liquidity
+  await deployment.token.createPairAndAddLiquidity({ value: initialBNB });
+
+  // Get pair address
+  const pairAddress = await factory.getPair(
+    await deployment.token.getAddress(),
+    await wbnb.getAddress()
+  );
+  const pair = await ethers.getContractAt("IPancakePair", pairAddress);
+
+  return {
+    ...deployment,
+    router,
+    factory,
+    wbnb,
+    pair,
+  };
+}
+
+export async function deployFullSystemOnFork(): Promise<DeploymentResult> {
+  const router = await ethers.getContractAt("IPancakeRouter02", PANCAKE_V2_ROUTER);
+  const factory = await ethers.getContractAt("IPancakeFactory", PANCAKE_V2_FACTORY);
+  const wbnb = await ethers.getContractAt("IERC20", WBNB_MAINNET);
+  const deployment = await deployManagementContracts(PANCAKE_V2_ROUTER);
+
+  await deployment.token.createPairAndAddLiquidity({ value: ethers.parseEther("10") });
+
+  const pairAddress = await factory.getPair(
+    await deployment.token.getAddress(),
+    WBNB_MAINNET
+  );
+  const pair = await ethers.getContractAt("IPancakePair", pairAddress);
+
+  return {
+    ...deployment,
+    router,
+    factory,
+    wbnb,
+    pair,
   };
 }
 

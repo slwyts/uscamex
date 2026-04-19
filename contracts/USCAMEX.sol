@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "./USCAMEXManager.sol";
 import "./RewardEngine.sol";
+import "./SwapReceiver.sol";
 import "./libraries/SwapHelper.sol";
 import "./interfaces/IPancakeRouter02.sol";
 import "./interfaces/IPancakeFactory.sol";
@@ -33,6 +34,7 @@ contract USCAMEX is ERC20, Ownable {
     IPancakeRouter02 public immutable router;
     IPancakeFactory public immutable factory;
     address public immutable WBNB;
+    SwapReceiver public immutable swapReceiver;
     address public pair;
 
     // Tracking
@@ -90,12 +92,14 @@ contract USCAMEX is ERC20, Ownable {
         router = IPancakeRouter02(_router);
         factory = IPancakeFactory(router.factory());
         WBNB = router.WETH();
+        swapReceiver = new SwapReceiver(address(this));
 
         // Mint tokens
         _mint(address(this), TOTAL_SUPPLY);
 
         // Tax exempt addresses
         isTaxExempt[address(this)] = true;
+        isTaxExempt[address(swapReceiver)] = true;
         isTaxExempt[owner()] = true;
         isTaxExempt[_manager] = true;
         isTaxExempt[_rewardEngine] = true;
@@ -221,9 +225,13 @@ contract USCAMEX is ERC20, Ownable {
             address(this),
             halfBNB,
             0,
-            address(this)
+            address(swapReceiver)
         );
         inSystemRouterOperation = false;
+
+        if (tokensBought > 0) {
+            swapReceiver.forwardToken(address(this), address(this), tokensBought);
+        }
 
         // Add liquidity
         _approve(address(this), address(router), tokensBought);
@@ -263,11 +271,12 @@ contract USCAMEX is ERC20, Ownable {
             address(this),
             bnbAmount,
             0,
-            address(this)
+            address(swapReceiver)
         );
         inSystemRouterOperation = false;
 
         if (tokensBought > 0) {
+            swapReceiver.forwardToken(address(this), address(this), tokensBought);
             _systemTransfer(address(this), manager.dividendPool(), tokensBought);
         }
     }
