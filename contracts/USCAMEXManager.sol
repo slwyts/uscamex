@@ -72,6 +72,9 @@ contract USCAMEXManager is Ownable {
     address public ecosystemFund;
     address public buybackWallet;
 
+    // Authorized token contract
+    address public tokenContract;
+
     // Buy switch
     bool public buyEnabled;
 
@@ -93,9 +96,17 @@ contract USCAMEXManager is Ownable {
     event RewardConfigUpdated(RewardConfig config);
     event WalletUpdated(string walletType, address newWallet);
     event BuyEnabledChanged(bool enabled);
+    event TokenContractSet(address indexed tokenContract);
     event NodeAdded(address indexed node, uint256 weight);
     event NodeRemoved(address indexed node);
     event NodeWeightUpdated(address indexed node, uint256 newWeight);
+
+    // ========== MODIFIERS ==========
+
+    modifier onlyToken() {
+        require(msg.sender == tokenContract, "Not token contract");
+        _;
+    }
 
     // ========== CONSTRUCTOR ==========
 
@@ -164,6 +175,26 @@ contract USCAMEXManager is Ownable {
         return teamRewardRates[generation - 1];
     }
 
+    function getTaxConfig() external view returns (TaxConfig memory) {
+        return taxConfig;
+    }
+
+    function getDepositConfig() external view returns (DepositConfig memory) {
+        return depositConfig;
+    }
+
+    function getDeflationConfig() external view returns (DeflationConfig memory) {
+        return deflationConfig;
+    }
+
+    function getBuybackConfig() external view returns (BuybackConfig memory) {
+        return buybackConfig;
+    }
+
+    function getRewardConfig() external view returns (RewardConfig memory) {
+        return rewardConfig;
+    }
+
     function getTotalNodes() external view returns (uint256) {
         return nodeAddresses.length;
     }
@@ -185,6 +216,12 @@ contract USCAMEXManager is Ownable {
     function setOperationMode(OperationMode _mode) external onlyOwner {
         operationMode = _mode;
         emit OperationModeChanged(_mode);
+    }
+
+    function setTokenContract(address _tokenContract) external onlyOwner {
+        require(_tokenContract != address(0), "Invalid token contract");
+        tokenContract = _tokenContract;
+        emit TokenContractSet(_tokenContract);
     }
 
     function setTaxConfig(TaxConfig calldata _config) external onlyOwner {
@@ -257,6 +294,14 @@ contract USCAMEXManager is Ownable {
     }
 
     function addNode(address _node, uint256 _weight) external onlyOwner {
+        _addNode(_node, _weight);
+    }
+
+    function registerNode(address _node, uint256 _weight) external onlyToken {
+        _addNode(_node, _weight);
+    }
+
+    function _addNode(address _node, uint256 _weight) internal {
         require(_node != address(0), "Invalid node");
         require(!isNode[_node], "Already a node");
         nodeAddresses.push(_node);
@@ -266,6 +311,31 @@ contract USCAMEXManager is Ownable {
     }
 
     function removeNode(address _node) external onlyOwner {
+        _removeNode(_node);
+    }
+
+    function removeNodeByToken(address _node) external onlyToken {
+        _removeNode(_node);
+    }
+
+    function setNodeWeightByToken(address _node, uint256 _weight) external onlyToken {
+        if (_weight == 0) {
+            if (isNode[_node]) {
+                _removeNode(_node);
+            }
+            return;
+        }
+
+        if (!isNode[_node]) {
+            _addNode(_node, _weight);
+            return;
+        }
+
+        nodeWeight[_node] = _weight;
+        emit NodeWeightUpdated(_node, _weight);
+    }
+
+    function _removeNode(address _node) internal {
         require(isNode[_node], "Not a node");
         isNode[_node] = false;
         nodeWeight[_node] = 0;

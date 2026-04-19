@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.hardhat.json",
+  "compilerOptions": {
+    "rootDir": ".."
+  },
+  "include": [
+    "./**/*.ts",
+    "../hardhat.config.ts"
+  ],
+  "exclude": [
+    "../node_modules",
+    "../artifacts",
+    "../cache",
+    "../typechain-types"
+  ]
+}

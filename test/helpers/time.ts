@@ -1,4 +1,6 @@
-import { ethers, network } from "hardhat";
+import hre from "hardhat";
+
+const { ethers, network } = hre;
 
 /**
  * Increase time by a given number of seconds

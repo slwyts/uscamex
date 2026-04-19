@@ -15,8 +15,10 @@ contract RewardEngine {
 
     struct UserInfo {
         uint256 depositAmount; // BNB deposit amount (金本位基准)
-        uint256 totalStaticRewards; // Total static rewards earned (BNB value)
-        uint256 totalDynamicRewards; // Total dynamic rewards earned (BNB value)
+        uint256 pendingStaticRewards; // Unclaimed static rewards (BNB value)
+        uint256 pendingDynamicRewards; // Unclaimed dynamic rewards (BNB value)
+        uint256 claimedStaticRewards; // Claimed static rewards in current cycle
+        uint256 claimedDynamicRewards; // Claimed dynamic rewards in current cycle
         uint256 lastSettleTime; // Last settlement timestamp
         bool exited; // Whether user has exited
     }
@@ -107,21 +109,31 @@ contract RewardEngine {
     // ========== DEPOSIT & WITHDRAWAL ==========
 
     function recordDeposit(address user, uint256 bnbAmount) external onlyToken {
+        require(user != address(0), "Invalid user");
+        require(bnbAmount > 0, "Invalid deposit");
+
+        UserInfo storage userInfo = users[user];
+
         // Settle existing rewards before updating deposit
-        if (users[user].depositAmount > 0) {
+        if (userInfo.depositAmount > 0) {
             _settleRewards(user);
+        } else {
+            _resetCycle(userInfo);
         }
 
-        users[user].depositAmount += bnbAmount;
-        users[user].lastSettleTime = block.timestamp;
-        users[user].exited = false;
+        userInfo.depositAmount += bnbAmount;
+        userInfo.lastSettleTime = block.timestamp;
+        userInfo.exited = false;
 
         emit Deposited(user, bnbAmount);
     }
 
     function recordWithdrawal(address user) external onlyToken {
+        UserInfo storage userInfo = users[user];
         _settleRewards(user);
-        users[user].exited = true;
+        userInfo.depositAmount = 0;
+        userInfo.lastSettleTime = block.timestamp;
+        userInfo.exited = true;
     }
 
     // ========== REWARD CALCULATION ==========
@@ -149,16 +161,20 @@ contract RewardEngine {
 
         // Calculate static rewards
         uint256 staticRewards = _calculateStaticRewards(user, periods);
-        userInfo.totalStaticRewards += staticRewards;
+        if (staticRewards == 0) {
+            userInfo.lastSettleTime = block.timestamp - (timeSinceLastSettle % SETTLEMENT_INTERVAL);
+            return;
+        }
 
-        // Calculate dynamic rewards (based on downline static rewards)
-        uint256 dynamicRewards = _calculateDynamicRewards(user);
-        userInfo.totalDynamicRewards += dynamicRewards;
+        userInfo.pendingStaticRewards += staticRewards;
 
         // Update last settle time
         userInfo.lastSettleTime = block.timestamp - (timeSinceLastSettle % SETTLEMENT_INTERVAL);
 
-        emit RewardsSettled(user, staticRewards, dynamicRewards);
+        // Propagate dynamic rewards to ancestors based on this user's settled static rewards.
+        _distributeDynamicRewards(user, staticRewards);
+
+        emit RewardsSettled(user, staticRewards, 0);
 
         // Check if user should exit
         _checkExit(user);
@@ -172,7 +188,7 @@ contract RewardEngine {
      */
     function _calculateStaticRewards(address user, uint256 periods) internal view returns (uint256) {
         UserInfo storage userInfo = users[user];
-        USCAMEXManager.RewardConfig memory rewardConfig = manager.rewardConfig();
+        USCAMEXManager.RewardConfig memory rewardConfig = manager.getRewardConfig();
 
         // Daily rate / 4 (since we settle every 6 hours)
         uint256 ratePerPeriod = rewardConfig.dailyStaticRate / 4;
@@ -181,48 +197,39 @@ contract RewardEngine {
         return (userInfo.depositAmount * ratePerPeriod * periods) / BASIS_POINTS;
     }
 
-    /**
-     * @dev Calculate dynamic rewards (team rewards) for a user
-     * @return BNB value of dynamic rewards
-     */
-    function _calculateDynamicRewards(address user) internal view returns (uint256) {
-        uint256 directReferralCount = referralTree.getDirectReferralCount(user);
-        if (directReferralCount == 0) {
-            return 0;
+    function _distributeDynamicRewards(address sourceUser, uint256 sourceStaticRewards) internal {
+        if (sourceStaticRewards == 0) {
+            return;
         }
 
-        // Determine how many generations this user can earn from
-        uint256 unlockedGenerations = directReferralCount > 10 ? 10 : directReferralCount;
+        address[] memory ancestors = referralTree.getAncestors(sourceUser, 10);
 
-        uint256 totalDynamicRewards = 0;
+        for (uint256 index = 0; index < ancestors.length; index++) {
+            address ancestor = ancestors[index];
+            UserInfo storage ancestorInfo = users[ancestor];
 
-        // For each unlocked generation, calculate rewards
-        for (uint256 gen = 1; gen <= unlockedGenerations; gen++) {
-            uint256 genRewardRate = manager.getTeamRewardRate(gen); // basis points
-
-            // Get descendants at this generation level
-            address[] memory descendants = referralTree.getDescendantsAtLevel(user, gen);
-
-            // Sum up static rewards from this generation
-            for (uint256 i = 0; i < descendants.length; i++) {
-                UserInfo storage descendant = users[descendants[i]];
-
-                // Only count non-exited users
-                if (!descendant.exited && descendant.depositAmount > 0) {
-                    // Get their static rewards earned in the last period
-                    uint256 timeSinceSettle = block.timestamp - descendant.lastSettleTime;
-                    uint256 periods = timeSinceSettle / SETTLEMENT_INTERVAL;
-
-                    if (periods > 0) {
-                        uint256 descendantStaticReward = _calculateStaticRewards(descendants[i], periods);
-                        // Take percentage as team reward
-                        totalDynamicRewards += (descendantStaticReward * genRewardRate) / BASIS_POINTS;
-                    }
-                }
+            if (ancestorInfo.depositAmount == 0 || ancestorInfo.exited) {
+                continue;
             }
-        }
 
-        return totalDynamicRewards;
+            uint256 directReferralCount = referralTree.getDirectReferralCount(ancestor);
+            uint256 unlockedGenerations = directReferralCount > 10 ? 10 : directReferralCount;
+            uint256 generation = index + 1;
+
+            if (generation > unlockedGenerations) {
+                continue;
+            }
+
+            uint256 rewardRate = manager.getTeamRewardRate(generation);
+            uint256 dynamicReward = (sourceStaticRewards * rewardRate) / BASIS_POINTS;
+
+            if (dynamicReward == 0) {
+                continue;
+            }
+
+            ancestorInfo.pendingDynamicRewards += dynamicReward;
+            _checkExit(ancestor);
+        }
     }
 
     /**
@@ -230,12 +237,17 @@ contract RewardEngine {
      */
     function _checkExit(address user) internal {
         UserInfo storage userInfo = users[user];
-        USCAMEXManager.RewardConfig memory rewardConfig = manager.rewardConfig();
+        USCAMEXManager.RewardConfig memory rewardConfig = manager.getRewardConfig();
 
-        uint256 totalRewards = userInfo.totalStaticRewards + userInfo.totalDynamicRewards;
+        if (userInfo.depositAmount == 0) {
+            return;
+        }
+
+        uint256 totalRewards = userInfo.pendingStaticRewards + userInfo.pendingDynamicRewards +
+            userInfo.claimedStaticRewards + userInfo.claimedDynamicRewards;
         uint256 exitThreshold = (userInfo.depositAmount * rewardConfig.exitMultiplier) / 100;
 
-        if (totalRewards >= exitThreshold) {
+        if (!userInfo.exited && totalRewards >= exitThreshold) {
             userInfo.exited = true;
             emit Exited(user, totalRewards);
         }
@@ -250,15 +262,20 @@ contract RewardEngine {
      * @return dynamicRewards BNB value of dynamic rewards
      */
     function claim(address user) external onlyToken returns (uint256 staticRewards, uint256 dynamicRewards) {
-        _settleRewards(user);
-
         UserInfo storage userInfo = users[user];
-        staticRewards = userInfo.totalStaticRewards;
-        dynamicRewards = userInfo.totalDynamicRewards;
+
+        if (userInfo.depositAmount > 0 && !userInfo.exited) {
+            _settleRewards(user);
+        }
+
+        staticRewards = userInfo.pendingStaticRewards;
+        dynamicRewards = userInfo.pendingDynamicRewards;
 
         // Reset accumulated rewards after claim
-        userInfo.totalStaticRewards = 0;
-        userInfo.totalDynamicRewards = 0;
+        userInfo.pendingStaticRewards = 0;
+        userInfo.pendingDynamicRewards = 0;
+        userInfo.claimedStaticRewards += staticRewards;
+        userInfo.claimedDynamicRewards += dynamicRewards;
 
         return (staticRewards, dynamicRewards);
     }
@@ -273,7 +290,7 @@ contract RewardEngine {
         UserInfo storage userInfo = users[user];
 
         if (userInfo.depositAmount == 0 || userInfo.exited) {
-            return (0, 0);
+            return (userInfo.pendingStaticRewards, userInfo.pendingDynamicRewards);
         }
 
         uint256 timeSinceLastSettle = block.timestamp - userInfo.lastSettleTime;
@@ -281,12 +298,11 @@ contract RewardEngine {
 
         if (periods > 0) {
             staticRewards = _calculateStaticRewards(user, periods);
-            // Note: Dynamic rewards calculation is complex and gas-intensive, simplified here
         }
 
         // Add already accumulated rewards
-        staticRewards += userInfo.totalStaticRewards;
-        dynamicRewards += userInfo.totalDynamicRewards;
+        staticRewards += userInfo.pendingStaticRewards;
+        dynamicRewards += userInfo.pendingDynamicRewards;
 
         return (staticRewards, dynamicRewards);
     }
@@ -311,10 +327,19 @@ contract RewardEngine {
         UserInfo storage userInfo = users[user];
         return (
             userInfo.depositAmount,
-            userInfo.totalStaticRewards,
-            userInfo.totalDynamicRewards,
+            userInfo.pendingStaticRewards,
+            userInfo.pendingDynamicRewards,
             userInfo.lastSettleTime,
             userInfo.exited
         );
+    }
+
+    function _resetCycle(UserInfo storage userInfo) internal {
+        userInfo.pendingStaticRewards = 0;
+        userInfo.pendingDynamicRewards = 0;
+        userInfo.claimedStaticRewards = 0;
+        userInfo.claimedDynamicRewards = 0;
+        userInfo.lastSettleTime = 0;
+        userInfo.exited = false;
     }
 }

@@ -1,3 +1,7 @@
+import hre from "hardhat";
+
+const { ethers } = hre;
+
 // Test constants for USCAMEX contracts
 
 export const DEFAULT_TAX_CONFIG = {
@@ -41,5 +45,3 @@ export const SETTLEMENT_INTERVAL = 6 * 60 * 60; // 6 hours in seconds
 export const BINDING_TRANSFER_AMOUNT = ethers.parseEther("10"); // Exactly 10 tokens
 
 export const TEAM_REWARD_RATES = [1000, 900, 800, 700, 600, 500, 500, 500, 500, 500];
-
-import { ethers } from "hardhat";

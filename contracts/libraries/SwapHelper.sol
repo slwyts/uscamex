@@ -70,6 +70,37 @@ library SwapHelper {
     }
 
     /**
+     * @dev Sell exact tokens for BNB
+     * @param router PancakeSwap router address
+     * @param token Token address to sell
+     * @param tokenAmount Amount of tokens to sell
+     * @param minBNB Minimum BNB to receive
+     * @param to Recipient address
+     * @return Amount of BNB received
+     */
+    function sellTokensForExactBNB(
+        address router,
+        address token,
+        uint256 tokenAmount,
+        uint256 minBNB,
+        address to
+    ) internal returns (uint256) {
+        address[] memory path = new address[](2);
+        path[0] = token;
+        path[1] = IPancakeRouter02(router).WETH();
+
+        uint256[] memory amounts = IPancakeRouter02(router).swapExactTokensForETH(
+            tokenAmount,
+            minBNB,
+            path,
+            to,
+            block.timestamp + 300
+        );
+
+        return amounts[1];
+    }
+
+    /**
      * @dev Get price of token in BNB (how much BNB for 1 token)
      * @param factory PancakeSwap factory address
      * @param token Token address

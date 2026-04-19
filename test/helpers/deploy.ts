@@ -1,14 +1,9 @@
-import { ethers } from "hardhat";
+import hre from "hardhat";
 import { Contract } from "ethers";
 import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
 import { deployPancakeSwap } from "./pancakeswap";
-import {
-  DEFAULT_TAX_CONFIG,
-  DEFAULT_DEPOSIT_CONFIG,
-  DEFAULT_DEFLATION_CONFIG,
-  DEFAULT_BUYBACK_CONFIG,
-  DEFAULT_REWARD_CONFIG,
-} from "./constants";
+
+const { ethers } = hre;
 
 export interface DeploymentResult {
   token: Contract;
@@ -56,6 +51,9 @@ export async function deployFullSystem(): Promise<DeploymentResult> {
     await router.getAddress()
   );
   await token.waitForDeployment();
+
+  // Authorize token in manager and reward engine
+  await manager.setTokenContract(await token.getAddress());
 
   // Set token contract in reward engine
   await rewardEngine.setTokenContract(await token.getAddress());

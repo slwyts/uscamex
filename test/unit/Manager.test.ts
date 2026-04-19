@@ -1,7 +1,9 @@
 import { expect } from "chai";
-import { ethers } from "hardhat";
+import hre from "hardhat";
 import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
 import { deployFullSystem } from "../helpers/deploy";
+
+const { ethers } = hre;
 
 describe("USCAMEXManager", function () {
   async function deployFixture() {
@@ -179,6 +181,43 @@ describe("USCAMEXManager", function () {
       expect(await manager.getTotalNodeWeight()).to.equal(
         ethers.parseEther("6")
       );
+    });
+
+    it("Should reject token-only node sync methods from non-token callers", async function () {
+      const { manager } = await loadFixture(deployFixture);
+      const [, , , , user] = await ethers.getSigners();
+
+      await expect(
+        manager.connect(user).registerNode(user.address, ethers.parseEther("1"))
+      ).to.be.revertedWith("Not token contract");
+
+      await expect(
+        manager.connect(user).setNodeWeightByToken(user.address, ethers.parseEther("1"))
+      ).to.be.revertedWith("Not token contract");
+
+      await expect(
+        manager.connect(user).removeNodeByToken(user.address)
+      ).to.be.revertedWith("Not token contract");
+    });
+
+    it("Should sync node state through token-driven deposit lifecycle", async function () {
+      const { token, manager } = await loadFixture(deployFixture);
+      const [, , , , user] = await ethers.getSigners();
+
+      await manager.setOperationMode(1);
+
+      await user.sendTransaction({
+        to: await token.getAddress(),
+        value: ethers.parseEther("1"),
+      });
+
+      expect(await manager.isNode(user.address)).to.equal(true);
+      expect(await manager.nodeWeight(user.address)).to.equal(ethers.parseEther("1"));
+
+      await token.connect(user).withdrawMyLP();
+
+      expect(await manager.isNode(user.address)).to.equal(false);
+      expect(await manager.nodeWeight(user.address)).to.equal(0);
     });
   });
 

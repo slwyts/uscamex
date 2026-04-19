@@ -1,5 +1,7 @@
-import { ethers } from "hardhat";
-import { Contract, ContractFactory } from "ethers";
+import hre from "hardhat";
+import { Contract } from "ethers";
+
+const { ethers } = hre;
 
 /**
  * Deploy mock PancakeSwap V2 contracts for testing

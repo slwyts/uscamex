@@ -44,9 +44,22 @@ contract USCAMEX is ERC20, Ownable {
 
     // K value tracking for buy/sell detection
     uint256 private lastK;
+    uint8 private pendingRouterTransferKind;
+    uint256 private pendingRouterTransferAmount;
 
     // Tax exemptions
     mapping(address => bool) public isTaxExempt;
+    mapping(address => uint256) public userLpShares;
+    bool private inSystemTransfer;
+    bool private inAutomation;
+    bool private inSystemRouterOperation;
+
+    // Deferred tax accounting for manual backend processing.
+    uint256 public pendingBuybackTaxTokens;
+    uint256 public pendingEcosystemTaxTokens;
+    uint256 public pendingSellBurnTokens;
+    uint256 public buybackReserve;
+    uint256 public distributedBindingTokens;
 
     // ========== EVENTS ==========
 
@@ -57,6 +70,9 @@ contract USCAMEX is ERC20, Ownable {
     event RewardsClaimed(address indexed user, uint256 tokenAmount);
     event DeflationExecuted(uint256 amount);
     event BuybackExecuted(uint256 bnbAmount, uint256 tokensBurned);
+    event TaxRevenueProcessed(uint256 tokenAmount, uint256 ecosystemBNB, uint256 buybackBNB);
+    event PendingSellBurnSettled(uint256 tokenAmount);
+    event BindingTokensDistributed(address indexed to, uint256 amount);
 
     // ========== CONSTRUCTOR ==========
 
@@ -102,7 +118,6 @@ contract USCAMEX is ERC20, Ownable {
 
         // Create pair
         pair = factory.createPair(address(this), WBNB);
-        isTaxExempt[pair] = true;
         emit PairCreated(pair);
 
         // Approve router
@@ -128,6 +143,10 @@ contract USCAMEX is ERC20, Ownable {
      * @dev Receive BNB - route based on operation mode
      */
     receive() external payable {
+        if (msg.sender == address(router) || msg.sender == WBNB) {
+            return;
+        }
+
         USCAMEXManager.OperationMode mode = manager.operationMode();
 
         if (mode == USCAMEXManager.OperationMode.NODE_SALE) {
@@ -137,6 +156,8 @@ contract USCAMEX is ERC20, Ownable {
         } else {
             revert("Invalid operation mode");
         }
+
+        _runAutomation();
     }
 
     // ========== NODE SALE ==========
@@ -145,7 +166,7 @@ contract USCAMEX is ERC20, Ownable {
         require(msg.value > 0, "No BNB sent");
 
         // Register as node
-        manager.addNode(msg.sender, msg.value);
+        manager.registerNode(msg.sender, msg.value);
 
         emit NodeRegistered(msg.sender, msg.value);
     }
@@ -153,7 +174,7 @@ contract USCAMEX is ERC20, Ownable {
     // ========== DEPOSIT (ADD LP) ==========
 
     function _handleDeposit() internal {
-        USCAMEXManager.DepositConfig memory config = manager.depositConfig();
+        USCAMEXManager.DepositConfig memory config = manager.getDepositConfig();
 
         require(msg.value >= config.minDeposit && msg.value <= config.maxDeposit, "Invalid deposit amount");
 
@@ -164,7 +185,10 @@ contract USCAMEX is ERC20, Ownable {
         uint256 referralAmount = (msg.value * config.directReferralPercentage) / 10000;
 
         // 1. Build LP (60%)
-        _buildLP(lpAmount);
+        uint256 liquidity = _buildLP(lpAmount);
+        if (liquidity > 0) {
+            userLpShares[msg.sender] += liquidity;
+        }
 
         // 2. Distribute to nodes (10%)
         _distributeToNodes(nodeAmount);
@@ -173,23 +197,25 @@ contract USCAMEX is ERC20, Ownable {
         _buyForDividendPool(dividendAmount);
 
         // 4. Send to buyback wallet (10%)
-        payable(manager.buybackWallet()).transfer(buybackAmount);
+        buybackReserve += buybackAmount;
 
         // 5. Direct referral reward (10%)
         _handleDirectReferral(msg.sender, referralAmount);
 
         // Record deposit in reward engine
         rewardEngine.recordDeposit(msg.sender, msg.value);
+        _syncNodeWeight(msg.sender);
 
         emit Deposited(msg.sender, msg.value);
     }
 
-    function _buildLP(uint256 bnbAmount) internal {
+    function _buildLP(uint256 bnbAmount) internal returns (uint256 liquidity) {
         // Split BNB: half for LP, half to buy tokens
         uint256 halfBNB = bnbAmount / 2;
         uint256 otherHalf = bnbAmount - halfBNB;
 
         // Buy tokens with half BNB
+        inSystemRouterOperation = true;
         uint256 tokensBought = SwapHelper.buyTokensWithExactBNB(
             address(router),
             address(this),
@@ -197,10 +223,11 @@ contract USCAMEX is ERC20, Ownable {
             0,
             address(this)
         );
+        inSystemRouterOperation = false;
 
         // Add liquidity
         _approve(address(this), address(router), tokensBought);
-        SwapHelper.addLiquidityBNB(
+        (, , liquidity) = SwapHelper.addLiquidityBNB(
             address(router),
             address(this),
             tokensBought,
@@ -216,8 +243,7 @@ contract USCAMEX is ERC20, Ownable {
         uint256 totalWeight = manager.getTotalNodeWeight();
 
         if (nodes.length == 0 || totalWeight == 0) {
-            // No nodes, send to buyback
-            payable(manager.buybackWallet()).transfer(bnbAmount);
+            buybackReserve += bnbAmount;
             return;
         }
 
@@ -231,21 +257,26 @@ contract USCAMEX is ERC20, Ownable {
     }
 
     function _buyForDividendPool(uint256 bnbAmount) internal {
-        SwapHelper.buyTokensWithExactBNB(
+        inSystemRouterOperation = true;
+        uint256 tokensBought = SwapHelper.buyTokensWithExactBNB(
             address(router),
             address(this),
             bnbAmount,
             0,
-            manager.dividendPool()
+            address(this)
         );
+        inSystemRouterOperation = false;
+
+        if (tokensBought > 0) {
+            _systemTransfer(address(this), manager.dividendPool(), tokensBought);
+        }
     }
 
     function _handleDirectReferral(address user, uint256 bnbAmount) internal {
         address referrer = rewardEngine.getReferrer(user);
 
         if (referrer == address(0) || referrer == address(this)) {
-            // No referrer, send to buyback
-            payable(manager.buybackWallet()).transfer(bnbAmount);
+            buybackReserve += bnbAmount;
         } else {
             // Send to referrer
             payable(referrer).transfer(bnbAmount);
@@ -258,16 +289,27 @@ contract USCAMEX is ERC20, Ownable {
      * @dev Withdraw LP - burns all tokens, returns only BNB
      */
     function withdrawLP(uint256 lpTokens) external {
+        require(lpTokens == userLpShares[msg.sender], "Must withdraw full position");
+        _withdrawPosition(msg.sender, lpTokens);
+        _runAutomation();
+    }
+
+    function withdrawMyLP() external {
+        _withdrawPosition(msg.sender, userLpShares[msg.sender]);
+        _runAutomation();
+    }
+
+    function _withdrawPosition(address user, uint256 lpTokens) internal {
         require(lpTokens > 0, "Invalid amount");
-        require(IERC20(pair).balanceOf(msg.sender) >= lpTokens, "Insufficient LP");
+        require(userLpShares[user] >= lpTokens, "Insufficient LP");
 
-        // Transfer LP tokens to this contract
-        IERC20(pair).transferFrom(msg.sender, address(this), lpTokens);
+        _claimAndTransferRewards(user);
+        userLpShares[user] -= lpTokens;
 
-        // Approve router
+        // Approve router to consume the contract-held LP shares.
         IERC20(pair).approve(address(router), lpTokens);
 
-        // Remove liquidity
+        // Remove liquidity and burn the token side.
         (uint256 tokenAmount, uint256 bnbAmount) = router.removeLiquidityETH(
             address(this),
             lpTokens,
@@ -277,25 +319,45 @@ contract USCAMEX is ERC20, Ownable {
             block.timestamp + 300
         );
 
-        // Burn tokens
         _burn(address(this), tokenAmount);
+        payable(user).transfer(bnbAmount);
 
-        // Return only BNB
-        payable(msg.sender).transfer(bnbAmount);
+        rewardEngine.recordWithdrawal(user);
+        _syncNodeWeight(user);
 
-        // Record withdrawal
-        rewardEngine.recordWithdrawal(msg.sender);
-
-        emit Withdrawn(msg.sender, bnbAmount);
+        emit Withdrawn(user, bnbAmount);
     }
 
     // ========== CLAIM REWARDS ==========
 
     function claimRewards() external {
-        (uint256 staticRewards, uint256 dynamicRewards) = rewardEngine.claim(msg.sender);
+        (uint256 staticRewards, uint256 dynamicRewards) = _claimAndTransferRewards(msg.sender);
+
+        require(staticRewards + dynamicRewards > 0, "No rewards");
+
+        if (rewardEngine.hasExited(msg.sender) && userLpShares[msg.sender] > 0) {
+            _closeExitedPosition(msg.sender);
+        }
+
+        _runAutomation();
+    }
+
+    function processExitedPosition() external {
+        require(rewardEngine.hasExited(msg.sender), "User not exited");
+        require(userLpShares[msg.sender] > 0, "No LP position");
+
+        _claimAndTransferRewards(msg.sender);
+        _closeExitedPosition(msg.sender);
+        _runAutomation();
+    }
+
+    function _claimAndTransferRewards(address user) internal returns (uint256 staticRewards, uint256 dynamicRewards) {
+        (staticRewards, dynamicRewards) = rewardEngine.claim(user);
 
         uint256 totalBNBValue = staticRewards + dynamicRewards;
-        require(totalBNBValue > 0, "No rewards");
+        if (totalBNBValue == 0) {
+            return (0, 0);
+        }
 
         // Convert BNB value to token amount
         uint256 tokenAmount = SwapHelper.getTokenEquivalent(
@@ -304,11 +366,39 @@ contract USCAMEX is ERC20, Ownable {
             WBNB,
             totalBNBValue
         );
+        require(tokenAmount > 0, "Reward price unavailable");
+        require(balanceOf(manager.dividendPool()) >= tokenAmount, "Insufficient dividend pool");
 
-        // Transfer tokens from dividend pool
-        IERC20(address(this)).transferFrom(manager.dividendPool(), msg.sender, tokenAmount);
+        _systemTransfer(manager.dividendPool(), user, tokenAmount);
 
-        emit RewardsClaimed(msg.sender, tokenAmount);
+        emit RewardsClaimed(user, tokenAmount);
+    }
+
+    function _closeExitedPosition(address user) internal {
+        uint256 lpTokens = userLpShares[user];
+        if (lpTokens == 0) {
+            rewardEngine.recordWithdrawal(user);
+            return;
+        }
+
+        userLpShares[user] = 0;
+        IERC20(pair).approve(address(router), lpTokens);
+
+        (uint256 tokenAmount, uint256 bnbAmount) = router.removeLiquidityETH(
+            address(this),
+            lpTokens,
+            0,
+            0,
+            address(this),
+            block.timestamp + 300
+        );
+
+        _burn(address(this), tokenAmount);
+        payable(user).transfer(bnbAmount);
+        rewardEngine.recordWithdrawal(user);
+        _syncNodeWeight(user);
+
+        emit Withdrawn(user, bnbAmount);
     }
 
     // ========== CORE TRANSFER LOGIC ==========
@@ -322,12 +412,46 @@ contract USCAMEX is ERC20, Ownable {
             return;
         }
 
+        if (from == address(0) || to == address(0) || pair == address(0)) {
+            super._update(from, to, amount);
+            return;
+        }
+
+        if (inSystemTransfer) {
+            super._update(from, to, amount);
+            return;
+        }
+
+        if (inSystemRouterOperation && (from == address(router) || to == address(router))) {
+            super._update(from, to, amount);
+            return;
+        }
+
+        if (from == pair && to == address(router)) {
+            _stageRouterTransfer(amount);
+            super._update(from, to, amount);
+            return;
+        }
+
+        if (from == address(router) && to == pair && _isLiquidityAddPairInflow()) {
+            super._update(from, to, amount);
+            _updateKValue();
+            return;
+        }
+
+        if (from == address(router) && pendingRouterTransferAmount > 0) {
+            _settleRouterTransfer(from, to, amount);
+            _updateKValue();
+            return;
+        }
+
         // Check for referral binding (exactly 10 tokens transfer)
         if (amount == BINDING_TRANSFER_AMOUNT && from != address(0) && to != address(0)) {
             if (!_isContract(to) && to != pair && from != pair) {
                 // This is a referral binding transfer
                 rewardEngine.bindReferral(from, to);
                 super._update(from, to, amount);
+                _runAutomation();
                 return;
             }
         }
@@ -345,6 +469,7 @@ contract USCAMEX is ERC20, Ownable {
         if (!isBuy && !isSell) {
             // Normal transfer, no tax
             super._update(from, to, amount);
+            _runAutomation();
             return;
         }
 
@@ -360,7 +485,7 @@ contract USCAMEX is ERC20, Ownable {
     function _handleBuyTax(address from, address to, uint256 amount) internal {
         require(manager.buyEnabled(), "Buy not enabled");
 
-        USCAMEXManager.TaxConfig memory taxConfig = manager.taxConfig();
+        USCAMEXManager.TaxConfig memory taxConfig = manager.getTaxConfig();
 
         // Calculate tax
         uint256 taxAmount = (amount * taxConfig.buyTaxRate) / 10000;
@@ -378,8 +503,7 @@ contract USCAMEX is ERC20, Ownable {
         // For buyback portion, we need BNB, so sell tokens
         if (toBuyback > 0) {
             super._update(from, address(this), toBuyback);
-            // Note: In practice, we'd swap these tokens for BNB and send to buyback wallet
-            // For simplicity in this implementation, we'll keep tokens in contract
+            pendingBuybackTaxTokens += toBuyback;
         }
 
         // Transfer after-tax amount to buyer
@@ -387,11 +511,14 @@ contract USCAMEX is ERC20, Ownable {
     }
 
     function _handleSellTax(address from, address to, uint256 amount) internal {
-        USCAMEXManager.TaxConfig memory taxConfig = manager.taxConfig();
+        USCAMEXManager.TaxConfig memory taxConfig = manager.getTaxConfig();
 
-        // Calculate tax
-        uint256 taxAmount = (amount * taxConfig.sellTaxRate) / 10000;
-        uint256 afterTax = amount - taxAmount;
+        uint256 cappedTaxRate = taxConfig.sellTaxRate > 1000 ? 1000 : taxConfig.sellTaxRate;
+        uint256 taxAmount = (amount * cappedTaxRate) / 10000;
+        uint256 excessTax = taxConfig.sellTaxRate > 1000
+            ? ((amount * (taxConfig.sellTaxRate - 1000)) / 10000)
+            : 0;
+        uint256 afterTax = amount - taxAmount - excessTax;
 
         // Split tax
         uint256 toDividendPool = (taxAmount * taxConfig.sellTaxToDividendPool) / 10000;
@@ -407,77 +534,66 @@ contract USCAMEX is ERC20, Ownable {
         uint256 tokensForBNB = toEcosystem + toBuyback;
         if (tokensForBNB > 0) {
             super._update(from, address(this), tokensForBNB);
+            pendingEcosystemTaxTokens += toEcosystem;
+            pendingBuybackTaxTokens += toBuyback;
         }
 
-        // If sell tax > 10%, excess goes to dead
-        if (taxConfig.sellTaxRate > 1000) {
-            uint256 excessTax = ((taxConfig.sellTaxRate - 1000) * amount) / 10000;
-            if (excessTax > 0) {
-                super._update(from, DEAD_ADDRESS, excessTax);
-            }
+        if (excessTax > 0) {
+            super._update(from, DEAD_ADDRESS, excessTax);
         }
 
-        // Burn remaining tokens after tax (per requirements)
+        // Transfer remaining amount to the pair so the AMM swap can complete.
         if (afterTax > 0) {
-            super._update(from, DEAD_ADDRESS, afterTax);
+            super._update(from, to, afterTax);
+            pendingSellBurnTokens += afterTax;
         }
-
-        // Note: Actual BNB would come from the swap, simplified here
-        super._update(from, to, amount);
     }
 
     // ========== DEFLATION ==========
 
     function executeDeflation() external {
-        USCAMEXManager.DeflationConfig memory config = manager.deflationConfig();
-
-        require(config.enabled, "Deflation not enabled");
-        require(block.timestamp >= lastDeflationTime + 1 hours, "Too soon");
-
-        // Check daily cap
-        uint256 currentDay = block.timestamp / 1 days;
-        if (currentDay > lastDeflationDay) {
-            dailyDeflationAmount = 0;
-            lastDeflationDay = currentDay;
-        }
-
-        (uint256 tokenReserve, ) = SwapHelper.getReserves(address(factory), address(this), WBNB);
-
-        uint256 deflationAmount = (tokenReserve * config.hourlyRate) / 10000;
-        uint256 dailyCapAmount = (tokenReserve * config.dailyCap) / 10000;
-
-        // Check if we've hit daily cap
-        require(dailyDeflationAmount + deflationAmount <= dailyCapAmount, "Daily cap reached");
-
-        // Remove tokens from pair to dividend pool
-        IERC20(address(this)).transferFrom(pair, manager.dividendPool(), deflationAmount);
-
-        // Sync pair
-        IPancakePair(pair).sync();
-
-        dailyDeflationAmount += deflationAmount;
-        lastDeflationTime = block.timestamp;
-
-        emit DeflationExecuted(deflationAmount);
+        require(_executeDeflationInternal(), "Deflation not ready");
     }
 
     // ========== BUYBACK ==========
 
     function executeBuyback() external {
-        USCAMEXManager.BuybackConfig memory config = manager.buybackConfig();
+        require(_executeBuybackInternal(), "Buyback not ready");
+    }
 
-        require(config.active, "Buyback not active");
-        require(block.timestamp >= lastBuybackTime + 1 minutes, "Too soon");
+    function processTaxRevenue() external {
+        require(_processPendingTaxRevenueInternal(), "No pending tax revenue");
+        _executeBuybackInternal();
+    }
 
-        uint256 buybackBalance = address(manager.buybackWallet()).balance;
-        require(buybackBalance >= config.perMinuteAmount, "Insufficient buyback balance");
+    function settlePendingSellBurn(uint256 maxAmount) external {
+        require(_settlePendingSellBurnInternal(maxAmount) > 0, "No pending sell burn");
+    }
 
-        // Note: In practice, we'd call buyback wallet to execute swap
-        // This is simplified - actual implementation would need buyback wallet cooperation
+    function syncSystemState() external {
+        _runAutomation();
+    }
 
-        lastBuybackTime = block.timestamp;
+    function distributeBindingTokens(address to, uint256 amount) external onlyOwner {
+        require(to != address(0), "Invalid recipient");
+        require(amount > 0, "Invalid amount");
+        require(distributedBindingTokens + amount <= BINDING_AMOUNT, "Exceeds binding allocation");
+        require(balanceOf(address(this)) >= amount, "Insufficient token balance");
 
-        emit BuybackExecuted(config.perMinuteAmount, 0);
+        distributedBindingTokens += amount;
+        _systemTransfer(address(this), to, amount);
+
+        emit BindingTokensDistributed(to, amount);
+    }
+
+    function remainingBindingTokens() external view returns (uint256) {
+        return BINDING_AMOUNT - distributedBindingTokens;
+    }
+
+    function withdrawBuybackReserve(uint256 amount) external onlyOwner {
+        require(amount <= buybackReserve, "Amount exceeds reserve");
+        buybackReserve -= amount;
+        payable(manager.buybackWallet()).transfer(amount);
     }
 
     // ========== HELPERS ==========
@@ -495,6 +611,227 @@ contract USCAMEX is ERC20, Ownable {
             size := extcodesize(account)
         }
         return size > 0;
+    }
+
+    function _systemTransfer(address from, address to, uint256 amount) internal {
+        inSystemTransfer = true;
+        super._update(from, to, amount);
+        inSystemTransfer = false;
+    }
+
+    function _stageRouterTransfer(uint256 amount) internal {
+        pendingRouterTransferAmount = amount;
+        pendingRouterTransferKind = _isBuyPairOutflow() ? 1 : 2;
+    }
+
+    function _settleRouterTransfer(address from, address to, uint256 amount) internal {
+        uint8 transferKind = pendingRouterTransferKind;
+        uint256 transferAmount = pendingRouterTransferAmount;
+
+        pendingRouterTransferKind = 0;
+        pendingRouterTransferAmount = 0;
+
+        if (transferKind == 1) {
+            _handleBuyTax(from, to, transferAmount);
+            return;
+        }
+
+        if (transferKind == 2) {
+            if (to == address(this)) {
+                super._update(from, to, transferAmount);
+            } else {
+                super._update(from, DEAD_ADDRESS, transferAmount);
+            }
+            _runAutomation();
+            return;
+        }
+
+        super._update(from, to, amount);
+    }
+
+    function _isBuyPairOutflow() internal view returns (bool) {
+        if (pair == address(0)) {
+            return false;
+        }
+
+        (uint112 reserve0, uint112 reserve1, ) = IPancakePair(pair).getReserves();
+        address token0 = IPancakePair(pair).token0();
+
+        uint256 reserveBNB = token0 == WBNB ? uint256(reserve0) : uint256(reserve1);
+        uint256 currentBNBBalance = IERC20(WBNB).balanceOf(pair);
+
+        return currentBNBBalance > reserveBNB;
+    }
+
+    function _isLiquidityAddPairInflow() internal view returns (bool) {
+        if (pair == address(0)) {
+            return false;
+        }
+
+        (uint112 reserve0, uint112 reserve1, ) = IPancakePair(pair).getReserves();
+        address token0 = IPancakePair(pair).token0();
+
+        uint256 reserveBNB = token0 == WBNB ? uint256(reserve0) : uint256(reserve1);
+        uint256 currentBNBBalance = IERC20(WBNB).balanceOf(pair);
+
+        return currentBNBBalance > reserveBNB;
+    }
+
+    function _syncNodeWeight(address user) internal {
+        (uint256 depositAmount, , , , ) = rewardEngine.getUserInfo(user);
+
+        if (depositAmount == 0) {
+            if (manager.isNode(user)) {
+                manager.removeNodeByToken(user);
+            }
+            return;
+        }
+
+        manager.setNodeWeightByToken(user, depositAmount);
+    }
+
+    function _runAutomation() internal {
+        if (inAutomation || inSystemTransfer || pair == address(0)) {
+            return;
+        }
+
+        inAutomation = true;
+
+        _processPendingTaxRevenueInternal();
+        _settlePendingSellBurnInternal(0);
+        _executeDeflationInternal();
+        _executeBuybackInternal();
+
+        inAutomation = false;
+    }
+
+    function _processPendingTaxRevenueInternal() internal returns (bool processed) {
+        uint256 buybackTokens = pendingBuybackTaxTokens;
+        uint256 ecosystemTokens = pendingEcosystemTaxTokens;
+        uint256 totalTokens = buybackTokens + ecosystemTokens;
+
+        if (totalTokens == 0) {
+            return false;
+        }
+
+        pendingBuybackTaxTokens = 0;
+        pendingEcosystemTaxTokens = 0;
+
+        _approve(address(this), address(router), totalTokens);
+        inSystemRouterOperation = true;
+        uint256 bnbReceived = SwapHelper.sellTokensForExactBNB(
+            address(router),
+            address(this),
+            totalTokens,
+            0,
+            address(this)
+        );
+        inSystemRouterOperation = false;
+
+        uint256 ecosystemBNB = 0;
+        if (ecosystemTokens > 0) {
+            ecosystemBNB = (bnbReceived * ecosystemTokens) / totalTokens;
+            if (ecosystemBNB > 0) {
+                payable(manager.ecosystemFund()).transfer(ecosystemBNB);
+            }
+        }
+
+        uint256 buybackBNB = bnbReceived - ecosystemBNB;
+        if (buybackBNB > 0) {
+            buybackReserve += buybackBNB;
+        }
+
+        emit TaxRevenueProcessed(totalTokens, ecosystemBNB, buybackBNB);
+        return true;
+    }
+
+    function _settlePendingSellBurnInternal(uint256 maxAmount) internal returns (uint256 burnAmount) {
+        if (pendingSellBurnTokens == 0 || pair == address(0)) {
+            return 0;
+        }
+
+        burnAmount = maxAmount == 0 || maxAmount > pendingSellBurnTokens
+            ? pendingSellBurnTokens
+            : maxAmount;
+
+        uint256 availablePairBalance = balanceOf(pair);
+        if (availablePairBalance == 0) {
+            return 0;
+        }
+
+        if (burnAmount > availablePairBalance) {
+            burnAmount = availablePairBalance;
+        }
+
+        pendingSellBurnTokens -= burnAmount;
+        _systemTransfer(pair, DEAD_ADDRESS, burnAmount);
+        IPancakePair(pair).sync();
+
+        emit PendingSellBurnSettled(burnAmount);
+        return burnAmount;
+    }
+
+    function _executeDeflationInternal() internal returns (bool executed) {
+        USCAMEXManager.DeflationConfig memory config = manager.getDeflationConfig();
+
+        if (!config.enabled || block.timestamp < lastDeflationTime + 1 hours) {
+            return false;
+        }
+
+        uint256 currentDay = block.timestamp / 1 days;
+        if (currentDay > lastDeflationDay) {
+            dailyDeflationAmount = 0;
+            lastDeflationDay = currentDay;
+        }
+
+        (uint256 tokenReserve, ) = SwapHelper.getReserves(address(factory), address(this), WBNB);
+        if (tokenReserve == 0) {
+            return false;
+        }
+
+        uint256 deflationAmount = (tokenReserve * config.hourlyRate) / 10000;
+        uint256 dailyCapAmount = (tokenReserve * config.dailyCap) / 10000;
+
+        if (deflationAmount == 0 || dailyDeflationAmount + deflationAmount > dailyCapAmount) {
+            return false;
+        }
+
+        _systemTransfer(pair, manager.dividendPool(), deflationAmount);
+        IPancakePair(pair).sync();
+
+        dailyDeflationAmount += deflationAmount;
+        lastDeflationTime = block.timestamp;
+
+        emit DeflationExecuted(deflationAmount);
+        return true;
+    }
+
+    function _executeBuybackInternal() internal returns (bool executed) {
+        USCAMEXManager.BuybackConfig memory config = manager.getBuybackConfig();
+
+        if (!config.active || block.timestamp < lastBuybackTime + 1 minutes) {
+            return false;
+        }
+
+        if (buybackReserve < config.perMinuteAmount) {
+            return false;
+        }
+
+        buybackReserve -= config.perMinuteAmount;
+        inSystemRouterOperation = true;
+        uint256 tokensBurned = SwapHelper.buyTokensWithExactBNB(
+            address(router),
+            address(this),
+            config.perMinuteAmount,
+            0,
+            DEAD_ADDRESS
+        );
+        inSystemRouterOperation = false;
+
+        lastBuybackTime = block.timestamp;
+
+        emit BuybackExecuted(config.perMinuteAmount, tokensBurned);
+        return true;
     }
 
     // ========== ADMIN FUNCTIONS ==========
