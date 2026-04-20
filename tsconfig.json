@@ -36,6 +36,7 @@
     "cache",
     "typechain-types",
     "test",
+    "scripts",
     "hardhat.config.ts"
   ]
 }

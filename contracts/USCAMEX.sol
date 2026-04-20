@@ -2,7 +2,6 @@
 pragma solidity ^0.8.34;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
 import "./USCAMEXManager.sol";
 import "./RewardEngine.sol";
 import "./SwapReceiver.sol";
@@ -15,7 +14,7 @@ import "./interfaces/IPancakePair.sol";
  * @title USCAMEX
  * @dev Main ERC20 token contract with tax, LP deflation, buyback, and reward mechanisms
  */
-contract USCAMEX is ERC20, Ownable {
+contract USCAMEX is ERC20 {
     using SwapHelper for address;
 
     // ========== CONSTANTS ==========
@@ -76,13 +75,18 @@ contract USCAMEX is ERC20, Ownable {
     event PendingSellBurnSettled(uint256 tokenAmount);
     event BindingTokensDistributed(address indexed to, uint256 amount);
 
+    modifier onlyOwner() {
+        require(msg.sender == owner(), "Not owner");
+        _;
+    }
+
     // ========== CONSTRUCTOR ==========
 
     constructor(
         address _manager,
         address _rewardEngine,
         address _router
-    ) ERC20("USCAMEX", "USCAMEX") Ownable(msg.sender) {
+    ) ERC20("USCAMEX", "USCAMEX") {
         require(_manager != address(0), "Invalid manager");
         require(_rewardEngine != address(0), "Invalid reward engine");
         require(_router != address(0), "Invalid router");
@@ -108,6 +112,10 @@ contract USCAMEX is ERC20, Ownable {
         lastDeflationTime = block.timestamp;
         lastBuybackTime = block.timestamp;
         lastDeflationDay = block.timestamp / 1 days;
+    }
+
+    function owner() public view returns (address) {
+        return manager.owner();
     }
 
     function _sendBNB(address payable to, uint256 amount) internal {
@@ -471,7 +479,7 @@ contract USCAMEX is ERC20, Ownable {
         }
 
         // Tax exempt addresses
-        if (isTaxExempt[from] || isTaxExempt[to]) {
+        if (isTaxExempt[from] || isTaxExempt[to] || from == owner() || to == owner()) {
             super._update(from, to, amount);
             return;
         }
@@ -604,10 +612,11 @@ contract USCAMEX is ERC20, Ownable {
         return BINDING_AMOUNT - distributedBindingTokens;
     }
 
-    function withdrawBuybackReserve(uint256 amount) external onlyOwner {
+    function withdrawBuybackReserve(address payable to, uint256 amount) external onlyOwner {
+        require(to != address(0), "Invalid recipient");
         require(amount <= buybackReserve, "Amount exceeds reserve");
         buybackReserve -= amount;
-        _sendBNB(payable(manager.buybackWallet()), amount);
+        _sendBNB(to, amount);
     }
 
     // ========== HELPERS ==========

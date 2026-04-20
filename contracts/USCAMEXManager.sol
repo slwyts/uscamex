@@ -111,10 +111,12 @@ contract USCAMEXManager is Ownable {
     // ========== CONSTRUCTOR ==========
 
     constructor(
+        address initialOwner,
         address _dividendPool,
         address _ecosystemFund,
         address _buybackWallet
-    ) Ownable(msg.sender) {
+    ) Ownable(initialOwner) {
+        require(initialOwner != address(0), "Invalid owner");
         require(_dividendPool != address(0), "Invalid dividend pool");
         require(_ecosystemFund != address(0), "Invalid ecosystem fund");
         require(_buybackWallet != address(0), "Invalid buyback wallet");

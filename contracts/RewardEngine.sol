@@ -33,7 +33,6 @@ contract RewardEngine {
     uint256 public constant SETTLEMENT_INTERVAL = 6 hours;
     uint256 public constant BASIS_POINTS = 10000;
 
-    address public immutable owner;
     address public tokenContract; // Will be set by token contract
 
     // ========== EVENTS ==========
@@ -46,7 +45,7 @@ contract RewardEngine {
     // ========== MODIFIERS ==========
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "Not owner");
+        require(msg.sender == owner(), "Not owner");
         _;
     }
 
@@ -60,10 +59,10 @@ contract RewardEngine {
     constructor(address _manager) {
         require(_manager != address(0), "Invalid manager");
         manager = USCAMEXManager(_manager);
-        owner = msg.sender;
+    }
 
-        // Owner is the root of referral tree
-        // No need to explicitly set, as owner won't have a referrer
+    function owner() public view returns (address) {
+        return manager.owner();
     }
 
     // ========== SETUP ==========
@@ -83,7 +82,7 @@ contract RewardEngine {
         require(!referralTree.hasReferrer(user), "Already bound");
 
         // Check that referrer has a referrer (unless referrer is owner/root)
-        if (referrer != owner) {
+        if (referrer != owner()) {
             require(
                 referralTree.hasReferrer(referrer),
                 "Referrer must be in tree"

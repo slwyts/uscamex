@@ -1,11 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "./USCAMEXManager.sol";
 
-contract TreasuryVault is Ownable {
-    constructor(address initialOwner) Ownable(initialOwner) {}
+contract TreasuryVault {
+    USCAMEXManager public immutable manager;
+
+    modifier onlyOwner() {
+        require(msg.sender == owner(), "Not owner");
+        _;
+    }
+
+    constructor(address managerAddress) {
+        require(managerAddress != address(0), "Invalid manager");
+        manager = USCAMEXManager(managerAddress);
+    }
+
+    function owner() public view returns (address) {
+        return manager.owner();
+    }
 
     receive() external payable {}
 

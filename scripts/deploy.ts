@@ -9,19 +9,6 @@ const ROUTER_BY_CHAIN_ID: Record<number, string> = {
   97: "0xD99D1c33F9fC3444f8101754aBC46c52416550D1",
 };
 
-function getOptionalAddress(name: string): string | null {
-  const value = process.env[name];
-  if (!value) {
-    return null;
-  }
-
-  if (!ethers.isAddress(value)) {
-    throw new Error(`Missing or invalid ${name}`);
-  }
-
-  return value;
-}
-
 function requireAddress(name: string): string {
   const value = process.env[name];
   if (!value || !ethers.isAddress(value)) {
@@ -88,38 +75,39 @@ async function main() {
   const [deployer] = await ethers.getSigners();
   const { chainId } = await ethers.provider.getNetwork();
 
-  const ecosystemFund = requireAddress("ECOSYSTEM_FUND");
-  const configuredDividendPool = getOptionalAddress("DIVIDEND_POOL");
-  const configuredBuybackWallet = getOptionalAddress("BUYBACK_WALLET");
+  const projectOwner = requireAddress("PROJECT_OWNER");
   const routerAddress = getRouterAddress(Number(chainId));
   const initialLiquidity = getInitialLiquidity();
 
   console.log(`Deploying to network=${network.name}, chainId=${chainId}`);
   console.log(`Deployer=${deployer.address}`);
+  console.log(`ProjectOwner=${projectOwner}`);
   console.log(`Router=${routerAddress}`);
   console.log(`InitialLiquidityBNB=${ethers.formatEther(initialLiquidity)}`);
 
-  const TreasuryVault = await ethers.getContractFactory("TreasuryVault");
-  const dividendPoolVault = configuredDividendPool
-    ? null
-    : await TreasuryVault.deploy(deployer.address);
-  if (dividendPoolVault) {
-    await dividendPoolVault.waitForDeployment();
-  }
-
-  const buybackVault = configuredBuybackWallet
-    ? null
-    : await TreasuryVault.deploy(deployer.address);
-  if (buybackVault) {
-    await buybackVault.waitForDeployment();
-  }
-
-  const dividendPool = configuredDividendPool ?? await dividendPoolVault!.getAddress();
-  const buybackWallet = configuredBuybackWallet ?? await buybackVault!.getAddress();
+  const placeholderWallet = deployer.address;
 
   const Manager = await ethers.getContractFactory("USCAMEXManager");
-  const manager = await Manager.deploy(dividendPool, ecosystemFund, buybackWallet);
+  const manager = await Manager.deploy(projectOwner, placeholderWallet, placeholderWallet, placeholderWallet);
   await manager.waitForDeployment();
+
+  const TreasuryVault = await ethers.getContractFactory("TreasuryVault");
+  const dividendPoolVault = await TreasuryVault.deploy(await manager.getAddress());
+  await dividendPoolVault.waitForDeployment();
+
+  const ecosystemFundVault = await TreasuryVault.deploy(await manager.getAddress());
+  await ecosystemFundVault.waitForDeployment();
+
+  const buybackVault = await TreasuryVault.deploy(await manager.getAddress());
+  await buybackVault.waitForDeployment();
+
+  const dividendPool = await dividendPoolVault.getAddress();
+  const ecosystemFund = await ecosystemFundVault.getAddress();
+  const buybackWallet = await buybackVault.getAddress();
+
+  await (await manager.setDividendPool(dividendPool)).wait();
+  await (await manager.setEcosystemFund(ecosystemFund)).wait();
+  await (await manager.setBuybackWallet(buybackWallet)).wait();
 
   const RewardEngine = await ethers.getContractFactory("RewardEngine");
   const rewardEngine = await RewardEngine.deploy(await manager.getAddress());
@@ -155,8 +143,9 @@ async function main() {
     dividendPool,
     ecosystemFund,
     buybackWallet,
-    autoDeployedDividendPoolVault: dividendPoolVault ? await dividendPoolVault.getAddress() : null,
-    autoDeployedBuybackVault: buybackVault ? await buybackVault.getAddress() : null,
+    autoDeployedDividendPoolVault: dividendPool,
+    autoDeployedEcosystemFundVault: ecosystemFund,
+    autoDeployedBuybackVault: buybackWallet,
     manager: await manager.getAddress(),
     rewardEngine: await rewardEngine.getAddress(),
     token: await token.getAddress(),

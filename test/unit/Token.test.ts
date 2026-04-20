@@ -48,6 +48,25 @@ describe("USCAMEX Token", function () {
       const lpBalance = await pair.balanceOf(await token.getAddress());
       expect(lpBalance).to.be.gt(0);
     });
+
+    it("Should use manager ownership as the single owner source", async function () {
+      const { token, manager, rewardEngine } = await loadFixture(deployFixture);
+      const [, newOwner] = await ethers.getSigners();
+
+      const TreasuryVault = await ethers.getContractFactory("TreasuryVault");
+      const vault = await TreasuryVault.deploy(await manager.getAddress());
+      await vault.waitForDeployment();
+
+      expect(await token.owner()).to.equal(await manager.owner());
+      expect(await rewardEngine.owner()).to.equal(await manager.owner());
+      expect(await vault.owner()).to.equal(await manager.owner());
+
+      await manager.transferOwnership(newOwner.address);
+
+      expect(await token.owner()).to.equal(newOwner.address);
+      expect(await rewardEngine.owner()).to.equal(newOwner.address);
+      expect(await vault.owner()).to.equal(newOwner.address);
+    });
   });
 
   describe("Tax Exemptions", function () {
