@@ -9,6 +9,19 @@ const ROUTER_BY_CHAIN_ID: Record<number, string> = {
   97: "0xD99D1c33F9fC3444f8101754aBC46c52416550D1",
 };
 
+function getOptionalAddress(name: string): string | null {
+  const value = process.env[name];
+  if (!value) {
+    return null;
+  }
+
+  if (!ethers.isAddress(value)) {
+    throw new Error(`Missing or invalid ${name}`);
+  }
+
+  return value;
+}
+
 function requireAddress(name: string): string {
   const value = process.env[name];
   if (!value || !ethers.isAddress(value)) {
@@ -75,9 +88,9 @@ async function main() {
   const [deployer] = await ethers.getSigners();
   const { chainId } = await ethers.provider.getNetwork();
 
-  const dividendPool = requireAddress("DIVIDEND_POOL");
   const ecosystemFund = requireAddress("ECOSYSTEM_FUND");
-  const buybackWallet = requireAddress("BUYBACK_WALLET");
+  const configuredDividendPool = getOptionalAddress("DIVIDEND_POOL");
+  const configuredBuybackWallet = getOptionalAddress("BUYBACK_WALLET");
   const routerAddress = getRouterAddress(Number(chainId));
   const initialLiquidity = getInitialLiquidity();
 
@@ -85,6 +98,24 @@ async function main() {
   console.log(`Deployer=${deployer.address}`);
   console.log(`Router=${routerAddress}`);
   console.log(`InitialLiquidityBNB=${ethers.formatEther(initialLiquidity)}`);
+
+  const TreasuryVault = await ethers.getContractFactory("TreasuryVault");
+  const dividendPoolVault = configuredDividendPool
+    ? null
+    : await TreasuryVault.deploy(deployer.address);
+  if (dividendPoolVault) {
+    await dividendPoolVault.waitForDeployment();
+  }
+
+  const buybackVault = configuredBuybackWallet
+    ? null
+    : await TreasuryVault.deploy(deployer.address);
+  if (buybackVault) {
+    await buybackVault.waitForDeployment();
+  }
+
+  const dividendPool = configuredDividendPool ?? await dividendPoolVault!.getAddress();
+  const buybackWallet = configuredBuybackWallet ?? await buybackVault!.getAddress();
 
   const Manager = await ethers.getContractFactory("USCAMEXManager");
   const manager = await Manager.deploy(dividendPool, ecosystemFund, buybackWallet);
@@ -124,6 +155,8 @@ async function main() {
     dividendPool,
     ecosystemFund,
     buybackWallet,
+    autoDeployedDividendPoolVault: dividendPoolVault ? await dividendPoolVault.getAddress() : null,
+    autoDeployedBuybackVault: buybackVault ? await buybackVault.getAddress() : null,
     manager: await manager.getAddress(),
     rewardEngine: await rewardEngine.getAddress(),
     token: await token.getAddress(),
