@@ -267,7 +267,7 @@ test/
 
 1. **Network**: Designed for BSC (chainId: 56)
 2. **Router**: Uses PancakeSwap V2 Router
-3. **Compiler**: Solidity 0.8.20 with optimizer enabled
+3. **Compiler**: Solidity 0.8.34 with optimizer enabled
 4. **Gas**: All external triggers (deflation, buyback) are gas-paid by caller
 5. **Decimals**: Standard 18 decimals for ERC20
 

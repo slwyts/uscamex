@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.34;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -108,6 +108,11 @@ contract USCAMEX is ERC20, Ownable {
         lastDeflationTime = block.timestamp;
         lastBuybackTime = block.timestamp;
         lastDeflationDay = block.timestamp / 1 days;
+    }
+
+    function _sendBNB(address payable to, uint256 amount) internal {
+        (bool success, ) = to.call{value: amount}("");
+        require(success, "BNB transfer failed");
     }
 
     // ========== SETUP ==========
@@ -259,7 +264,7 @@ contract USCAMEX is ERC20, Ownable {
             uint256 nodeWeight = manager.nodeWeight(nodes[i]);
             uint256 share = (bnbAmount * nodeWeight) / totalWeight;
             if (share > 0) {
-                payable(nodes[i]).transfer(share);
+                _sendBNB(payable(nodes[i]), share);
             }
         }
     }
@@ -288,7 +293,7 @@ contract USCAMEX is ERC20, Ownable {
             buybackReserve += bnbAmount;
         } else {
             // Send to referrer
-            payable(referrer).transfer(bnbAmount);
+            _sendBNB(payable(referrer), bnbAmount);
         }
     }
 
@@ -329,7 +334,7 @@ contract USCAMEX is ERC20, Ownable {
         );
 
         _burn(address(this), tokenAmount);
-        payable(user).transfer(bnbAmount);
+        _sendBNB(payable(user), bnbAmount);
 
         rewardEngine.recordWithdrawal(user);
         _syncNodeWeight(user);
@@ -403,7 +408,7 @@ contract USCAMEX is ERC20, Ownable {
         );
 
         _burn(address(this), tokenAmount);
-        payable(user).transfer(bnbAmount);
+        _sendBNB(payable(user), bnbAmount);
         rewardEngine.recordWithdrawal(user);
         _syncNodeWeight(user);
 
@@ -602,7 +607,7 @@ contract USCAMEX is ERC20, Ownable {
     function withdrawBuybackReserve(uint256 amount) external onlyOwner {
         require(amount <= buybackReserve, "Amount exceeds reserve");
         buybackReserve -= amount;
-        payable(manager.buybackWallet()).transfer(amount);
+        _sendBNB(payable(manager.buybackWallet()), amount);
     }
 
     // ========== HELPERS ==========
@@ -741,7 +746,7 @@ contract USCAMEX is ERC20, Ownable {
         if (ecosystemTokens > 0) {
             ecosystemBNB = (bnbReceived * ecosystemTokens) / totalTokens;
             if (ecosystemBNB > 0) {
-                payable(manager.ecosystemFund()).transfer(ecosystemBNB);
+                _sendBNB(payable(manager.ecosystemFund()), ecosystemBNB);
             }
         }
 
@@ -854,6 +859,6 @@ contract USCAMEX is ERC20, Ownable {
     }
 
     function rescueBNB(uint256 amount) external onlyOwner {
-        payable(owner()).transfer(amount);
+        _sendBNB(payable(owner()), amount);
     }
 }

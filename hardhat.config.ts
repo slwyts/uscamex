@@ -11,11 +11,15 @@ const bscMainnetUrl = process.env.BSC_MAINNET_RPC_URL || "https://bsc-dataseed.b
 
 const config: HardhatUserConfig = {
   solidity: {
-    version: "0.8.20",
+    version: "0.8.34",
     settings: {
       optimizer: {
         enabled: true,
         runs: 200,
+      },
+      viaIR: true,
+      metadata: {
+        bytecodeHash: "none",
       },
     },
   },

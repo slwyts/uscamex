@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.34;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -9,10 +9,15 @@ contract TreasuryVault is Ownable {
 
     receive() external payable {}
 
+    function _sendBNB(address payable to, uint256 amount) internal {
+        (bool success, ) = to.call{value: amount}("");
+        require(success, "BNB transfer failed");
+    }
+
     function withdrawBNB(address payable to, uint256 amount) external onlyOwner {
         require(to != address(0), "Invalid recipient");
         require(address(this).balance >= amount, "Insufficient BNB");
-        to.transfer(amount);
+        _sendBNB(to, amount);
     }
 
     function withdrawToken(address token, address to, uint256 amount) external onlyOwner {

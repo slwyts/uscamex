@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.34;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "../interfaces/IPancakeFactory.sol";
@@ -9,6 +9,11 @@ import "../interfaces/IWBNB.sol";
 contract MockPancakeRouter {
     address public immutable factory;
     address public immutable WETH;
+
+    function _sendBNB(address payable to, uint256 amount) internal {
+        (bool success, ) = to.call{value: amount}("");
+        require(success, "BNB transfer failed");
+    }
 
     constructor(address _factory, address _wbnb) {
         factory = _factory;
@@ -89,7 +94,7 @@ contract MockPancakeRouter {
 
         IERC20(token).transfer(to, amountToken);
         IWBNB(WETH).withdraw(amountETH);
-        payable(to).transfer(amountETH);
+        _sendBNB(payable(to), amountETH);
     }
 
     function swapExactTokensForTokens(
@@ -199,7 +204,7 @@ contract MockPancakeRouter {
         _swapOut(pair, tokenIn, amountOut, address(this));
 
         IWBNB(WETH).withdraw(amountOut);
-        payable(to).transfer(amountOut);
+        _sendBNB(payable(to), amountOut);
     }
 
     function swapETHForExactTokens(

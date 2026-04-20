@@ -58,7 +58,7 @@ importers:
         specifier: ^2.28.6
         version: 2.28.6(ts-node@10.9.2(@types/node@20.19.39)(typescript@5.9.3))(typescript@5.9.3)
       solc:
-        specifier: ^0.8.20
+        specifier: ^0.8.34
         version: 0.8.34
       tailwindcss:
         specifier: ^4
