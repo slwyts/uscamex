@@ -1,16 +1,17 @@
 import hre from "hardhat";
-import { Contract } from "ethers";
 
 const { ethers } = hre;
+
+type ContractLike = any;
 
 /**
  * Deploy mock PancakeSwap V2 contracts for testing
  * Returns factory, router, and WBNB addresses
  */
 export async function deployPancakeSwap(): Promise<{
-  factory: Contract;
-  router: Contract;
-  wbnb: Contract;
+  factory: ContractLike;
+  router: ContractLike;
+  wbnb: ContractLike;
 }> {
   // Deploy WBNB
   const WBNB = await ethers.getContractFactory("MockWBNB");

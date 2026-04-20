@@ -457,6 +457,16 @@ export const tokenAbi = [
   },
   {
     type: "function",
+    name: "withdrawProjectLP",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "to", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
     name: "rescueTokens",
     stateMutability: "nonpayable",
     inputs: [

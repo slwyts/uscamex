@@ -1,8 +1,8 @@
 import { expect } from "chai";
 import hre from "hardhat";
 import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
-import { deployFullSystem, deployWithConfig } from "../helpers/deploy";
-import { increaseTimeOneDay, increaseTimeToNextSettlement } from "../helpers/time";
+import { deployFullSystem, deployWithConfig } from "../helpers/deploy.ts";
+import { increaseTimeOneDay, increaseTimeToNextSettlement } from "../helpers/time.ts";
 
 const { ethers } = hre;
 

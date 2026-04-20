@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import hre from "hardhat";
 import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
-import { deployFullSystem } from "../helpers/deploy";
+import { deployFullSystem } from "../helpers/deploy.ts";
 
 const { ethers } = hre;
 
@@ -47,6 +47,23 @@ describe("USCAMEX Token", function () {
 
       const lpBalance = await pair.balanceOf(await token.getAddress());
       expect(lpBalance).to.be.gt(0);
+    });
+
+    it("Should allow owner to withdraw project LP tokens", async function () {
+      const { token, pair, owner } = await loadFixture(deployFixture);
+      const [, recipient] = await ethers.getSigners();
+
+      const contractAddress = await token.getAddress();
+      const initialLpBalance = await pair.balanceOf(contractAddress);
+      const withdrawAmount = initialLpBalance / 10n;
+
+      await expect(token.withdrawProjectLP(recipient.address, withdrawAmount))
+        .to.emit(token, "ProjectLPWithdrawn")
+        .withArgs(recipient.address, withdrawAmount);
+
+      expect(await pair.balanceOf(contractAddress)).to.equal(initialLpBalance - withdrawAmount);
+      expect(await pair.balanceOf(recipient.address)).to.equal(withdrawAmount);
+      expect(await token.userLpShares(owner.address)).to.equal(0);
     });
 
     it("Should use manager ownership as the single owner source", async function () {

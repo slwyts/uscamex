@@ -1,9 +1,10 @@
 import hre from "hardhat";
-import { Contract } from "ethers";
-import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
-import { deployPancakeSwap } from "./pancakeswap";
+import { deployPancakeSwap } from "./pancakeswap.ts";
 
 const { ethers } = hre;
+
+type ContractLike = any;
+type SignerLike = any;
 
 export const PANCAKE_V2_ROUTER = "0x10ED43C718714eb63d5aA57B78B54704E256024E";
 export const PANCAKE_V2_FACTORY = "0xca143ce32fe78f1f7019d7d551a6402fc5350c73";
@@ -14,14 +15,14 @@ type ManagedVault = {
 };
 
 export interface DeploymentResult {
-  token: Contract;
-  manager: Contract;
-  rewardEngine: Contract;
-  router: Contract;
-  factory: Contract;
-  wbnb: Contract;
-  pair: Contract;
-  owner: SignerWithAddress;
+  token: ContractLike;
+  manager: ContractLike;
+  rewardEngine: ContractLike;
+  router: ContractLike;
+  factory: ContractLike;
+  wbnb: ContractLike;
+  pair: ContractLike;
+  owner: SignerLike;
   dividendPool: ManagedVault;
   ecosystemFund: ManagedVault;
   buybackWallet: ManagedVault;
@@ -29,7 +30,7 @@ export interface DeploymentResult {
 
 async function deployManagementContracts(
   routerAddress: string
-): Promise<Omit<DeploymentResult, "router" | "factory" | "wbnb" | "pair"> & { token: Contract }> {
+): Promise<Omit<DeploymentResult, "router" | "factory" | "wbnb" | "pair"> & { token: ContractLike }> {
   const [owner] = await ethers.getSigners();
 
   const Manager = await ethers.getContractFactory("USCAMEXManager");

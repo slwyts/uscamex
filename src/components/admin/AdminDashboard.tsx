@@ -37,9 +37,11 @@ type Snapshot = {
   managerOwner: Address;
   operationMode: number;
   buyEnabled: boolean;
+  pair: Address;
   dividendPool: Address;
   ecosystemFund: Address;
   buybackWallet: Address;
+  projectLpBalance: bigint;
   dividendPoolBnbBalance: bigint;
   ecosystemFundBnbBalance: bigint;
   buybackWalletBnbBalance: bigint;
@@ -56,6 +58,7 @@ type Snapshot = {
 };
 
 type TreasuryForm = {
+  projectLpAmount: string;
   reserveBnbAmount: string;
   dividendBnbAmount: string;
   dividendTokenAmount: string;
@@ -87,6 +90,7 @@ const initialRuntime: RuntimeConfig = {
 };
 
 const initialTreasuryForm: TreasuryForm = {
+  projectLpAmount: "1000",
   reserveBnbAmount: "0.1",
   dividendBnbAmount: "0.1",
   dividendTokenAmount: "1000",
@@ -103,6 +107,7 @@ const actionWarnings: Record<string, string> = {
   processTaxRevenue: "确认处理待结税收？",
   executeDeflation: "确认立即执行通缩？",
   executeBuyback: "确认立即执行回购？",
+  withdrawProjectLP: "确认提取项目 LP Token？",
   withdrawBuybackReserve: "确认提取回购储备？",
   withdrawVaultBNB: "确认提取金库 BNB？",
   withdrawVaultToken: "确认提取金库 Token？",
@@ -326,6 +331,7 @@ export default function AdminDashboard() {
 
       const managerAddress = normalizeAddress(runtime.managerAddress);
       const tokenAddress = normalizeAddress(runtime.tokenAddress);
+      const pair = await publicClient.readContract({ address: tokenAddress, abi: tokenAbi, functionName: "pair" });
       const dividendPool = await publicClient.readContract({ address: managerAddress, abi: managerAbi, functionName: "dividendPool" });
       const ecosystemFund = await publicClient.readContract({ address: managerAddress, abi: managerAbi, functionName: "ecosystemFund" });
       const buybackWallet = await publicClient.readContract({ address: managerAddress, abi: managerAbi, functionName: "buybackWallet" });
@@ -334,6 +340,7 @@ export default function AdminDashboard() {
         managerOwner,
         operationMode,
         buyEnabled,
+        projectLpBalance,
         dividendPoolBnbBalance,
         ecosystemFundBnbBalance,
         buybackWalletBnbBalance,
@@ -351,6 +358,9 @@ export default function AdminDashboard() {
         publicClient.readContract({ address: managerAddress, abi: managerAbi, functionName: "owner" }),
         publicClient.readContract({ address: managerAddress, abi: managerAbi, functionName: "operationMode" }),
         publicClient.readContract({ address: managerAddress, abi: managerAbi, functionName: "buyEnabled" }),
+        pair === "0x0000000000000000000000000000000000000000"
+          ? Promise.resolve(BigInt(0))
+          : publicClient.readContract({ address: pair, abi: tokenAbi, functionName: "balanceOf", args: [tokenAddress] }),
         publicClient.getBalance({ address: dividendPool }),
         publicClient.getBalance({ address: ecosystemFund }),
         publicClient.getBalance({ address: buybackWallet }),
@@ -370,9 +380,11 @@ export default function AdminDashboard() {
         managerOwner,
         operationMode: Number(operationMode),
         buyEnabled,
+        pair,
         dividendPool,
         ecosystemFund,
         buybackWallet,
+        projectLpBalance,
         dividendPoolBnbBalance,
         ecosystemFundBnbBalance,
         buybackWalletBnbBalance,
@@ -485,6 +497,17 @@ export default function AdminDashboard() {
     await writeToken("withdrawBuybackReserve", [snapshot.managerOwner, amount]);
   }
 
+  async function withdrawProjectLP() {
+    if (!snapshot) {
+      return;
+    }
+
+    if (!confirmAction("withdrawProjectLP")) return;
+    const amount = parseAmount(treasuryForm.projectLpAmount, "LP Token");
+    ensureWithinBalance(amount, snapshot.projectLpBalance, "LP Token");
+    await writeToken("withdrawProjectLP", [snapshot.managerOwner, amount]);
+  }
+
   function getVaultConfig(target: VaultTarget, currentSnapshot: Snapshot) {
     if (target === "dividend") {
       return {
@@ -544,6 +567,16 @@ export default function AdminDashboard() {
   const controlsLocked = !account || !canManage;
   const treasuryRows: TreasuryRow[] = snapshot
     ? [
+        {
+          key: "projectLpAmount",
+          title: "项目 LP Token",
+          source: "主合约持有 LP",
+          asset: "LP Token",
+          available: formatToken(snapshot.projectLpBalance),
+          onSubmit: () => void withdrawProjectLP(),
+          busy: busyAction === "withdrawProjectLP",
+          disabled: controlsLocked || snapshot.pair === "0x0000000000000000000000000000000000000000",
+        },
         {
           key: "reserveBnbAmount",
           title: "回购储备",
@@ -648,6 +681,7 @@ export default function AdminDashboard() {
             <div className="grid gap-3 text-sm text-white/75">
               <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">Owner: {shortAddress(snapshot.managerOwner)}</div>
               <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">买入: {snapshot.buyEnabled ? "开启" : "关闭"}</div>
+              <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">项目 LP: {formatToken(snapshot.projectLpBalance)} LP</div>
               <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">分红池: {formatBnb(snapshot.dividendPoolBnbBalance)} / {formatToken(snapshot.dividendPoolTokenBalance)} USCAMEX</div>
               <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">生态池: {formatBnb(snapshot.ecosystemFundBnbBalance)} / {formatToken(snapshot.ecosystemFundTokenBalance)} USCAMEX</div>
               <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">回购池: {formatBnb(snapshot.buybackWalletBnbBalance)} / {formatToken(snapshot.buybackWalletTokenBalance)} USCAMEX</div>

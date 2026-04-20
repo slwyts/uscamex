@@ -7,7 +7,8 @@ import {
   PANCAKE_V2_ROUTER,
   WBNB_MAINNET,
 } from "../helpers/deploy";
-import { increaseTimeOneHour, increaseTimeOneMinute } from "../helpers/time";
+} from "../helpers/deploy.ts";
+import { increaseTimeOneHour, increaseTimeOneMinute } from "../helpers/time.ts";
 
 const { ethers } = hre;
 

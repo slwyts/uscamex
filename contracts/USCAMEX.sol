@@ -74,6 +74,7 @@ contract USCAMEX is ERC20 {
     event TaxRevenueProcessed(uint256 tokenAmount, uint256 ecosystemBNB, uint256 buybackBNB);
     event PendingSellBurnSettled(uint256 tokenAmount);
     event BindingTokensDistributed(address indexed to, uint256 amount);
+    event ProjectLPWithdrawn(address indexed to, uint256 lpAmount);
 
     modifier onlyOwner() {
         require(msg.sender == owner(), "Not owner");
@@ -617,6 +618,19 @@ contract USCAMEX is ERC20 {
         require(amount <= buybackReserve, "Amount exceeds reserve");
         buybackReserve -= amount;
         _sendBNB(to, amount);
+    }
+
+    function withdrawProjectLP(address to, uint256 amount) external onlyOwner {
+        require(pair != address(0), "Pair not created");
+        require(to != address(0), "Invalid recipient");
+        require(amount > 0, "Invalid amount");
+
+        uint256 lpBalance = IERC20(pair).balanceOf(address(this));
+        require(amount <= lpBalance, "Amount exceeds LP balance");
+
+        IERC20(pair).transfer(to, amount);
+
+        emit ProjectLPWithdrawn(to, amount);
     }
 
     // ========== HELPERS ==========

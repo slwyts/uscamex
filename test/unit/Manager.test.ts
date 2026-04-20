@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import hre from "hardhat";
 import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
-import { deployFullSystem } from "../helpers/deploy";
+import { deployFullSystem } from "../helpers/deploy.ts";
 
 const { ethers } = hre;
 
