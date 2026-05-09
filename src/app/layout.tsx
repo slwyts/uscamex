@@ -18,8 +18,8 @@ export const metadata: Metadata = {
   description:
     "USCAMEX（美加墨）是BNB链上首个预测经济平台，融合梦幻体育、预测市场和流动性交易，开创全新体育经济模式。引领体育进入Web3时代。",
   icons: {
-    icon: "/favicon.svg",
-    apple: "/favicon.svg",
+    icon: "/favicon.png",
+    apple: "/favicon.png",
   },
 };
 

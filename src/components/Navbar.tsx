@@ -28,7 +28,7 @@ export default function Navbar() {
     >
       <div className="flex items-center justify-between rounded-2xl border border-[#f5c842]/20 bg-[#0a0a0f]/90 backdrop-blur-xl px-5 py-3 shadow-[0_0.64px_0.64px_-0.94px_rgba(245,200,66,0.08),0_1.93px_1.93px_-1.88px_rgba(245,200,66,0.06),0_5.11px_5.11px_-2.81px_rgba(0,0,0,0.15),0_16px_16px_-3.75px_rgba(0,0,0,0.06)]">
         <Link href="/" className="flex-shrink-0">
-          <Logo className="h-7 w-auto" />
+          <Logo className="h-12 w-auto" />
         </Link>
 
         {/* Desktop nav */}
