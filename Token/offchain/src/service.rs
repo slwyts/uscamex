@@ -3,10 +3,10 @@ use std::fmt;
 use crate::chain::{submit_pending, ChainClient, SubmitPendingError};
 use crate::engine::{Engine, EngineError};
 use crate::executor::{commands_for_deposit, commands_for_settlement, OperatorCommand};
-use crate::indexer::ChainEvent;
+use crate::indexer::{ChainEvent, IndexedEvent};
 use crate::journal::ExecutionJournal;
 use crate::state::{Address, ProtocolState};
-use crate::storage::{OperatorDatabase, StoredEvent};
+use crate::storage::OperatorDatabase;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceError<ChainError> {
@@ -28,55 +28,6 @@ pub enum EventOutcome {
     Duplicate,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IndexedEvent {
-    pub block_number: u64,
-    pub block_hash: String,
-    pub tx_hash: String,
-    pub log_index: u32,
-    pub event: ChainEvent,
-}
-
-impl IndexedEvent {
-    pub fn id(&self) -> String {
-        self.event.id().to_owned()
-    }
-
-    fn kind(&self) -> &'static str {
-        match self.event {
-            ChainEvent::RefBound { .. } => "RefBound",
-            ChainEvent::Deposit { .. } => "Deposit",
-        }
-    }
-
-    fn payload(&self) -> String {
-        match &self.event {
-            ChainEvent::RefBound { user, referrer, .. } => serde_json::json!({
-                "user": user,
-                "referrer": referrer,
-            })
-            .to_string(),
-            ChainEvent::Deposit { user, amount, .. } => serde_json::json!({
-                "user": user,
-                "amount": amount.to_string(),
-            })
-            .to_string(),
-        }
-    }
-
-    fn stored(&self) -> StoredEvent {
-        StoredEvent {
-            id: self.id(),
-            block_number: self.block_number,
-            block_hash: self.block_hash.clone(),
-            tx_hash: self.tx_hash.clone(),
-            log_index: self.log_index,
-            kind: self.kind().to_owned(),
-            payload: self.payload(),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct OperatorService<D, C> {
     pub engine: Engine,
@@ -90,6 +41,7 @@ impl<D, C> OperatorService<D, C>
 where
     D: OperatorDatabase,
     C: ChainClient,
+    C::Error: fmt::Debug,
 {
     pub fn restore_or_new(engine: Engine, database: D, chain: C, root: impl Into<Address>) -> Self {
         let state = database
@@ -164,10 +116,9 @@ where
     }
 
     pub fn submit_pending(&mut self) -> Result<Vec<String>, ServiceError<C::Error>> {
-        let tx_hashes =
-            submit_pending(&mut self.chain, &mut self.journal).map_err(ServiceError::Submit)?;
+        let result = submit_pending(&mut self.chain, &mut self.journal);
         self.database.save_journal(&self.journal);
-        Ok(tx_hashes)
+        result.map_err(ServiceError::Submit)
     }
 
     fn persist(&mut self) {

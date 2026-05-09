@@ -42,6 +42,7 @@ pub trait OperatorDatabase {
     fn insert_event(&mut self, event: StoredEvent) -> bool;
     fn contains_event(&self, id: &str) -> bool;
     fn record_block(&mut self, block: StoredBlock);
+    fn last_indexed_block(&self) -> Option<StoredBlock>;
     fn is_reorg(&self, block_number: u64, observed_hash: &str) -> bool;
 }
 
@@ -90,6 +91,13 @@ impl OperatorDatabase for MemoryDatabase {
 
     fn record_block(&mut self, block: StoredBlock) {
         self.snapshot.blocks.insert(block.number, block);
+    }
+
+    fn last_indexed_block(&self) -> Option<StoredBlock> {
+        self.snapshot
+            .blocks
+            .last_key_value()
+            .map(|(_, block)| block.clone())
     }
 
     fn is_reorg(&self, block_number: u64, observed_hash: &str) -> bool {
@@ -265,6 +273,22 @@ impl PostgresDatabase {
         Ok(())
     }
 
+    pub fn try_last_indexed_block(&self) -> Result<Option<StoredBlock>, PostgresStorageError> {
+        let row = self.client.borrow_mut().query_opt(
+            "SELECT block_number, block_hash FROM chain_blocks ORDER BY block_number DESC LIMIT 1",
+            &[],
+        )?;
+        row.map(|row| {
+            let number = row.get::<_, i64>(0);
+            Ok(StoredBlock {
+                number: u64::try_from(number)
+                    .map_err(|_| PostgresStorageError::IntegerOutOfRange)?,
+                hash: row.get(1),
+            })
+        })
+        .transpose()
+    }
+
     pub fn try_is_reorg(
         &self,
         block_number: u64,
@@ -344,6 +368,11 @@ impl OperatorDatabase for PostgresDatabase {
             .expect("record indexed block in postgres");
     }
 
+    fn last_indexed_block(&self) -> Option<StoredBlock> {
+        self.try_last_indexed_block()
+            .expect("load last indexed block from postgres")
+    }
+
     fn is_reorg(&self, block_number: u64, observed_hash: &str) -> bool {
         self.try_is_reorg(block_number, observed_hash)
             .expect("check indexed block reorg in postgres")
@@ -415,6 +444,13 @@ mod tests {
             number: 100,
             hash: "0xaaa".into(),
         });
+        assert_eq!(
+            database.last_indexed_block(),
+            Some(StoredBlock {
+                number: 100,
+                hash: "0xaaa".into(),
+            })
+        );
         assert!(!database.is_reorg(100, "0xaaa"));
         assert!(database.is_reorg(100, "0xbbb"));
         assert!(!database.is_reorg(101, "0xccc"));

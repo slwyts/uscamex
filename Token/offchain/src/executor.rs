@@ -29,6 +29,10 @@ pub enum OperatorCommand {
         to: Address,
         amount: u128,
     },
+    BurnTokenByBnbValue {
+        amount: u128,
+        reason: String,
+    },
     ExitPosition {
         user: Address,
         refund_bnb: u128,
@@ -45,6 +49,7 @@ impl OperatorCommand {
             Self::PullPairTokens { .. } => "pull-pair-tokens",
             Self::Buyback { .. } => "buyback",
             Self::PayRewardTokenByBnbValue { .. } => "pay-reward-token",
+            Self::BurnTokenByBnbValue { reason, .. } => reason.as_str(),
             Self::ExitPosition { .. } => "exit-position",
         }
     }
@@ -92,9 +97,14 @@ pub fn commands_for_settlement(settlement: &StaticSettlement) -> Vec<OperatorCom
     }];
     commands.extend(settlement.team_rewards.iter().map(command_for_team_reward));
     if let Some(refund_bnb) = settlement.exit_refund_bnb {
-        commands.push(OperatorCommand::ExitPosition {
-            user: settlement.user.clone(),
-            refund_bnb,
+        commands.push(OperatorCommand::BurnTokenByBnbValue {
+            amount: refund_bnb,
+            reason: "exit-burn".to_owned(),
+        });
+        commands.push(OperatorCommand::TransferBnb {
+            to: settlement.user.clone(),
+            amount: refund_bnb,
+            reason: "exit-refund".to_owned(),
         });
     }
     commands

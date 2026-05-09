@@ -14,6 +14,9 @@ pub struct OperatorSettings {
     pub operator_private_key: String,
     pub confirmations: u64,
     pub indexer_start_block: u64,
+    pub executor_slippage_bps: u16,
+    pub transaction_deadline_seconds: u64,
+    pub burn_address: Address,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +55,17 @@ impl OperatorSettings {
             operator_private_key: required(&mut lookup, "OPERATOR_PRIVATE_KEY")?,
             confirmations: parse_u64(&mut lookup, "CONFIRMATIONS")?,
             indexer_start_block: parse_u64(&mut lookup, "INDEXER_START_BLOCK")?,
+            executor_slippage_bps: optional_u16(&mut lookup, "EXECUTOR_SLIPPAGE_BPS", 500)?,
+            transaction_deadline_seconds: optional_u64(
+                &mut lookup,
+                "TRANSACTION_DEADLINE_SECONDS",
+                600,
+            )?,
+            burn_address: optional_address(
+                &mut lookup,
+                "BURN_ADDRESS",
+                "0x000000000000000000000000000000000000dead",
+            )?,
         };
         settings.validate()?;
         Ok(settings)
@@ -63,6 +77,9 @@ impl OperatorSettings {
         }
         if !looks_like_private_key(&self.operator_private_key) {
             return Err(SettingsError::InvalidPrivateKey);
+        }
+        if self.executor_slippage_bps > 10_000 {
+            return Err(SettingsError::InvalidNumber("EXECUTOR_SLIPPAGE_BPS"));
         }
         Ok(())
     }
@@ -91,6 +108,54 @@ fn parse_address(
     key: &'static str,
 ) -> Result<Address, SettingsError> {
     let value = required(lookup, key)?;
+    if value.len() == 42
+        && value.starts_with("0x")
+        && value[2..].chars().all(|char| char.is_ascii_hexdigit())
+    {
+        Ok(value)
+    } else {
+        Err(SettingsError::InvalidAddress(key))
+    }
+}
+
+fn optional_u64(
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+    key: &'static str,
+    default: u64,
+) -> Result<u64, SettingsError> {
+    match lookup(key) {
+        Some(value) if !value.trim().is_empty() => {
+            value.parse().map_err(|_| SettingsError::InvalidNumber(key))
+        }
+        _ => Ok(default),
+    }
+}
+
+fn optional_u16(
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+    key: &'static str,
+    default: u16,
+) -> Result<u16, SettingsError> {
+    match lookup(key) {
+        Some(value) if !value.trim().is_empty() => {
+            value.parse().map_err(|_| SettingsError::InvalidNumber(key))
+        }
+        _ => Ok(default),
+    }
+}
+
+fn optional_address(
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+    key: &'static str,
+    default: &str,
+) -> Result<Address, SettingsError> {
+    match lookup(key) {
+        Some(value) if !value.trim().is_empty() => validate_address(value, key),
+        _ => validate_address(default.to_owned(), key),
+    }
+}
+
+fn validate_address(value: String, key: &'static str) -> Result<Address, SettingsError> {
     if value.len() == 42
         && value.starts_with("0x")
         && value[2..].chars().all(|char| char.is_ascii_hexdigit())
@@ -147,6 +212,27 @@ mod tests {
         assert_eq!(settings.chain_id, 56);
         assert_eq!(settings.confirmations, 6);
         assert_eq!(settings.admin_http_addr, "127.0.0.1:8787");
+        assert_eq!(settings.executor_slippage_bps, 500);
+        assert_eq!(settings.transaction_deadline_seconds, 600);
+        assert_eq!(
+            settings.burn_address,
+            "0x000000000000000000000000000000000000dead"
+        );
+    }
+
+    #[test]
+    fn settings_accept_executor_overrides() {
+        let mut values = valid_values();
+        values.insert("EXECUTOR_SLIPPAGE_BPS", "250");
+        values.insert("TRANSACTION_DEADLINE_SECONDS", "1200");
+        values.insert("BURN_ADDRESS", "0x000000000000000000000000000000000000dEaD");
+        let settings = OperatorSettings::from_lookup(lookup(values)).unwrap();
+        assert_eq!(settings.executor_slippage_bps, 250);
+        assert_eq!(settings.transaction_deadline_seconds, 1200);
+        assert_eq!(
+            settings.burn_address,
+            "0x000000000000000000000000000000000000dEaD"
+        );
     }
 
     #[test]

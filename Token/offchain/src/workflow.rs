@@ -37,10 +37,17 @@ impl WorkflowEngine {
     ) -> Result<Vec<OperatorCommand>, EngineError> {
         let user = user.into();
         let amount = self.engine.withdraw_lp(state, user.clone())?;
-        Ok(vec![OperatorCommand::ExitPosition {
-            user,
-            refund_bnb: amount,
-        }])
+        Ok(vec![
+            OperatorCommand::BurnTokenByBnbValue {
+                amount,
+                reason: "exit-burn".to_owned(),
+            },
+            OperatorCommand::TransferBnb {
+                to: user,
+                amount,
+                reason: "exit-refund".to_owned(),
+            },
+        ])
     }
 
     pub fn on_tick(
@@ -158,6 +165,7 @@ mod tests {
                     .unwrap(),
             );
         }
-        assert!(commands.iter().any(|command| matches!(command, OperatorCommand::ExitPosition { user, refund_bnb } if user == "alice" && *refund_bnb == BNB)));
+        assert!(commands.iter().any(|command| matches!(command, OperatorCommand::BurnTokenByBnbValue { amount, reason } if *amount == BNB && reason == "exit-burn")));
+        assert!(commands.iter().any(|command| matches!(command, OperatorCommand::TransferBnb { to, amount, reason } if to == "alice" && *amount == BNB && reason == "exit-refund")));
     }
 }

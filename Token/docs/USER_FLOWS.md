@@ -27,7 +27,7 @@
 ## 场景 1：部署与首次 LP
 
 1. 管理员准备 BSC 主网 owner、operator 地址和 Pancake V2 Router。
-2. 部署 `USCAME(router, operator)`，部署者即 owner，也自动作为推荐树 root。
+2. 部署 `USCAME(router, owner, operator)`，显式 owner 自动作为推荐树 root。
 3. 合约构造：发行 10 亿枚到 `address(this)`，部署 Vault，设置 owner/root 已绑定。
 4. owner 向 Token 合约直接转入初始 BNB。
 5. owner 调用 `initializeLP()`。

@@ -107,7 +107,7 @@ contract USCAMETest is MiniTest {
 
     function setUp() public {
         router = new MockRouter();
-        token = new USCAME(address(router), operator);
+        token = new USCAME(address(router), address(this), operator);
         vm.deal(address(this), 100 ether);
         (bool ok,) = payable(address(token)).call{ value: 10 ether }("");
         require(ok, "seed bnb");
@@ -148,7 +148,7 @@ contract USCAMETest is MiniTest {
 
     function testRejectsUnboundDepositAndPreInitUserBnb() public {
         MockRouter freshRouter = new MockRouter();
-        USCAME freshToken = new USCAME(address(freshRouter), operator);
+        USCAME freshToken = new USCAME(address(freshRouter), address(this), operator);
 
         vm.deal(alice, 1 ether);
         vm.prank(alice);

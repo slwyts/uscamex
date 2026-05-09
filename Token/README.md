@@ -37,7 +37,9 @@ cargo test --all
 cargo run
 ```
 
-Database schema for the production operator lives in `offchain/migrations/0001_operator_schema.sql`. The Rust `PostgresDatabase` adapter can run the migration and persist chain events, indexed blocks, protocol state, execution journal, and database-backed business parameters from `DATABASE_URL`. `cargo run` loads the production environment, validates BSC settings, connects to Postgres, runs migrations, initializes default protocol parameters if missing, and prints readiness.
+Database schema for the production operator lives in `offchain/migrations/0001_operator_schema.sql`. The Rust `PostgresDatabase` adapter can run the migration and persist chain events, indexed blocks, protocol state, execution journal, and database-backed business parameters from `DATABASE_URL`. `cargo run` loads the production environment, validates BSC settings, connects to Postgres, runs migrations, initializes default protocol parameters if missing, reads `owner()`, `vault()`, Pair reserves, starts the confirmed-block BSC event scanner, submits supported pending operator commands with the configured private key, waits for receipts, and serves the admin API. Executor safety settings can be adjusted with `EXECUTOR_SLIPPAGE_BPS`, `TRANSACTION_DEADLINE_SECONDS`, and `BURN_ADDRESS`.
+
+The live executor broadcasts direct Token calls (`TransferBnb`, `CreditVault`, `PullPairTokens`) and resolves runtime Pair quotes for `AddLiquidity`, `BuilderBuy`, `Buyback`, reward token payouts, and exit burns before signing transactions. Exits are generated as separate `exit-burn` and `exit-refund` journal commands: the burn command destroys the quoted token amount from the Token contract's own balance, and the refund command transfers BNB to the user. Insufficient contract token or BNB balance fails the specific command instead of silently underpaying.
 
 Admin panel:
 

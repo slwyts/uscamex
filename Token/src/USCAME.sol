@@ -39,18 +39,20 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
 
     constructor(
         address router_,
+        address owner_,
         address operator_
     )
         ERC20("USCAMEX", "USCAME")
-        Ownable(msg.sender)
+        Ownable(owner_)
     {
         require(router_ != address(0), "ROUTER");
+        require(owner_ != address(0), "OWNER_ZERO");
         router = router_;
         vault = address(new BuybackVault(address(this)));
-        root = msg.sender;
-        operator = operator_ == address(0) ? msg.sender : operator_;
+        root = owner_;
+        operator = operator_ == address(0) ? owner_ : operator_;
         referrer[root] = root;
-        feeExempt[msg.sender] = true;
+        feeExempt[owner_] = true;
         feeExempt[address(this)] = true;
         feeExempt[operator] = true;
         _mint(address(this), 1_000_000_000 ether);

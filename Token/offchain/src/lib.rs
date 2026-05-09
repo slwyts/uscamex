@@ -7,6 +7,7 @@ pub mod health;
 pub mod indexer;
 pub mod journal;
 pub mod rpc;
+pub mod runtime;
 pub mod service;
 pub mod settings;
 pub mod state;
