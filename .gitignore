@@ -45,3 +45,9 @@ next-env.d.ts
 artifacts/
 cache/
 typechain-types/
+
+# Token subproject
+/Token/out/
+/Token/cache/
+/Token/broadcast/
+/Token/offchain/target/
