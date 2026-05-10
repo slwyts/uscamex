@@ -292,6 +292,7 @@ impl PostgresDatabase {
             .validate()
             .map_err(|error| PostgresStorageError::Config(error.to_string()))?;
         let payload = serde_json::to_string(config)?;
+        let payload_value: serde_json::Value = serde_json::from_str(&payload)?;
         let payload_hash = config_payload_hash(&payload);
         let block_number_i64 = match block_number {
             Some(value) => Some(to_i64(value)?),
@@ -303,9 +304,9 @@ impl PostgresDatabase {
             .run(move |client| -> Result<bool, PostgresStorageError> {
                 let mut transaction = client.transaction()?;
                 transaction.execute(
-                    "INSERT INTO protocol_config (key, payload, updated_by) VALUES ('current', $1::jsonb, $2) \
+                    "INSERT INTO protocol_config (key, payload, updated_by) VALUES ('current', $1, $2) \
                      ON CONFLICT (key) DO UPDATE SET payload = EXCLUDED.payload, updated_by = EXCLUDED.updated_by, updated_at = now()",
-                    &[&payload, &updated_by],
+                    &[&payload_value, &updated_by],
                 )?;
                 let last = transaction.query_opt(
                     "SELECT payload_hash, tx_hash FROM protocol_config_history ORDER BY id DESC LIMIT 1",
@@ -324,9 +325,9 @@ impl PostgresDatabase {
                 let inserted = if should_insert {
                     transaction.execute(
                         "INSERT INTO protocol_config_history (key, payload, updated_by, block_number, tx_hash, payload_hash) \
-                         VALUES ('current', $1::jsonb, $2, $3, $4, $5)",
+                         VALUES ('current', $1, $2, $3, $4, $5)",
                         &[
-                            &payload,
+                            &payload_value,
                             &updated_by,
                             &block_number_i64,
                             &tx_hash_lower,
@@ -462,6 +463,7 @@ impl PostgresDatabase {
         let block_number = to_i64(event.block_number)?;
         let log_index =
             i32::try_from(event.log_index).map_err(|_| PostgresStorageError::IntegerOutOfRange)?;
+        let payload_value: serde_json::Value = serde_json::from_str(&event.payload)?;
         self.client
             .run(move |client| -> Result<bool, PostgresStorageError> {
                 let mut transaction = client.transaction()?;
@@ -471,7 +473,7 @@ impl PostgresDatabase {
                 )?;
                 let inserted = transaction.execute(
                     "INSERT INTO chain_events (id, block_number, block_hash, tx_hash, log_index, kind, payload) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7) \
                      ON CONFLICT DO NOTHING",
                     &[
                         &event.id,
@@ -480,7 +482,7 @@ impl PostgresDatabase {
                         &event.tx_hash,
                         &log_index,
                         &event.kind,
-                        &event.payload,
+                        &payload_value,
                     ],
                 )?;
                 transaction.commit()?;
@@ -568,11 +570,11 @@ impl PostgresDatabase {
         key: &str,
         value: &T,
     ) -> Result<(), PostgresStorageError> {
-        let payload = serde_json::to_string(value)?;
+        let payload = serde_json::to_value(value)?;
         let key = key.to_string();
         self.client.run(move |client| {
             client.execute(
-                "INSERT INTO operator_snapshots (key, payload) VALUES ($1, $2::jsonb) \
+                "INSERT INTO operator_snapshots (key, payload) VALUES ($1, $2) \
                  ON CONFLICT (key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()",
                 &[&key, &payload],
             )
