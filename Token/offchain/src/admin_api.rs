@@ -215,7 +215,7 @@ pub fn router_with_static(state: AdminApiState) -> Router {
         app = app
             .route("/admin", get(admin_handler.clone()))
             .route("/admin/", get(admin_handler.clone()))
-            .route("/admin/{*path}", get(admin_handler));
+            .route("/admin/*path", get(admin_handler));
     } else {
         println!(
             "operator admin web not mounted: directory {} does not exist (set USCAMEX_ADMIN_DIR)",
