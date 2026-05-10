@@ -1,6 +1,10 @@
 use std::fmt;
 
-use crate::indexer::{deposit_topic, ref_bound_topic, RawLog};
+use crate::config::ProtocolConfig;
+use crate::indexer::{
+    deposit_topic, node_updated_topic, protocol_config_updated_topic, ref_bound_topic, RawLog,
+};
+use crate::state::Node;
 use ethers_core::types::Address;
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +22,13 @@ pub struct PairReserves {
     pub pair: String,
     pub token_reserve: u128,
     pub bnb_reserve: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainProtocolConfig {
+    pub operator: String,
+    pub buy_enabled: bool,
+    pub config: ProtocolConfig,
 }
 
 #[derive(Debug)]
@@ -72,6 +83,71 @@ impl BscRpcClient {
         let data = function_selector("pair()");
         let output = self.eth_call(&data).await?;
         parse_address_word(&output)
+    }
+
+    pub async fn protocol_config(&self) -> Result<ChainProtocolConfig, RpcError> {
+        let output = self
+            .eth_call(&function_selector("getProtocolConfig()"))
+            .await?;
+        let mut team_reward_bps = [0u16; 10];
+        for (index, rate) in team_reward_bps.iter_mut().enumerate() {
+            *rate = parse_u16_word(&output, 15 + index)?;
+        }
+        let config = ProtocolConfig {
+            min_deposit: parse_u128_word(&output, 3)?,
+            max_deposit: parse_u128_word(&output, 4)?,
+            lp_build_bps: parse_u16_word(&output, 6)?,
+            node_bps: parse_u16_word(&output, 7)?,
+            builder_buy_bps: parse_u16_word(&output, 8)?,
+            vault_bps: parse_u16_word(&output, 9)?,
+            direct_pool_bps: parse_u16_word(&output, 10)?,
+            direct_reward_bps: parse_u16_word(&output, 11)?,
+            daily_static_bps: parse_u16_word(&output, 12)?,
+            settlement_periods_per_day: parse_u8_word(&output, 13)?,
+            exit_multiple_bps: parse_u32_word(&output, 14)?,
+            team_reward_bps,
+            deflation_enabled: parse_bool_word(&output, 25)?,
+            deflation_hourly_bps: parse_u16_word(&output, 26)?,
+            deflation_daily_cap_bps: parse_u16_word(&output, 27)?,
+            buyback_enabled: parse_bool_word(&output, 28)?,
+            buyback_per_minute: parse_u128_word(&output, 29)?,
+            buy_tax_bps: parse_u16_word(&output, 1)?,
+            buy_tax_builder_bps: parse_u16_word(&output, 30)?,
+            buy_tax_vault_bps: parse_u16_word(&output, 31)?,
+            sell_tax_bps: parse_u16_word(&output, 2)?,
+            sell_tax_builder_bps: parse_u16_word(&output, 32)?,
+            sell_tax_owner_bps: parse_u16_word(&output, 33)?,
+            sell_tax_vault_bps: parse_u16_word(&output, 34)?,
+        };
+        config
+            .validate()
+            .map_err(|error| RpcError::Rpc(format!("invalid protocol config: {error}")))?;
+        Ok(ChainProtocolConfig {
+            operator: format_address(parse_address_word_at(&output, 0)?),
+            buy_enabled: parse_bool_word(&output, 5)?,
+            config,
+        })
+    }
+
+    pub async fn nodes(&self) -> Result<Vec<Node>, RpcError> {
+        let count_output = self.eth_call(&function_selector("nodeCount()")).await?;
+        let count = usize::try_from(parse_u128_word(&count_output, 0)?)
+            .map_err(|_| RpcError::InvalidHex)?;
+        let mut nodes = Vec::with_capacity(count);
+        for index in 0..count {
+            let data = format!(
+                "{}{}",
+                function_selector("nodeAt(uint256)"),
+                u256_word(index as u128)
+            );
+            let output = self.eth_call(&data).await?;
+            let address = format_address(parse_address_word_at(&output, 0)?);
+            let weight = parse_u32_word(&output, 1)?;
+            if weight != 0 {
+                nodes.push(Node { address, weight });
+            }
+        }
+        Ok(nodes)
     }
 
     pub async fn pair_reserves(&self) -> Result<Option<PairReserves>, RpcError> {
@@ -160,7 +236,12 @@ impl BscRpcClient {
             "address": format_address(self.token_address),
             "fromBlock": hex_quantity(from_block),
             "toBlock": hex_quantity(to_block),
-            "topics": [[ref_bound_topic(), deposit_topic()]],
+            "topics": [[
+                ref_bound_topic(),
+                deposit_topic(),
+                protocol_config_updated_topic(),
+                node_updated_topic(),
+            ]],
         });
         let response = self
             .client
@@ -320,7 +401,42 @@ pub fn parse_address_word(value: &str) -> Result<Address, RpcError> {
     parse_address(&format!("0x{}", &trimmed[24..]))
 }
 
+fn parse_address_word_at(value: &str, index: usize) -> Result<Address, RpcError> {
+    parse_address(&format!("0x{}", &word_at(value, index)?[24..]))
+}
+
 fn parse_u128_word(value: &str, index: usize) -> Result<u128, RpcError> {
+    let word = word_at(value, index)?;
+    if word[..32].chars().any(|char| char != '0') {
+        return Err(RpcError::InvalidHex);
+    }
+    u128::from_str_radix(&word[32..], 16).map_err(|_| RpcError::InvalidHex)
+}
+
+fn parse_u32_word(value: &str, index: usize) -> Result<u32, RpcError> {
+    let value = parse_u128_word(value, index)?;
+    u32::try_from(value).map_err(|_| RpcError::InvalidHex)
+}
+
+fn parse_u16_word(value: &str, index: usize) -> Result<u16, RpcError> {
+    let value = parse_u128_word(value, index)?;
+    u16::try_from(value).map_err(|_| RpcError::InvalidHex)
+}
+
+fn parse_u8_word(value: &str, index: usize) -> Result<u8, RpcError> {
+    let value = parse_u128_word(value, index)?;
+    u8::try_from(value).map_err(|_| RpcError::InvalidHex)
+}
+
+fn parse_bool_word(value: &str, index: usize) -> Result<bool, RpcError> {
+    match parse_u128_word(value, index)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(RpcError::InvalidHex),
+    }
+}
+
+fn word_at(value: &str, index: usize) -> Result<&str, RpcError> {
     let trimmed = value
         .trim()
         .strip_prefix("0x")
@@ -331,10 +447,11 @@ fn parse_u128_word(value: &str, index: usize) -> Result<u128, RpcError> {
     if !word.chars().all(|char| char.is_ascii_hexdigit()) {
         return Err(RpcError::InvalidHex);
     }
-    if word[..32].chars().any(|char| char != '0') {
-        return Err(RpcError::InvalidHex);
-    }
-    u128::from_str_radix(&word[32..], 16).map_err(|_| RpcError::InvalidHex)
+    Ok(word)
+}
+
+fn u256_word(value: u128) -> String {
+    format!("{value:064x}")
 }
 
 pub fn format_address(address: Address) -> String {

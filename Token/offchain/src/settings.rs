@@ -72,7 +72,10 @@ impl OperatorSettings {
     }
 
     pub fn validate(&self) -> Result<(), SettingsError> {
-        if self.chain_id != 56 {
+        // Accept BSC mainnet (56) and BSC testnet (97). Other chain IDs are
+        // rejected so a misconfigured RPC cannot quietly point the operator
+        // at the wrong network.
+        if self.chain_id != 56 && self.chain_id != 97 {
             return Err(SettingsError::WrongChainId);
         }
         if !looks_like_private_key(&self.operator_private_key) {
@@ -236,9 +239,17 @@ mod tests {
     }
 
     #[test]
-    fn settings_reject_wrong_chain() {
+    fn settings_accept_bsc_testnet() {
         let mut values = valid_values();
         values.insert("BSC_CHAIN_ID", "97");
+        let settings = OperatorSettings::from_lookup(lookup(values)).unwrap();
+        assert_eq!(settings.chain_id, 97);
+    }
+
+    #[test]
+    fn settings_reject_wrong_chain() {
+        let mut values = valid_values();
+        values.insert("BSC_CHAIN_ID", "1");
         assert_eq!(
             OperatorSettings::from_lookup(lookup(values)),
             Err(SettingsError::WrongChainId)

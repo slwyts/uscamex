@@ -114,6 +114,26 @@ contract USCAMETest is MiniTest {
         token.initializeLP();
     }
 
+    function configureToken(
+        address nextOperator,
+        uint16 nextBuyTaxBps,
+        uint16 nextSellTaxBps,
+        uint128 nextMinDeposit,
+        uint128 nextMaxDeposit,
+        bool nextBuyEnabled
+    )
+        internal
+    {
+        USCAME.ProtocolConfigInput memory config = token.getProtocolConfig();
+        config.operator = nextOperator;
+        config.buyTaxBps = nextBuyTaxBps;
+        config.sellTaxBps = nextSellTaxBps;
+        config.minDeposit = nextMinDeposit;
+        config.maxDeposit = nextMaxDeposit;
+        config.buyEnabled = nextBuyEnabled;
+        token.setProtocolConfig(config);
+    }
+
     function testInitializesLpOnceWithFullSupply() public {
         address pair = token.pair();
         assertTrue(token.initialized());
@@ -187,49 +207,35 @@ contract USCAMETest is MiniTest {
         assertTrue(!belowMinOk);
     }
 
-    function testSetConfigGuardsAndOperatorRotation() public {
-        bytes memory configCall = abi.encodeWithSignature(
-            "setConfig(address,uint16,uint16,uint128,uint128,bool)",
-            operator,
-            uint16(300),
-            uint16(1000),
-            uint128(0.1 ether),
-            uint128(5 ether),
-            true
-        );
+    function testSetProtocolConfigGuardsAndOperatorRotation() public {
+        USCAME.ProtocolConfigInput memory config = token.getProtocolConfig();
+        config.operator = operator;
+        config.buyTaxBps = 300;
+        config.sellTaxBps = 1000;
+        config.minDeposit = uint128(0.1 ether);
+        config.maxDeposit = uint128(5 ether);
+        config.buyEnabled = true;
+        bytes memory configCall = abi.encodeWithSelector(token.setProtocolConfig.selector, config);
         vm.prank(bob);
         (bool nonOwnerOk,) = address(token).call(configCall);
         assertTrue(!nonOwnerOk);
 
-        (bool badTaxOk,) = address(token)
-            .call(
-                abi.encodeWithSignature(
-                    "setConfig(address,uint16,uint16,uint128,uint128,bool)",
-                    operator,
-                    uint16(2501),
-                    uint16(1000),
-                    uint128(0.1 ether),
-                    uint128(5 ether),
-                    true
-                )
-            );
+        USCAME.ProtocolConfigInput memory badTax = token.getProtocolConfig();
+        badTax.operator = operator;
+        badTax.buyTaxBps = 2501;
+        (bool badTaxOk,) =
+            address(token).call(abi.encodeWithSelector(token.setProtocolConfig.selector, badTax));
         assertTrue(!badTaxOk);
 
+        USCAME.ProtocolConfigInput memory badDeposit = token.getProtocolConfig();
+        badDeposit.operator = operator;
+        badDeposit.minDeposit = uint128(5 ether);
+        badDeposit.maxDeposit = uint128(0.1 ether);
         (bool badDepositOk,) = address(token)
-            .call(
-                abi.encodeWithSignature(
-                    "setConfig(address,uint16,uint16,uint128,uint128,bool)",
-                    operator,
-                    uint16(300),
-                    uint16(1000),
-                    uint128(5 ether),
-                    uint128(0.1 ether),
-                    true
-                )
-            );
+            .call(abi.encodeWithSelector(token.setProtocolConfig.selector, badDeposit));
         assertTrue(!badDepositOk);
 
-        token.setConfig(dave, 300, 1000, 0.2 ether, 4 ether, true);
+        configureToken(dave, 300, 1000, uint128(0.2 ether), uint128(4 ether), true);
         assertEq(token.operator(), dave);
         assertTrue(token.feeExempt(dave));
         assertTrue(!token.feeExempt(operator));
@@ -241,6 +247,69 @@ contract USCAMETest is MiniTest {
         assertTrue(!oldOperatorOk);
         vm.prank(dave);
         token.operatorCall(carol, 0, "");
+    }
+
+    function testFullProtocolConfigAndNodesAreStoredOnChain() public {
+        USCAME.ProtocolConfigInput memory config = token.getProtocolConfig();
+        assertEq(uint256(config.lpBuildBps), 6000);
+        assertEq(uint256(config.nodeBps), 1000);
+        assertEq(uint256(config.teamRewardBps[0]), 1000);
+        assertTrue(config.buybackEnabled);
+
+        config.operator = dave;
+        config.buyTaxBps = 400;
+        config.sellTaxBps = 1200;
+        config.minDeposit = uint128(0.2 ether);
+        config.maxDeposit = uint128(4 ether);
+        config.buyEnabled = true;
+        config.lpBuildBps = 5000;
+        config.nodeBps = 1500;
+        config.builderBuyBps = 1000;
+        config.vaultBps = 1500;
+        config.directPoolBps = 1000;
+        config.directRewardBps = 800;
+        config.dailyStaticBps = 90;
+        config.settlementPeriodsPerDay = 6;
+        config.exitMultipleBps = 40_000;
+        config.teamRewardBps[0] = 1100;
+        config.deflationEnabled = false;
+        config.deflationHourlyBps = 20;
+        config.deflationDailyCapBps = 300;
+        config.buybackEnabled = false;
+        config.buybackPerMinute = uint128(0.2 ether);
+        config.buyTaxBuilderBps = 150;
+        config.buyTaxVaultBps = 250;
+        config.sellTaxBuilderBps = 400;
+        config.sellTaxOwnerBps = 400;
+        config.sellTaxVaultBps = 400;
+
+        token.setProtocolConfig(config);
+        assertEq(token.operator(), dave);
+        assertEq(uint256(token.buyTaxBps()), 400);
+        assertEq(uint256(token.sellTaxBps()), 1200);
+        assertEq(uint256(token.minDeposit()), 0.2 ether);
+        assertEq(uint256(token.maxDeposit()), 4 ether);
+        assertTrue(token.buyEnabled());
+        assertEq(uint256(token.lpBuildBps()), 5000);
+        assertEq(uint256(token.nodeBps()), 1500);
+        assertEq(uint256(token.dailyStaticBps()), 90);
+        assertEq(uint256(token.settlementPeriodsPerDay()), 6);
+        assertEq(uint256(token.exitMultipleBps()), 40_000);
+        assertEq(uint256(token.teamRewardBps(0)), 1100);
+        assertTrue(!token.deflationEnabled());
+        assertTrue(!token.buybackEnabled());
+        assertEq(uint256(token.buybackPerMinute()), 0.2 ether);
+
+        token.setNode(alice, 2);
+        token.setNode(bob, 3);
+        assertEq(token.nodeCount(), 2);
+        (address firstNode, uint32 firstWeight) = token.nodeAt(0);
+        assertEq(firstNode, alice);
+        assertEq(uint256(firstWeight), 2);
+        assertEq(uint256(token.nodeWeight(bob)), 3);
+        token.setNode(alice, 0);
+        assertEq(token.nodeCount(), 1);
+        assertEq(uint256(token.nodeWeight(alice)), 0);
     }
 
     function testOwnershipTransferMovesRootToNewOwner() public {
@@ -259,7 +328,7 @@ contract USCAMETest is MiniTest {
         vm.expectRevert(bytes("BUY_OFF"));
         MockPair(payable(pair)).buy(alice, 100 ether);
 
-        token.setConfig(operator, 300, 1000, 0.1 ether, 5 ether, true);
+        configureToken(operator, 300, 1000, uint128(0.1 ether), uint128(5 ether), true);
         uint256 reserveBefore = token.balanceOf(address(token));
         MockPair(payable(pair)).buy(alice, 100 ether);
         assertEq(token.balanceOf(alice), 97 ether);

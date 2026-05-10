@@ -9,6 +9,36 @@ import { IPancakeFactory, IPancakePair, IPancakeRouter } from "./interfaces/IPan
 
 contract USCAME is ERC20, Ownable, ReentrancyGuard {
     uint256 public constant BPS = 10_000;
+
+    struct ProtocolConfigInput {
+        address operator;
+        uint16 buyTaxBps;
+        uint16 sellTaxBps;
+        uint128 minDeposit;
+        uint128 maxDeposit;
+        bool buyEnabled;
+        uint16 lpBuildBps;
+        uint16 nodeBps;
+        uint16 builderBuyBps;
+        uint16 vaultBps;
+        uint16 directPoolBps;
+        uint16 directRewardBps;
+        uint16 dailyStaticBps;
+        uint8 settlementPeriodsPerDay;
+        uint32 exitMultipleBps;
+        uint16[10] teamRewardBps;
+        bool deflationEnabled;
+        uint16 deflationHourlyBps;
+        uint16 deflationDailyCapBps;
+        bool buybackEnabled;
+        uint128 buybackPerMinute;
+        uint16 buyTaxBuilderBps;
+        uint16 buyTaxVaultBps;
+        uint16 sellTaxBuilderBps;
+        uint16 sellTaxOwnerBps;
+        uint16 sellTaxVaultBps;
+    }
+
     address public immutable router;
     address public immutable vault;
     address public operator;
@@ -20,8 +50,31 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     uint16 public sellTaxBps = 1000;
     uint128 public minDeposit = 0.1 ether;
     uint128 public maxDeposit = 5 ether;
+    uint16 public lpBuildBps = 6000;
+    uint16 public nodeBps = 1000;
+    uint16 public builderBuyBps = 1000;
+    uint16 public vaultBps = 1000;
+    uint16 public directPoolBps = 1000;
+    uint16 public directRewardBps = 1000;
+    uint16 public dailyStaticBps = 80;
+    uint8 public settlementPeriodsPerDay = 4;
+    uint32 public exitMultipleBps = 30_000;
+    uint16[10] public teamRewardBps;
+    bool public deflationEnabled = true;
+    uint16 public deflationHourlyBps = 10;
+    uint16 public deflationDailyCapBps = 200;
+    bool public buybackEnabled = true;
+    uint128 public buybackPerMinute = 0.1 ether;
+    uint16 public buyTaxBuilderBps = 100;
+    uint16 public buyTaxVaultBps = 200;
+    uint16 public sellTaxBuilderBps = 300;
+    uint16 public sellTaxOwnerBps = 300;
+    uint16 public sellTaxVaultBps = 400;
     mapping(address => address) public referrer;
     mapping(address => bool) public feeExempt;
+    mapping(address => uint32) public nodeWeight;
+    mapping(address => uint256) private nodeIndexPlusOne;
+    address[] private nodes;
 
     event PairInitialized(address indexed pair, uint256 tokenAmount, uint256 bnbAmount);
     event RefBound(address indexed user, address indexed referrer);
@@ -31,6 +84,8 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     event PairTokensPulled(uint256 amount, uint16 bps);
     event TreasuryFunded(address indexed from, uint256 amount);
     event VaultCreated(address indexed vault);
+    event ProtocolConfigUpdated(address indexed operator);
+    event NodeUpdated(address indexed node, uint32 weight);
 
     modifier onlyOperator() {
         require(msg.sender == owner() || msg.sender == operator, "OPERATOR");
@@ -51,6 +106,16 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         vault = address(new BuybackVault(address(this)));
         root = owner_;
         operator = operator_ == address(0) ? owner_ : operator_;
+        teamRewardBps[0] = 1000;
+        teamRewardBps[1] = 900;
+        teamRewardBps[2] = 800;
+        teamRewardBps[3] = 700;
+        teamRewardBps[4] = 600;
+        teamRewardBps[5] = 500;
+        teamRewardBps[6] = 500;
+        teamRewardBps[7] = 500;
+        teamRewardBps[8] = 500;
+        teamRewardBps[9] = 500;
         referrer[root] = root;
         feeExempt[owner_] = true;
         feeExempt[address(this)] = true;
@@ -96,29 +161,101 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         super.transferOwnership(nextOwner);
     }
 
-    function setConfig(
-        address nextOperator,
-        uint16 nextBuyTaxBps,
-        uint16 nextSellTaxBps,
-        uint128 nextMinDeposit,
-        uint128 nextMaxDeposit,
-        bool nextBuyEnabled
-    )
-        external
-        onlyOwner
-    {
-        require(nextBuyTaxBps <= 2500 && nextSellTaxBps <= 2500, "TAX");
-        require(nextMinDeposit <= nextMaxDeposit, "DEPOSIT");
-        if (nextOperator != address(0) && nextOperator != operator) {
-            if (operator != owner()) feeExempt[operator] = false;
-            operator = nextOperator;
-            feeExempt[nextOperator] = true;
+    function setProtocolConfig(ProtocolConfigInput calldata next) external onlyOwner {
+        _validateProtocolConfig(next);
+        _setOperator(next.operator);
+        buyTaxBps = next.buyTaxBps;
+        sellTaxBps = next.sellTaxBps;
+        minDeposit = next.minDeposit;
+        maxDeposit = next.maxDeposit;
+        buyEnabled = next.buyEnabled;
+        lpBuildBps = next.lpBuildBps;
+        nodeBps = next.nodeBps;
+        builderBuyBps = next.builderBuyBps;
+        vaultBps = next.vaultBps;
+        directPoolBps = next.directPoolBps;
+        directRewardBps = next.directRewardBps;
+        dailyStaticBps = next.dailyStaticBps;
+        settlementPeriodsPerDay = next.settlementPeriodsPerDay;
+        exitMultipleBps = next.exitMultipleBps;
+        for (uint256 index = 0; index < 10; ++index) {
+            teamRewardBps[index] = next.teamRewardBps[index];
         }
-        buyTaxBps = nextBuyTaxBps;
-        sellTaxBps = nextSellTaxBps;
-        minDeposit = nextMinDeposit;
-        maxDeposit = nextMaxDeposit;
-        buyEnabled = nextBuyEnabled;
+        deflationEnabled = next.deflationEnabled;
+        deflationHourlyBps = next.deflationHourlyBps;
+        deflationDailyCapBps = next.deflationDailyCapBps;
+        buybackEnabled = next.buybackEnabled;
+        buybackPerMinute = next.buybackPerMinute;
+        buyTaxBuilderBps = next.buyTaxBuilderBps;
+        buyTaxVaultBps = next.buyTaxVaultBps;
+        sellTaxBuilderBps = next.sellTaxBuilderBps;
+        sellTaxOwnerBps = next.sellTaxOwnerBps;
+        sellTaxVaultBps = next.sellTaxVaultBps;
+        emit ProtocolConfigUpdated(operator);
+    }
+
+    function getProtocolConfig() external view returns (ProtocolConfigInput memory config) {
+        config.operator = operator;
+        config.buyTaxBps = buyTaxBps;
+        config.sellTaxBps = sellTaxBps;
+        config.minDeposit = minDeposit;
+        config.maxDeposit = maxDeposit;
+        config.buyEnabled = buyEnabled;
+        config.lpBuildBps = lpBuildBps;
+        config.nodeBps = nodeBps;
+        config.builderBuyBps = builderBuyBps;
+        config.vaultBps = vaultBps;
+        config.directPoolBps = directPoolBps;
+        config.directRewardBps = directRewardBps;
+        config.dailyStaticBps = dailyStaticBps;
+        config.settlementPeriodsPerDay = settlementPeriodsPerDay;
+        config.exitMultipleBps = exitMultipleBps;
+        for (uint256 index = 0; index < 10; ++index) {
+            config.teamRewardBps[index] = teamRewardBps[index];
+        }
+        config.deflationEnabled = deflationEnabled;
+        config.deflationHourlyBps = deflationHourlyBps;
+        config.deflationDailyCapBps = deflationDailyCapBps;
+        config.buybackEnabled = buybackEnabled;
+        config.buybackPerMinute = buybackPerMinute;
+        config.buyTaxBuilderBps = buyTaxBuilderBps;
+        config.buyTaxVaultBps = buyTaxVaultBps;
+        config.sellTaxBuilderBps = sellTaxBuilderBps;
+        config.sellTaxOwnerBps = sellTaxOwnerBps;
+        config.sellTaxVaultBps = sellTaxVaultBps;
+    }
+
+    function setNode(address node, uint32 weight) external onlyOwner {
+        require(node != address(0), "NODE");
+        uint256 indexPlusOne = nodeIndexPlusOne[node];
+        if (weight == 0) {
+            if (indexPlusOne != 0) {
+                uint256 index = indexPlusOne - 1;
+                address lastNode = nodes[nodes.length - 1];
+                nodes[index] = lastNode;
+                nodeIndexPlusOne[lastNode] = index + 1;
+                nodes.pop();
+                delete nodeIndexPlusOne[node];
+                delete nodeWeight[node];
+            }
+            emit NodeUpdated(node, 0);
+            return;
+        }
+        if (indexPlusOne == 0) {
+            nodes.push(node);
+            nodeIndexPlusOne[node] = nodes.length;
+        }
+        nodeWeight[node] = weight;
+        emit NodeUpdated(node, weight);
+    }
+
+    function nodeCount() external view returns (uint256) {
+        return nodes.length;
+    }
+
+    function nodeAt(uint256 index) external view returns (address node, uint32 weight) {
+        node = nodes[index];
+        weight = nodeWeight[node];
     }
 
     function operatorCall(
@@ -203,5 +340,43 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         require(nextReferrer == root || referrer[nextReferrer] != address(0), "REF");
         referrer[user] = nextReferrer;
         emit RefBound(user, nextReferrer);
+    }
+
+    function _setOperator(address nextOperator) internal {
+        require(nextOperator != address(0), "OPERATOR_ZERO");
+        if (nextOperator == operator) return;
+        if (operator != owner()) feeExempt[operator] = false;
+        operator = nextOperator;
+        feeExempt[nextOperator] = true;
+    }
+
+    function _validateProtocolConfig(ProtocolConfigInput calldata next) internal pure {
+        require(next.operator != address(0), "OPERATOR_ZERO");
+        require(next.buyTaxBps <= 2500 && next.sellTaxBps <= 2500, "TAX");
+        require(next.minDeposit <= next.maxDeposit, "DEPOSIT");
+        uint256 distributionTotal = uint256(next.lpBuildBps) + uint256(next.nodeBps)
+            + uint256(next.builderBuyBps) + uint256(next.vaultBps) + uint256(next.directPoolBps);
+        require(
+            distributionTotal <= BPS && next.directRewardBps <= next.directPoolBps, "DISTRIBUTION"
+        );
+        require(next.settlementPeriodsPerDay != 0, "PERIODS");
+        require(next.exitMultipleBps != 0, "EXIT");
+        require(
+            next.deflationHourlyBps <= next.deflationDailyCapBps
+                && next.deflationDailyCapBps <= BPS,
+            "DEFLATION"
+        );
+        require(
+            uint256(next.buyTaxBuilderBps) + uint256(next.buyTaxVaultBps) <= next.buyTaxBps,
+            "BUY_SPLIT"
+        );
+        require(
+            uint256(next.sellTaxBuilderBps) + uint256(next.sellTaxOwnerBps)
+                    + uint256(next.sellTaxVaultBps) <= next.sellTaxBps,
+            "SELL_SPLIT"
+        );
+        for (uint256 index = 0; index < 10; ++index) {
+            require(next.teamRewardBps[index] <= BPS, "TEAM");
+        }
     }
 }

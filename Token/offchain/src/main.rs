@@ -12,9 +12,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = OperatorSettings::from_env()?;
     let admin_database = PostgresDatabase::connect(&settings.database_url)?;
     admin_database.run_migrations()?;
-    let config = admin_database.ensure_protocol_config()?;
 
     let runtime_rpc = BscRpcClient::new(&settings.bsc_rpc_url, &settings.token_address)?;
+    let chain_config = runtime_rpc.protocol_config().await?;
+    admin_database.try_save_protocol_config(&chain_config.config, "chain")?;
     let owner = format_address(runtime_rpc.owner().await?);
     let vault = format_address(runtime_rpc.vault().await?);
     let runtime_database = PostgresDatabase::connect(&settings.database_url)?;
@@ -34,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings.confirmations,
     )?;
     let service = OperatorService::restore_or_new(
-        Engine::new(config),
+        Engine::new(chain_config.config),
         runtime_database,
         chain,
         owner.clone(),
@@ -43,12 +44,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut runtime = OperatorRuntime::new(service, runtime_rpc, scan_config);
 
     println!(
-        "operator ready: chain_id={} token={} router={} owner={} vault={} start_block={} confirmations={}",
+        "operator ready: chain_id={} token={} router={} owner={} vault={} config_operator={} buy_enabled={} start_block={} confirmations={}",
         settings.chain_id,
         settings.token_address,
         settings.pancake_v2_router,
         owner,
         vault,
+        chain_config.operator,
+        chain_config.buy_enabled,
         settings.indexer_start_block,
         settings.confirmations
     );

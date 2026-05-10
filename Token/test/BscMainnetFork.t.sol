@@ -112,22 +112,19 @@ contract BscMainnetForkFlow {
         require(ok, "rebinding-zero-transfer-should-not-revert");
         require(fresh.referrer(USER) == REFERRER, "referrer-immutable");
 
+        USCAME.ProtocolConfigInput memory config = fresh.getProtocolConfig();
+        config.operator = OPERATOR;
+        config.buyTaxBps = 300;
+        config.sellTaxBps = 1000;
+        config.minDeposit = uint128(0.2 ether);
+        config.maxDeposit = uint128(4 ether);
+        config.buyEnabled = true;
         vm.prank(ATTACKER);
-        (ok,) = address(fresh)
-            .call(
-                abi.encodeWithSignature(
-                    "setConfig(address,uint16,uint16,uint128,uint128,bool)",
-                    OPERATOR,
-                    uint16(300),
-                    uint16(1000),
-                    uint128(0.2 ether),
-                    uint128(4 ether),
-                    true
-                )
-            );
+        (ok,) =
+            address(fresh).call(abi.encodeWithSelector(fresh.setProtocolConfig.selector, config));
         require(!ok, "non-owner-config");
 
-        fresh.setConfig(OPERATOR, 300, 1000, 0.2 ether, 4 ether, true);
+        configureToken(fresh, OPERATOR, 300, 1000, uint128(0.2 ether), uint128(4 ether), true);
         vm.deal(USER, 6 ether);
         vm.prank(USER);
         (ok,) = payable(address(fresh)).call{ value: 0.1 ether }("");
@@ -189,7 +186,7 @@ contract BscMainnetForkFlow {
         );
         require(!ok, "buy-disabled");
 
-        token.setConfig(OPERATOR, 300, 1000, 0.1 ether, 5 ether, true);
+        configureToken(token, OPERATOR, 300, 1000, uint128(0.1 ether), uint128(5 ether), true);
         uint256 contractTokenBeforeBuy = token.balanceOf(address(token));
         vm.prank(USER);
         router.swapExactETHForTokensSupportingFeeOnTransferTokens{ value: 0.1 ether }(
@@ -219,7 +216,7 @@ contract BscMainnetForkFlow {
         if (!forkBsc()) return;
 
         USCAME token = deployInitializedToken();
-        token.setConfig(OPERATOR, 300, 1000, 0.1 ether, 5 ether, true);
+        configureToken(token, OPERATOR, 300, 1000, uint128(0.1 ether), uint128(5 ether), true);
         vm.deal(USER, 2 ether);
         vm.prank(USER);
         require(token.transfer(address(this), 0), "bind");
@@ -277,6 +274,27 @@ contract BscMainnetForkFlow {
         (bool ok,) = payable(address(token)).call{ value: INITIAL_LP_BNB }("");
         require(ok, "seed-bnb");
         token.initializeLP();
+    }
+
+    function configureToken(
+        USCAME token,
+        address nextOperator,
+        uint16 nextBuyTaxBps,
+        uint16 nextSellTaxBps,
+        uint128 nextMinDeposit,
+        uint128 nextMaxDeposit,
+        bool nextBuyEnabled
+    )
+        internal
+    {
+        USCAME.ProtocolConfigInput memory config = token.getProtocolConfig();
+        config.operator = nextOperator;
+        config.buyTaxBps = nextBuyTaxBps;
+        config.sellTaxBps = nextSellTaxBps;
+        config.minDeposit = nextMinDeposit;
+        config.maxDeposit = nextMaxDeposit;
+        config.buyEnabled = nextBuyEnabled;
+        token.setProtocolConfig(config);
     }
 
     function pairReserves(USCAME token)

@@ -26,8 +26,8 @@
 - `forge test --match-contract BscMainnetForkFlow -vvv --fork-url "$BSC_RPC_URL"` 通过。
 - Rust full-flow simulation 通过：`cargo test --all`。
 - operator 数据库迁移已执行：`offchain/migrations/0001_operator_schema.sql`。
-- operator 首次启动已自动初始化数据库业务参数，管理后台可读取并保存 `/api/admin/config`。
-- operator HTTP 管理接口已启动，管理员面板可通过 owner 签名读取 `/api/admin/overview`。
+- operator 首次启动已从 Token 合约读取业务参数和节点列表，并写入数据库快照。
+- operator HTTP 管理接口已启动，管理员面板直接通过钱包读写 Token 合约配置。
 - BSC fork 中 `initializeLP()` 使用真实 Pancake Router 创建 Pair 成功。
 - 非 owner 无法初始化 LP，非 operator 无法执行 `operatorCall` 和 `pullPairTokens`。
 
@@ -36,7 +36,7 @@
 - indexer 从部署区块开始回放，`RefBound` 和 `Deposit` 事件幂等。
 - 每个业务批次使用稳定 key，例如 `deposit:{tx_hash}:{log_index}`、`static:{user}:{period}`。
 - `ExecutionJournal` 能记录 Pending、Submitted、Confirmed、Failed。
-- 业务参数以数据库当前配置为准，修改必须通过 owner 签名的管理后台保存，并写入配置历史。
+- 业务参数以 Token 合约当前配置为准，修改必须通过 owner 钱包提交链上交易。
 - 服务重启后只重试 Failed/Pending，不重发 Confirmed。
 - 部分命令成功时，下一轮只补未完成命令。
 - 区块回滚时，已进入未确认窗口的事件需要重新校验 receipt。

@@ -5,9 +5,31 @@ use std::fmt;
 use crate::config::ProtocolConfig;
 use crate::journal::ExecutionJournal;
 use crate::state::ProtocolState;
+use ethers_core::utils::keccak256;
 use postgres::{Client, NoTls};
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigHistoryEntry {
+    pub id: i64,
+    pub payload: ProtocolConfig,
+    pub updated_by: String,
+    pub created_at: String,
+    pub block_number: Option<i64>,
+    pub tx_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeHistoryEntry {
+    pub id: i64,
+    pub node_address: String,
+    pub weight: i64,
+    pub block_number: Option<i64>,
+    pub tx_hash: Option<String>,
+    pub updated_by: String,
+    pub created_at: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredEvent {
@@ -44,6 +66,29 @@ pub trait OperatorDatabase {
     fn record_block(&mut self, block: StoredBlock);
     fn last_indexed_block(&self) -> Option<StoredBlock>;
     fn is_reorg(&self, block_number: u64, observed_hash: &str) -> bool;
+    /// Persist a protocol-config snapshot. Implementations may dedupe by
+    /// payload hash. Returns true when a new history row was inserted.
+    fn record_protocol_config(
+        &mut self,
+        _config: &ProtocolConfig,
+        _updated_by: &str,
+        _block_number: Option<u64>,
+        _tx_hash: Option<&str>,
+    ) -> bool {
+        false
+    }
+    /// Persist a node weight change. Returns true when a new history row was
+    /// inserted (implementations may dedupe by tx_hash + node + weight).
+    fn record_node_update(
+        &mut self,
+        _node_address: &str,
+        _weight: u32,
+        _updated_by: &str,
+        _block_number: Option<u64>,
+        _tx_hash: Option<&str>,
+    ) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -157,45 +202,41 @@ impl PostgresDatabase {
     }
 
     pub fn run_migrations(&self) -> Result<(), postgres::Error> {
-        self.client
-            .borrow_mut()
-            .batch_execute(include_str!("../migrations/0001_operator_schema.sql"))
-    }
-
-    pub fn ensure_protocol_config(&self) -> Result<ProtocolConfig, PostgresStorageError> {
-        if let Some(config) = self.try_load_protocol_config()? {
-            config
-                .validate()
-                .map_err(|error| PostgresStorageError::Config(error.to_string()))?;
-            return Ok(config);
-        }
-        let config = ProtocolConfig::default();
-        config
-            .validate()
-            .map_err(|error| PostgresStorageError::Config(error.to_string()))?;
-        self.try_save_protocol_config(&config, "system")?;
-        Ok(config)
-    }
-
-    pub fn try_load_protocol_config(&self) -> Result<Option<ProtocolConfig>, PostgresStorageError> {
-        let row = self.client.borrow_mut().query_opt(
-            "SELECT payload::text FROM protocol_config WHERE key = 'current'",
-            &[],
-        )?;
-        row.map(|row| serde_json::from_str(&row.get::<_, String>(0)))
-            .transpose()
-            .map_err(PostgresStorageError::Json)
+        let mut client = self.client.borrow_mut();
+        client.batch_execute(include_str!("../migrations/0001_operator_schema.sql"))?;
+        client.batch_execute(include_str!("../migrations/0002_config_history_meta.sql"))?;
+        Ok(())
     }
 
     pub fn try_save_protocol_config(
         &self,
         config: &ProtocolConfig,
         updated_by: &str,
-    ) -> Result<(), PostgresStorageError> {
+    ) -> Result<bool, PostgresStorageError> {
+        self.try_save_protocol_config_with_meta(config, updated_by, None, None)
+    }
+
+    /// Persist `protocol_config` (current row) and append a history entry when
+    /// the payload differs from the most recent one for the same `tx_hash`
+    /// (chain-event mirroring) or when no row with the same payload hash
+    /// exists yet (periodic resync). Returns true when a history row is
+    /// actually inserted.
+    pub fn try_save_protocol_config_with_meta(
+        &self,
+        config: &ProtocolConfig,
+        updated_by: &str,
+        block_number: Option<u64>,
+        tx_hash: Option<&str>,
+    ) -> Result<bool, PostgresStorageError> {
         config
             .validate()
             .map_err(|error| PostgresStorageError::Config(error.to_string()))?;
         let payload = serde_json::to_string(config)?;
+        let payload_hash = config_payload_hash(&payload);
+        let block_number_i64 = match block_number {
+            Some(value) => Some(to_i64(value)?),
+            None => None,
+        };
         let mut client = self.client.borrow_mut();
         let mut transaction = client.transaction()?;
         transaction.execute(
@@ -203,12 +244,111 @@ impl PostgresDatabase {
              ON CONFLICT (key) DO UPDATE SET payload = EXCLUDED.payload, updated_by = EXCLUDED.updated_by, updated_at = now()",
             &[&payload, &updated_by],
         )?;
-        transaction.execute(
-            "INSERT INTO protocol_config_history (key, payload, updated_by) VALUES ('current', $1::jsonb, $2)",
-            &[&payload, &updated_by],
+        let last = transaction.query_opt(
+            "SELECT payload_hash, tx_hash FROM protocol_config_history ORDER BY id DESC LIMIT 1",
+            &[],
         )?;
+        let mut should_insert = true;
+        if let Some(row) = last {
+            let last_hash: Option<String> = row.get(0);
+            let last_tx: Option<String> = row.get(1);
+            if last_hash.as_deref() == Some(&payload_hash) {
+                // No payload change. Insert only when the source tx differs and
+                // the new event provides a tx_hash (i.e. ProtocolConfigUpdated
+                // emitted but config rolled back to a previous value).
+                let new_tx = tx_hash.map(|value| value.to_ascii_lowercase());
+                if new_tx.is_none() || new_tx == last_tx {
+                    should_insert = false;
+                }
+            }
+        }
+        let inserted = if should_insert {
+            let tx_value = tx_hash.map(|value| value.to_ascii_lowercase());
+            transaction.execute(
+                "INSERT INTO protocol_config_history (key, payload, updated_by, block_number, tx_hash, payload_hash) \
+                 VALUES ('current', $1::jsonb, $2, $3, $4, $5)",
+                &[
+                    &payload,
+                    &updated_by,
+                    &block_number_i64,
+                    &tx_value,
+                    &payload_hash,
+                ],
+            )?;
+            true
+        } else {
+            false
+        };
         transaction.commit()?;
-        Ok(())
+        Ok(inserted)
+    }
+
+    /// Append a node weight change. Returns true when a new history row was
+    /// written. Skips inserts that match the most recent row for the same
+    /// node + weight + tx_hash to keep the history compact when periodic
+    /// scans rebuild the same state.
+    pub fn try_record_node_update(
+        &self,
+        node_address: &str,
+        weight: u32,
+        updated_by: &str,
+        block_number: Option<u64>,
+        tx_hash: Option<&str>,
+    ) -> Result<bool, PostgresStorageError> {
+        let address = node_address.to_ascii_lowercase();
+        let weight_i64 = i64::from(weight);
+        let block_number_i64 = match block_number {
+            Some(value) => Some(to_i64(value)?),
+            None => None,
+        };
+        let tx_value = tx_hash.map(|value| value.to_ascii_lowercase());
+        let mut client = self.client.borrow_mut();
+        let last = client.query_opt(
+            "SELECT weight, tx_hash FROM node_history WHERE node_address = $1 ORDER BY id DESC LIMIT 1",
+            &[&address],
+        )?;
+        if let Some(row) = last {
+            let last_weight: i64 = row.get(0);
+            let last_tx: Option<String> = row.get(1);
+            if last_weight == weight_i64 && last_tx == tx_value {
+                return Ok(false);
+            }
+        }
+        client.execute(
+            "INSERT INTO node_history (node_address, weight, block_number, tx_hash, updated_by) \
+             VALUES ($1, $2, $3, $4, $5)",
+            &[
+                &address,
+                &weight_i64,
+                &block_number_i64,
+                &tx_value,
+                &updated_by,
+            ],
+        )?;
+        Ok(true)
+    }
+
+    pub fn try_load_node_history(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<NodeHistoryEntry>, PostgresStorageError> {
+        let rows = self.client.borrow_mut().query(
+            "SELECT id, node_address, weight, block_number, tx_hash, updated_by, created_at::text \
+             FROM node_history ORDER BY id DESC LIMIT $1",
+            &[&limit],
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|row| NodeHistoryEntry {
+                id: row.get(0),
+                node_address: row.get(1),
+                weight: row.get(2),
+                block_number: row.get(3),
+                tx_hash: row.get(4),
+                updated_by: row.get(5),
+                created_at: row.get(6),
+            })
+            .collect())
     }
 
     pub fn try_load_state(&self) -> Result<Option<ProtocolState>, PostgresStorageError> {
@@ -221,6 +361,31 @@ impl PostgresDatabase {
 
     pub fn try_load_journal(&self) -> Result<ExecutionJournal, PostgresStorageError> {
         Ok(self.load_snapshot("execution_journal")?.unwrap_or_default())
+    }
+
+    pub fn try_load_protocol_config_history(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<ConfigHistoryEntry>, PostgresStorageError> {
+        let rows = self.client.borrow_mut().query(
+            "SELECT id, payload::text, updated_by, created_at::text, block_number, tx_hash \
+             FROM protocol_config_history ORDER BY id DESC LIMIT $1",
+            &[&limit],
+        )?;
+        rows.into_iter()
+            .map(|row| {
+                let payload: String = row.get(1);
+                let config: ProtocolConfig = serde_json::from_str(&payload)?;
+                Ok(ConfigHistoryEntry {
+                    id: row.get(0),
+                    payload: config,
+                    updated_by: row.get(2),
+                    created_at: row.get(3),
+                    block_number: row.get(4),
+                    tx_hash: row.get(5),
+                })
+            })
+            .collect()
     }
 
     pub fn try_save_journal(&self, journal: &ExecutionJournal) -> Result<(), PostgresStorageError> {
@@ -377,10 +542,44 @@ impl OperatorDatabase for PostgresDatabase {
         self.try_is_reorg(block_number, observed_hash)
             .expect("check indexed block reorg in postgres")
     }
+
+    fn record_protocol_config(
+        &mut self,
+        config: &ProtocolConfig,
+        updated_by: &str,
+        block_number: Option<u64>,
+        tx_hash: Option<&str>,
+    ) -> bool {
+        self.try_save_protocol_config_with_meta(config, updated_by, block_number, tx_hash)
+            .expect("persist protocol config history in postgres")
+    }
+
+    fn record_node_update(
+        &mut self,
+        node_address: &str,
+        weight: u32,
+        updated_by: &str,
+        block_number: Option<u64>,
+        tx_hash: Option<&str>,
+    ) -> bool {
+        self.try_record_node_update(node_address, weight, updated_by, block_number, tx_hash)
+            .expect("persist node history in postgres")
+    }
 }
 
 fn to_i64(value: u64) -> Result<i64, PostgresStorageError> {
     i64::try_from(value).map_err(|_| PostgresStorageError::IntegerOutOfRange)
+}
+
+fn config_payload_hash(payload: &str) -> String {
+    let digest = keccak256(payload.as_bytes());
+    let mut output = String::with_capacity(64);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in digest {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 #[cfg(test)]

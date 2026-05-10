@@ -85,7 +85,7 @@
 买入：
 
 1. 前期 `buyEnabled=false`，从 Pair 买入会 revert。
-2. 管理员后台确认开放后调用 `setConfig(..., buyEnabled=true)`。
+2. 管理员后台确认开放后调用 `setProtocolConfig(..., buyEnabled=true)`。
 3. 用户在 Pancake 买入。
 4. 合约对 Pair 转出到用户的转账收取买入 token 税，税先留在 Token 合约。
 5. Rust operator 定期把税 token 兑换成 BNB，并按规则转 Vault 或其他目标。
@@ -147,8 +147,8 @@
 
 1. 管理员在后台修改参数。
 2. 后台先做范围校验，例如税率不超过合约上限，入金 min <= max，分账 bps 总和 <= 100%。
-3. 链上参数调用 `setConfig`，链下参数写入 Rust config/state。
-4. Rust indexer 等待链上 tx finality 后才启用新配置。
+3. 管理后台调用 `setProtocolConfig(...)` 或 `setNode(node,weight)`，所有管理员参数统一写入 Token 合约。
+4. Rust operator 在启动和扫描确认区块前读取链上配置；链上真实生效参数由合约直接使用，链下执行参数只作为链上存储值供 operator 执行。
 
 必须记录的审计字段：操作者、旧值、新值、链上 tx、启用区块、高度回滚处理状态。
 

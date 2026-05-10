@@ -2,7 +2,7 @@ use std::fmt;
 use std::time::Duration;
 
 use crate::chain::ChainClient;
-use crate::indexer::{decode_protocol_log, DecodeError, RawLog};
+use crate::indexer::{classify_system_log, decode_protocol_log, DecodeError, RawLog, SystemEvent};
 use crate::rpc::{BscRpcClient, RpcError};
 use crate::service::{EventOutcome, OperatorService, ServiceError};
 use crate::storage::{OperatorDatabase, StoredBlock};
@@ -30,12 +30,20 @@ impl RuntimeScanConfig {
 pub struct RuntimeScanSummary {
     pub from_block: u64,
     pub to_block: u64,
+    pub synced_protocol_config: bool,
+    pub synced_nodes: bool,
     pub synced_pair_reserves: bool,
     pub raw_logs: usize,
     pub decoded_events: usize,
     pub applied_events: usize,
     pub duplicate_events: usize,
     pub planned_commands: usize,
+    /// Number of `ProtocolConfigUpdated` admin events mirrored to the offchain
+    /// history table during this scan.
+    pub chain_config_events: usize,
+    /// Number of `NodeUpdated` admin events mirrored to the offchain node
+    /// history table during this scan.
+    pub chain_node_events: usize,
     pub submitted_transactions: Vec<String>,
 }
 
@@ -132,6 +140,8 @@ where
     if from_block > safe_head {
         return Ok(None);
     }
+    let synced_protocol_config = sync_protocol_config(service, rpc).await?;
+    let synced_nodes = sync_nodes(service, rpc).await?;
     let synced_pair_reserves = sync_pair_reserves(service, rpc).await?;
     let to_block = from_block
         .saturating_add(config.max_blocks_per_scan.saturating_sub(1))
@@ -151,14 +161,126 @@ where
         .protocol_logs(from_block, to_block)
         .await
         .map_err(RuntimeError::Rpc)?;
+    let system_events = collect_system_events(&logs)?;
+    let (chain_config_events, chain_node_events) =
+        apply_system_events(service, rpc, &system_events).await?;
     let mut summary = process_raw_logs(service, from_block, to_block, logs)?;
+    summary.synced_protocol_config = synced_protocol_config;
+    summary.synced_nodes = synced_nodes;
     summary.synced_pair_reserves = synced_pair_reserves;
+    summary.chain_config_events = chain_config_events;
+    summary.chain_node_events = chain_node_events;
     service.database.record_block(StoredBlock {
         number: to_block,
         hash: to_hash,
     });
     summary.submitted_transactions = service.submit_pending().map_err(RuntimeError::Service)?;
     Ok(Some(summary))
+}
+
+async fn sync_protocol_config<D, C>(
+    service: &mut OperatorService<D, C>,
+    rpc: &BscRpcClient,
+) -> Result<bool, RuntimeError<C::Error>>
+where
+    D: OperatorDatabase,
+    C: ChainClient,
+    C::Error: fmt::Debug,
+{
+    let chain_config = rpc.protocol_config().await.map_err(RuntimeError::Rpc)?;
+    service.engine.config = chain_config.config;
+    Ok(true)
+}
+
+/// Pre-scan the freshly fetched logs and group admin-state events so the
+/// runtime can mirror them with full provenance into the offchain history
+/// tables.
+fn collect_system_events<E>(logs: &[RawLog]) -> Result<Vec<SystemEvent>, RuntimeError<E>>
+where
+    E: fmt::Debug,
+{
+    let mut events = Vec::new();
+    for log in logs {
+        if let Some(event) = classify_system_log(log).map_err(RuntimeError::Decode)? {
+            events.push(event);
+        }
+    }
+    Ok(events)
+}
+
+/// Persist immediate-mirror history rows for any admin-state changes detected
+/// in this scan. Returns (config_event_count, node_event_count).
+async fn apply_system_events<D, C>(
+    service: &mut OperatorService<D, C>,
+    rpc: &BscRpcClient,
+    events: &[SystemEvent],
+) -> Result<(usize, usize), RuntimeError<C::Error>>
+where
+    D: OperatorDatabase,
+    C: ChainClient,
+    C::Error: fmt::Debug,
+{
+    let mut config_count = 0usize;
+    let mut node_count = 0usize;
+    for event in events {
+        match event {
+            SystemEvent::ProtocolConfigUpdated {
+                block_number,
+                tx_hash,
+            } => {
+                let chain_config = rpc.protocol_config().await.map_err(RuntimeError::Rpc)?;
+                let updated_by = format!("chain-event:{tx_hash}");
+                if service.database.record_protocol_config(
+                    &chain_config.config,
+                    &updated_by,
+                    Some(*block_number),
+                    Some(tx_hash),
+                ) {
+                    config_count += 1;
+                }
+                service.engine.config = chain_config.config;
+            }
+            SystemEvent::NodeUpdated {
+                block_number,
+                tx_hash,
+                node,
+                weight,
+            } => {
+                let updated_by = format!("chain-event:{tx_hash}");
+                if service.database.record_node_update(
+                    node,
+                    *weight,
+                    &updated_by,
+                    Some(*block_number),
+                    Some(tx_hash),
+                ) {
+                    node_count += 1;
+                }
+            }
+        }
+    }
+    if config_count + node_count > 0 {
+        // Refresh full node set after any admin event so in-memory state stays
+        // consistent with the chain.
+        let nodes = rpc.nodes().await.map_err(RuntimeError::Rpc)?;
+        service.state.nodes = nodes;
+        service.database.save_state(&service.state);
+    }
+    Ok((config_count, node_count))
+}
+
+async fn sync_nodes<D, C>(
+    service: &mut OperatorService<D, C>,
+    rpc: &BscRpcClient,
+) -> Result<bool, RuntimeError<C::Error>>
+where
+    D: OperatorDatabase,
+    C: ChainClient,
+    C::Error: fmt::Debug,
+{
+    service.state.nodes = rpc.nodes().await.map_err(RuntimeError::Rpc)?;
+    service.database.save_state(&service.state);
+    Ok(true)
 }
 
 async fn sync_pair_reserves<D, C>(

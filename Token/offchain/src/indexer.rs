@@ -7,6 +7,25 @@ use ethers_core::utils::keccak256;
 
 pub const REF_BOUND_SIGNATURE: &str = "RefBound(address,address)";
 pub const DEPOSIT_SIGNATURE: &str = "Deposit(address,uint256,address)";
+pub const PROTOCOL_CONFIG_UPDATED_SIGNATURE: &str = "ProtocolConfigUpdated(address)";
+pub const NODE_UPDATED_SIGNATURE: &str = "NodeUpdated(address,uint32)";
+
+/// Logs that don't represent business events but signal that on-chain admin
+/// state has changed and the offchain mirror should refresh & persist a
+/// history entry with full provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemEvent {
+    ProtocolConfigUpdated {
+        block_number: u64,
+        tx_hash: String,
+    },
+    NodeUpdated {
+        block_number: u64,
+        tx_hash: String,
+        node: Address,
+        weight: u32,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainEvent {
@@ -117,6 +136,40 @@ pub fn deposit_topic() -> String {
     event_topic(DEPOSIT_SIGNATURE)
 }
 
+pub fn protocol_config_updated_topic() -> String {
+    event_topic(PROTOCOL_CONFIG_UPDATED_SIGNATURE)
+}
+
+pub fn node_updated_topic() -> String {
+    event_topic(NODE_UPDATED_SIGNATURE)
+}
+
+/// Recognise admin-state log topics that should not flow through the regular
+/// `apply_event` path but instead trigger an immediate chain re-sync.
+pub fn classify_system_log(log: &RawLog) -> Result<Option<SystemEvent>, DecodeError> {
+    let Some(topic) = log.topics.first() else {
+        return Ok(None);
+    };
+    let topic = topic.to_ascii_lowercase();
+    if topic == protocol_config_updated_topic() {
+        return Ok(Some(SystemEvent::ProtocolConfigUpdated {
+            block_number: log.block_number,
+            tx_hash: log.tx_hash.to_ascii_lowercase(),
+        }));
+    }
+    if topic == node_updated_topic() {
+        let node = decode_topic_address(log.topics.get(1).ok_or(DecodeError::MissingTopic)?)?;
+        let weight = decode_u32_word(&log.data)?;
+        return Ok(Some(SystemEvent::NodeUpdated {
+            block_number: log.block_number,
+            tx_hash: log.tx_hash.to_ascii_lowercase(),
+            node,
+            weight,
+        }));
+    }
+    Ok(None)
+}
+
 pub fn decode_protocol_log(log: RawLog) -> Result<Option<IndexedEvent>, DecodeError> {
     let topic = log
         .topics
@@ -179,6 +232,17 @@ fn decode_u128_word(data: &str) -> Result<u128, DecodeError> {
         return Err(DecodeError::UintOverflow);
     }
     u128::from_str_radix(&word[32..], 16).map_err(|_| DecodeError::InvalidData)
+}
+
+fn decode_u32_word(data: &str) -> Result<u32, DecodeError> {
+    let word = strip_0x(data).ok_or(DecodeError::InvalidData)?;
+    if word.len() != 64 || !word.chars().all(|char| char.is_ascii_hexdigit()) {
+        return Err(DecodeError::InvalidData);
+    }
+    if word[..56].chars().any(|char| char != '0') {
+        return Err(DecodeError::UintOverflow);
+    }
+    u32::from_str_radix(&word[56..], 16).map_err(|_| DecodeError::InvalidData)
 }
 
 fn strip_0x(value: &str) -> Option<&str> {
