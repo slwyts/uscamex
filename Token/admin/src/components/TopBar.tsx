@@ -57,8 +57,23 @@ export default function TopBar() {
           {settings.tokenAddress ? `Token ${shortAddress(settings.tokenAddress)}` : "未配置 Token"}
         </Tag>
         <Tag color="blue">Chain {settings.chainId}</Tag>
-        <Tag color={wallet.account ? "green" : "default"}>
-          {wallet.account ? `钱包 ${shortAddress(wallet.account)}` : "未连接钱包"}
+        {wallet.owner && (
+          <Tag color="purple">Owner {shortAddress(wallet.owner)}</Tag>
+        )}
+        <Tag
+          color={
+            wallet.account
+              ? wallet.owner && wallet.account.toLowerCase() !== wallet.owner.toLowerCase()
+                ? "red"
+                : "green"
+              : "default"
+          }
+        >
+          {wallet.account
+            ? wallet.owner && wallet.account.toLowerCase() !== wallet.owner.toLowerCase()
+              ? `钱包 ${shortAddress(wallet.account)} ≠ owner`
+              : `钱包 ${shortAddress(wallet.account)}`
+            : "未连接钱包"}
         </Tag>
         <Tag color={wallet.authorized ? "magenta" : "default"} icon={<SafetyOutlined />}>
           {wallet.authorized ? "Owner 已授权" : "未授权后端"}

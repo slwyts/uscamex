@@ -38,6 +38,16 @@ export function api(): AxiosInstance {
   return instance;
 }
 
+export interface OwnerInfo {
+  owner: string;
+  tokenAddress: string;
+}
+
+export async function fetchOwner(): Promise<OwnerInfo> {
+  const res = await api().get<OwnerInfo>("/api/admin/owner");
+  return res.data;
+}
+
 export function apiErrorMessage(error: unknown): string {
   if (error instanceof AxiosError) {
     const data = error.response?.data as { error?: string } | undefined;

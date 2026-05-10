@@ -9,12 +9,13 @@ import {
 } from "react";
 import { App } from "antd";
 import { getInjectedProvider, signOwnerMessage } from "../utils/chain";
-import { setAdminAuth, clearAdminAuth, hasAdminAuth } from "../utils/api";
+import { setAdminAuth, clearAdminAuth, hasAdminAuth, fetchOwner } from "../utils/api";
 
 interface WalletState {
   account: string;
   authorized: boolean;
   connecting: boolean;
+  owner: string;
 }
 
 interface WalletContextValue extends WalletState {
@@ -32,7 +33,23 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     account: "",
     authorized: hasAdminAuth(),
     connecting: false,
+    owner: "",
   });
+
+  const loadOwner = useCallback(async (): Promise<string> => {
+    try {
+      const info = await fetchOwner();
+      const owner = (info.owner || "").toLowerCase();
+      setState((prev) => ({ ...prev, owner }));
+      return owner;
+    } catch {
+      return "";
+    }
+  }, []);
+
+  useEffect(() => {
+    loadOwner();
+  }, [loadOwner]);
 
   const connect = useCallback(async () => {
     if (!window.ethereum) throw new Error("未检测到钱包，请安装并启用 EVM 钱包");
@@ -53,15 +70,24 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const authorize = useCallback(async () => {
     let account = state.account;
     if (!account) account = await connect();
+    // Pre-flight: ensure the connected wallet is the on-chain owner so we
+    // don't waste a signature that the backend will reject with 403.
+    let owner = state.owner;
+    if (!owner) owner = await loadOwner();
+    if (owner && account.toLowerCase() !== owner) {
+      throw new Error(
+        `当前钱包 ${account} 不是合约 owner（${owner}），请在钱包中切换到 owner 账户后重试`,
+      );
+    }
     const auth = await signOwnerMessage(account);
     setAdminAuth(auth.message, auth.signature);
     setState((prev) => ({ ...prev, authorized: true }));
     message.success("已签名授权，可以读取后端数据");
-  }, [connect, state.account, message]);
+  }, [connect, state.account, state.owner, loadOwner, message]);
 
   const disconnect = useCallback(() => {
     clearAdminAuth();
-    setState({ account: "", authorized: false, connecting: false });
+    setState((prev) => ({ ...prev, account: "", authorized: false, connecting: false }));
   }, []);
 
   const refresh = useCallback(async () => {
@@ -82,7 +108,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     if (window.ethereum?.on) {
       window.ethereum.on("accountsChanged", () => {
         clearAdminAuth();
-        setState({ account: "", authorized: false, connecting: false });
+        setState((prev) => ({ ...prev, account: "", authorized: false, connecting: false }));
       });
       window.ethereum.on("chainChanged", () => {
         clearAdminAuth();
