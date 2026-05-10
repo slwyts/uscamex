@@ -271,6 +271,12 @@ pub fn apply_event(
 
     match event {
         ChainEvent::RefBound { user, referrer, .. } => {
+            // Tolerate the bootstrap RefBound(root, root) emitted by the on-chain
+            // constructor — the offchain state already pre-binds the root address.
+            if user == referrer && state.is_bound(&user) {
+                state.processed_events.insert(id);
+                return Ok(false);
+            }
             engine.bind(state, user, referrer)?;
         }
         ChainEvent::Deposit { user, amount, .. } => {
