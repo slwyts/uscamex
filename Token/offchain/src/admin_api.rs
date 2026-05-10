@@ -1132,6 +1132,14 @@ async fn require_owner(
         .map_err(|_| AdminApiError::BadSignature)?;
     let owner = state.rpc.owner().await?;
     if signer != owner {
+        eprintln!(
+            "admin auth rejected: signer={:?} owner={:?} chain_id={} token={} msg_first120={:?}",
+            signer,
+            owner,
+            state.settings.chain_id,
+            state.settings.token_address,
+            &message.chars().take(120).collect::<String>()
+        );
         return Err(AdminApiError::Forbidden);
     }
     Ok(signer)
