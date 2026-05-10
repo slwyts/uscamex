@@ -30,7 +30,15 @@ export function api(): AxiosInstance {
   });
   instance.interceptors.request.use((config) => {
     if (SHARED_AUTH.message) {
-      config.headers.set("x-uscamex-admin-message", SHARED_AUTH.message);
+      // HTTP header values cannot contain raw newlines; the admin sign-in
+      // message is multi-line, so we base64-encode it and decode on the
+      // backend before signature recovery. Otherwise newline stripping
+      // changes the digest and ecrecover returns a junk address.
+      const b64 =
+        typeof window !== "undefined" && typeof window.btoa === "function"
+          ? window.btoa(unescape(encodeURIComponent(SHARED_AUTH.message)))
+          : Buffer.from(SHARED_AUTH.message, "utf8").toString("base64");
+      config.headers.set("x-uscamex-admin-message-b64", b64);
       config.headers.set("x-uscamex-admin-signature", SHARED_AUTH.signature);
     }
     return config;

@@ -1,4 +1,4 @@
-import { BrowserProvider, JsonRpcProvider, type Eip1193Provider } from "ethers";
+import { BrowserProvider, JsonRpcProvider, verifyMessage, type Eip1193Provider } from "ethers";
 import { loadSettings } from "./settings";
 
 declare global {
@@ -46,5 +46,14 @@ export async function signOwnerMessage(account: string): Promise<{ message: stri
     `timestamp=${Math.floor(Date.now() / 1000)}`,
   ].join("\n");
   const signature = await signer.signMessage(message);
+  // Some wallets (especially mobile in-DApp browsers) sign with the *currently
+  // active* account in the wallet, ignoring the address we requested. Verify
+  // locally so we fail fast instead of producing a 403 after the fact.
+  const recovered = verifyMessage(message, signature).toLowerCase();
+  if (recovered !== account.toLowerCase()) {
+    throw new Error(
+      `钱包返回的签名地址 ${recovered} 与请求地址 ${account.toLowerCase()} 不一致，请在钱包内切换到目标账户后重试`,
+    );
+  }
   return { message, signature };
 }

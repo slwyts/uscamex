@@ -1115,7 +1115,32 @@ async fn require_owner(
     state: &AdminApiState,
     headers: &HeaderMap,
 ) -> Result<ethers_core::types::Address, AdminApiError> {
-    let message = header(headers, "x-uscamex-admin-message")?;
+    // Prefer the base64 header; fall back to the raw header for legacy clients.
+    // HTTP header values must not contain raw newlines (RFC 7230), and the
+    // admin sign-in payload is multi-line, so the canonical transport is
+    // x-uscamex-admin-message-b64.
+    let message_owned: String = match headers.get("x-uscamex-admin-message-b64") {
+        Some(v) => {
+            let raw = v
+                .to_str()
+                .map_err(|_| AdminApiError::AuthMissing("x-uscamex-admin-message-b64"))?
+                .trim();
+            let bytes = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                raw.as_bytes(),
+            )
+            .or_else(|_| {
+                base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD_NO_PAD,
+                    raw.as_bytes(),
+                )
+            })
+            .map_err(|_| AdminApiError::BadSignature)?;
+            String::from_utf8(bytes).map_err(|_| AdminApiError::BadSignature)?
+        }
+        None => header(headers, "x-uscamex-admin-message")?.to_string(),
+    };
+    let message = message_owned.as_str();
     let signature = header(headers, "x-uscamex-admin-signature")?;
     if !message.starts_with(ADMIN_MESSAGE_PREFIX)
         || !message.contains(&format!(

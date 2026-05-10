@@ -2731,6 +2731,7 @@ name = "uscamex-operator"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "ethers-core",
  "ethers-signers",
  "postgres",
