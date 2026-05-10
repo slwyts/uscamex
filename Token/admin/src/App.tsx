@@ -16,6 +16,8 @@ import {
 } from "@ant-design/icons";
 import TopBar from "./components/TopBar";
 import { bootstrapSettingsFromBackend } from "./utils/settings";
+import { useWallet } from "./hooks/useWallet";
+import { hasAdminAuth } from "./utils/api";
 import QueryOverview from "./pages/QueryOverview";
 import QueryTeam from "./pages/QueryTeam";
 import QueryUser from "./pages/QueryUser";
@@ -63,11 +65,33 @@ export default function App() {
   const location = useLocation();
   const selected = [location.pathname];
   const groupKey = location.pathname.startsWith("/config") ? "g-config" : "g-query";
+  const wallet = useWallet();
 
   useEffect(() => {
-    bootstrapSettingsFromBackend().catch(() => {
-      // backend may be temporarily unreachable; settings remain as last saved
-    });
+    let cancelled = false;
+    (async () => {
+      // Sync chainId/tokenAddress from backend so the next signature matches
+      // the chain the operator is wired to (97 testnet vs 56 mainnet).
+      await bootstrapSettingsFromBackend().catch(() => undefined);
+      if (cancelled) return;
+      // Auto wallet connect; if the wallet has previously authorized this
+      // origin, MetaMask returns the account silently. Otherwise users see
+      // the standard connect prompt once.
+      try {
+        const account = await wallet.connect();
+        if (cancelled || !account) return;
+        if (!hasAdminAuth()) {
+          await wallet.authorize();
+        }
+      } catch {
+        // user dismissed wallet popup or no wallet installed; ignore so the
+        // SPA stays usable for read-only navigation.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (

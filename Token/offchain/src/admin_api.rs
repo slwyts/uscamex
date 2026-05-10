@@ -14,7 +14,6 @@ use ethers_core::types::Signature;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
-use tower_http::services::{ServeDir, ServeFile};
 
 use crate::config::Wei;
 use crate::journal::{CommandStatus, ExecutionJournal};
@@ -121,6 +120,26 @@ struct AdminStateResponse<T> {
     data: T,
 }
 
+fn mime_for(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "ico" => "image/x-icon",
+        "webp" => "image/webp",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "map" => "application/json; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
 pub async fn serve_admin_api(
     settings: OperatorSettings,
     database: PostgresDatabase,
@@ -149,12 +168,54 @@ pub fn router_with_static(state: AdminApiState) -> Router {
     let admin_dir = PathBuf::from(admin_dir);
     if admin_dir.is_dir() {
         let index = admin_dir.join("index.html");
-        let serve = ServeDir::new(&admin_dir).not_found_service(ServeFile::new(index));
+        let admin_dir_for_handler = admin_dir.clone();
+        let index_for_handler = index.clone();
+        // Single async handler: serve a static asset if the request path maps
+        // to an existing file under admin_dir, otherwise fall back to
+        // index.html with status 200 so the SPA router can handle deep
+        // links like /admin/query/overview.
+        let admin_handler = move |path: Option<axum::extract::Path<String>>| {
+            let admin_dir = admin_dir_for_handler.clone();
+            let index = index_for_handler.clone();
+            async move {
+                let raw = path.map(|p| p.0).unwrap_or_default();
+                let trimmed = raw.trim_start_matches('/');
+                let mut target = admin_dir.clone();
+                if !trimmed.is_empty() {
+                    // Reject path traversal.
+                    if trimmed.contains("..") {
+                        target = index.clone();
+                    } else {
+                        target.push(trimmed);
+                    }
+                }
+                let serve_target = if target.is_file() { target } else { index.clone() };
+                match tokio::fs::read(&serve_target).await {
+                    Ok(bytes) => {
+                        let mime = mime_for(&serve_target);
+                        (
+                            StatusCode::OK,
+                            [(axum::http::header::CONTENT_TYPE, mime)],
+                            bytes,
+                        )
+                            .into_response()
+                    }
+                    Err(error) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("admin asset missing: {error}"),
+                    )
+                        .into_response(),
+                }
+            }
+        };
         println!(
             "operator admin web mounted at /admin from {}",
             admin_dir.display()
         );
-        app = app.nest_service("/admin", serve);
+        app = app
+            .route("/admin", get(admin_handler.clone()))
+            .route("/admin/", get(admin_handler.clone()))
+            .route("/admin/{*path}", get(admin_handler));
     } else {
         println!(
             "operator admin web not mounted: directory {} does not exist (set USCAMEX_ADMIN_DIR)",
