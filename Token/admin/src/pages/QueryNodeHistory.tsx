@@ -108,21 +108,21 @@ function NodeHistoryPanel() {
       <Card>
         <Row gutter={[16, 16]}>
           <Col xs={12} md={6}>
-            <Statistic title="历史条目" value={stats.total} />
+            <Statistic title="历史记录总数" value={stats.total} />
           </Col>
           <Col xs={12} md={6}>
-            <Statistic title="涉及节点" value={stats.uniqueNodes} />
+            <Statistic title="涉及节点数" value={stats.uniqueNodes} />
           </Col>
           <Col xs={12} md={6}>
             <Statistic
-              title="链上事件触发"
+              title="由链上事件触发"
               value={stats.chainEvents}
               valueStyle={{ color: "#52c41a" }}
             />
           </Col>
           <Col xs={12} md={6}>
             <Statistic
-              title="移除次数 (weight=0)"
+              title="节点被移除次数"
               value={stats.removals}
               valueStyle={{ color: "#ff4d4f" }}
             />
@@ -131,13 +131,13 @@ function NodeHistoryPanel() {
       </Card>
 
       <Card
-        title="节点权重变更历史（链上事件即时镜像）"
+        title="节点权重变更记录（同步于链上事件）"
         extra={
           <Space wrap>
             <Input.Search
               allowClear
               size="small"
-              placeholder="按节点地址过滤（部分匹配）"
+              placeholder="输入节点地址进行过滤（支持部分匹配）"
               style={{ width: 320 }}
               value={filterAddress}
               onChange={(e) => setFilterAddress(e.target.value)}
@@ -146,11 +146,11 @@ function NodeHistoryPanel() {
               size="small"
               value={sourceFilter}
               onChange={setSourceFilter}
-              style={{ width: 140 }}
+              style={{ width: 160 }}
               options={[
                 { value: "all", label: "全部来源" },
                 { value: "chain", label: "仅链上事件" },
-                { value: "manual", label: "仅手动/启动" },
+                { value: "manual", label: "启动 / 手动写入" },
               ]}
             />
             <Select
@@ -180,24 +180,24 @@ function NodeHistoryPanel() {
           dataSource={filtered}
           size="small"
           pagination={{ pageSize: 25, showSizeChanger: true }}
-          locale={{ emptyText: <Empty description="无匹配的历史" /> }}
+          locale={{ emptyText: <Empty description="没有符合条件的历史记录" /> }}
           columns={[
-            { title: "ID", dataIndex: "id", width: 80 },
+            { title: "记录号", dataIndex: "id", width: 80 },
             {
-              title: "时间",
+              title: "发生时间",
               dataIndex: "created_at",
               width: 190,
             },
             {
-              title: "节点",
+              title: "节点地址",
               dataIndex: "node_address",
               width: 220,
               render: (v: string) => <AddressTag value={v} />,
             },
             {
-              title: "变化",
+              title: "变动类型",
               key: "direction",
-              width: 110,
+              width: 120,
               render: (_, row) => <DirectionTag row={row} />,
             },
             {
@@ -225,14 +225,14 @@ function NodeHistoryPanel() {
               ),
             },
             {
-              title: "区块",
+              title: "区块高度",
               dataIndex: "block_number",
               width: 110,
               render: (v: number | null | undefined) =>
                 v ? <Tag color="blue">{v}</Tag> : <span style={{ color: "#888" }}>—</span>,
             },
             {
-              title: "Tx",
+              title: "交易哈希",
               dataIndex: "tx_hash",
               width: 200,
               render: (v: string | null | undefined) =>

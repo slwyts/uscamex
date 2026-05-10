@@ -46,7 +46,7 @@ export default function ConfigNodes() {
 
   const refresh = async () => {
     if (!isTokenConfigured(settings)) {
-      message.error("请先配置合约地址");
+      message.error("请先填入合约地址");
       return;
     }
     setLoading(true);
@@ -77,14 +77,14 @@ export default function ConfigNodes() {
 
   const submitNode = async (values: NodeRow) => {
     if (!wallet.account) {
-      message.error("请连接 Owner 钱包");
+      message.error("请使用合约管理员钱包连接");
       return;
     }
     setSubmitting(true);
     try {
       const data = iface.encodeFunctionData("setNode", [values.address, values.weight]);
       const tx = await sendTokenTransaction(data, wallet.account);
-      message.success(`已发送：${tx}`);
+      message.success(`交易已提交：${tx}`);
       setOpen(false);
       form.resetFields();
       setEditing(null);
@@ -98,16 +98,16 @@ export default function ConfigNodes() {
 
   const removeNode = async (row: NodeRow) => {
     if (!wallet.account) {
-      message.error("请连接 Owner 钱包");
+      message.error("请使用合约管理员钱包连接");
       return;
     }
     try {
       const data = iface.encodeFunctionData("setNode", [row.address, 0]);
       const tx = await sendTokenTransaction(data, wallet.account);
-      message.success(`已发送 (移除)：${tx}`);
+      message.success(`交易已提交（移除节点）：${tx}`);
       await refresh();
     } catch (error) {
-      modal.error({ title: "失败", content: (error as Error).message });
+      modal.error({ title: "操作失败", content: (error as Error).message });
     }
   };
 
@@ -115,11 +115,11 @@ export default function ConfigNodes() {
 
   return (
     <Card
-      title="节点管理"
+      title="节点配置"
       extra={
         <Space>
           <Button icon={<ReloadOutlined />} onClick={refresh} loading={loading}>
-            刷新链上
+            刷新链上数据
           </Button>
           <Button
             type="primary"
@@ -145,9 +145,9 @@ export default function ConfigNodes() {
         dataSource={rows}
         size="small"
         pagination={false}
-        locale={{ emptyText: <Empty description="链上暂无节点" /> }}
+        locale={{ emptyText: <Empty description="链上尚未配置节点" /> }}
         columns={[
-          { title: "地址", dataIndex: "address", render: (v: string) => <AddressTag value={v} full /> },
+          { title: "节点地址", dataIndex: "address", render: (v: string) => <AddressTag value={v} full /> },
           { title: "权重", dataIndex: "weight", width: 120, align: "right" },
           {
             title: "占比",
@@ -173,9 +173,9 @@ export default function ConfigNodes() {
                   调整权重
                 </Button>
                 <Popconfirm
-                  title={`确认移除 ${row.address.slice(0, 10)}…？`}
+                  title={`确认移除节点 ${row.address.slice(0, 10)}… ？`}
                   onConfirm={() => removeNode(row)}
-                  okText="移除"
+                  okText="确认移除"
                   cancelText="取消"
                 >
                   <Button size="small" danger icon={<DeleteOutlined />} />
@@ -198,16 +198,17 @@ export default function ConfigNodes() {
             label="节点地址"
             name="address"
             rules={[
-              { required: true, message: "请输入地址" },
-              { pattern: /^0x[0-9a-fA-F]{40}$/, message: "地址格式错误" },
+              { required: true, message: "请输入节点地址" },
+              { pattern: /^0x[0-9a-fA-F]{40}$/, message: "地址格式不正确" },
             ]}
           >
             <Input placeholder="0x..." disabled={!!editing} />
           </Form.Item>
           <Form.Item
-            label="权重 (uint32, 0 表示移除)"
+            label="权重（整数）"
             name="weight"
             rules={[{ required: true, message: "请输入权重" }]}
+            extra="权重越大节点占比越高；设为 0 则与「移除节点」等价"
           >
             <InputNumber min={1} max={4_000_000_000} style={{ width: "100%" }} />
           </Form.Item>

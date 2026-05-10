@@ -37,7 +37,7 @@ export default function ConfigLp() {
 
   const refresh = async () => {
     if (!isTokenConfigured(settings)) {
-      message.error("请先配置合约地址");
+      message.error("请先填入合约地址");
       return;
     }
     setLoading(true);
@@ -78,20 +78,20 @@ export default function ConfigLp() {
 
   const callInit = () => {
     modal.confirm({
-      title: "确认初始化 LP？",
-      content: "该操作不可撤销，将把合约自身持有的 USCAME 与 BNB 全部建仓。",
-      okText: "签名并广播",
+      title: "确认初始化流动性池？",
+      content: "该操作不可撤销，合约将使用其当前持有的全部 USCAME 与 BNB 在 PancakeSwap 上建仓。请确认资金到位后再提交。",
+      okText: "签名并上链",
       okButtonProps: { danger: true },
       onOk: async () => {
         if (!wallet.account) {
-          message.error("请先连接 Owner 钱包");
+          message.error("请使用合约管理员钱包连接");
           return;
         }
         setSubmitting(true);
         try {
           const data = iface.encodeFunctionData("initializeLP", []);
           const tx = await sendTokenTransaction(data, wallet.account);
-          message.success(`已发送：${tx}`);
+          message.success(`交易已提交：${tx}`);
           await refresh();
         } catch (error) {
           message.error((error as Error).message);
@@ -104,7 +104,7 @@ export default function ConfigLp() {
 
   return (
     <Card
-      title="LP 初始化与基础地址"
+      title="流动性初始建仓与合约基础信息"
       extra={
         <Button icon={<ReloadOutlined />} onClick={refresh} loading={loading}>
           刷新
@@ -115,8 +115,8 @@ export default function ConfigLp() {
         type="warning"
         showIcon
         style={{ marginBottom: 16 }}
-        message="initializeLP 仅可调用一次"
-        description="调用前请确保合约已收到足够的 BNB；初始化后 LP 由 Owner 持有，pair 地址会写入合约。"
+        message="初始建仓仅能执行一次"
+        description="调用前请确保合约已收到足量 BNB；初始化完成后 LP 权证将划入合约管理员，交易对 PancakeSwap 的 LP 地址也会同步写入合约。"
       />
       {snap && (
         <Space direction="vertical" size="large" style={{ width: "100%" }}>
@@ -129,32 +129,32 @@ export default function ConfigLp() {
             </Col>
             <Col xs={12} md={6}>
               <Statistic
-                title="initialized"
-                value={snap.initialized ? "已初始化" : "未初始化"}
+                title="初始化状态"
+                value={snap.initialized ? "已初始化" : "尚未初始化"}
                 valueStyle={{ color: snap.initialized ? "#73d13d" : "#ff7875" }}
               />
             </Col>
             <Col xs={12} md={6}>
               <div style={{ color: "rgba(255,255,255,0.55)", fontSize: 12, marginBottom: 4 }}>
-                操作权限
+                当前钱包权限
               </div>
               <Tag color={snap.owner === wallet.account ? "green" : "red"}>
-                {snap.owner === wallet.account ? "当前钱包是 Owner" : "当前钱包不是 Owner"}
+                {snap.owner === wallet.account ? "当前钱包为合约管理员" : "当前钱包非合约管理员"}
               </Tag>
             </Col>
           </Row>
           <Descriptions bordered column={1} size="small">
-            <Descriptions.Item label="Owner">
+            <Descriptions.Item label="合约管理员">
               <AddressTag value={snap.owner} full />
             </Descriptions.Item>
-            <Descriptions.Item label="Pair">
+            <Descriptions.Item label="PancakeSwap LP 地址">
               {snap.pair === "0x0000000000000000000000000000000000000000" ? (
-                <Tag color="default">尚未生成（initializeLP 后写入）</Tag>
+                <Tag color="default">尚未生成（初始建仓后自动写入）</Tag>
               ) : (
                 <AddressTag value={snap.pair} full />
               )}
             </Descriptions.Item>
-            <Descriptions.Item label="Vault">
+            <Descriptions.Item label="金库合约">
               <AddressTag value={snap.vault} full />
             </Descriptions.Item>
           </Descriptions>
@@ -166,7 +166,7 @@ export default function ConfigLp() {
             loading={submitting}
             onClick={callInit}
           >
-            {snap.initialized ? "已初始化" : "调用 initializeLP"}
+            {snap.initialized ? "已初始化" : "发起初始建仓"}
           </Button>
         </Space>
       )}

@@ -70,7 +70,7 @@ export default function ConfigParams() {
 
   const fetchConfig = async () => {
     if (!isTokenConfigured(settings)) {
-      message.error("请先在右上角设置合约地址");
+      message.error("请先在右上角「连接设置」中填入合约地址");
       return;
     }
     setLoading(true);
@@ -123,7 +123,7 @@ export default function ConfigParams() {
 
   const submit = async (values: FormShape) => {
     if (!wallet.account) {
-      message.error("请先连接 Owner 钱包");
+      message.error("请先连接合约管理员钱包");
       return;
     }
     let payload: unknown;
@@ -161,15 +161,15 @@ export default function ConfigParams() {
       return;
     }
     modal.confirm({
-      title: "确认提交链上配置？",
-      content: "该交易会更新协议参数，建议先用测试钱包模拟。",
-      okText: "签名并广播",
+      title: "确认提交新的协议参数？",
+      content: "该交易会将所有参数写入链上合约，会立即生效。建议先仔细核对每项数值后再提交。",
+      okText: "签名并上链",
       onOk: async () => {
         setSubmitting(true);
         try {
           const data = iface.encodeFunctionData("setProtocolConfig", [payload]);
           const tx = await sendTokenTransaction(data, wallet.account);
-          message.success(`已发送：${tx}`);
+          message.success(`交易已提交：${tx}`);
           await fetchConfig();
         } catch (error) {
           message.error((error as Error).message);
@@ -190,11 +190,11 @@ export default function ConfigParams() {
 
   return (
     <Card
-      title="链上业务参数"
+      title="协议参数（链上）"
       extra={
         <Space>
           <Button icon={<ReloadOutlined />} onClick={fetchConfig} loading={loading}>
-            读取链上当前值
+            重新读取链上参数
           </Button>
         </Space>
       }
@@ -203,7 +203,7 @@ export default function ConfigParams() {
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="所有数值以基点 (bps) 表示，1% = 100 bps；BNB 金额支持小数。"
+        message="物财业务参数按「基点 (bps)」填写：1% = 100 bps，例如10% = 1000；BNB 金额可填入小数。修改后需点击「提交上链」并由管理员钱包签名才会生效。"
       />
       <Form<FormShape>
         form={form}
@@ -213,78 +213,78 @@ export default function ConfigParams() {
           teamRewardBps: Array.from({ length: 10 }, () => 0),
         }}
       >
-        <Divider orientation="left">运营 / 开关</Divider>
+        <Divider orientation="left">运营账户与总开关</Divider>
         <Row gutter={16}>
           <Col xs={24} md={12}>
             <Form.Item
-              label="Operator 地址"
+              label="运营托管账户（operator，可调用高级接口）"
               name="operator"
-              rules={[{ required: true, pattern: /^0x[0-9a-fA-F]{40}$/, message: "地址格式错误" }]}
+              rules={[{ required: true, pattern: /^0x[0-9a-fA-F]{40}$/, message: "地址格式不正确" }]}
             >
               <Input placeholder="0x..." />
             </Form.Item>
           </Col>
           <Col xs={12} md={6}>
-            <Form.Item label="允许买入 (buyEnabled)" name="buyEnabled" valuePropName="checked">
+            <Form.Item label="允许购买代币" name="buyEnabled" valuePropName="checked">
               <Switch />
             </Form.Item>
           </Col>
           <Col xs={12} md={6}>
-            <Form.Item label="启用通缩" name="deflationEnabled" valuePropName="checked">
+            <Form.Item label="启用按小时通缩" name="deflationEnabled" valuePropName="checked">
               <Switch />
             </Form.Item>
           </Col>
         </Row>
 
-        <Divider orientation="left">入金范围</Divider>
+        <Divider orientation="left">入金金额范围</Divider>
         <Row gutter={16}>
           <Col xs={12}>
-            <Form.Item label="最小入金 (BNB)" name="minDepositBnb" rules={[{ required: true }]}>
-              <Input placeholder="0.1" />
+            <Form.Item label="最低入金金额（BNB）" name="minDepositBnb" rules={[{ required: true }]}>
+              <Input placeholder="例：0.1" />
             </Form.Item>
           </Col>
           <Col xs={12}>
-            <Form.Item label="最大入金 (BNB)" name="maxDepositBnb" rules={[{ required: true }]}>
-              <Input placeholder="5" />
+            <Form.Item label="最高入金金额（BNB）" name="maxDepositBnb" rules={[{ required: true }]}>
+              <Input placeholder="例：5" />
             </Form.Item>
           </Col>
         </Row>
 
-        <Divider orientation="left">买/卖税总比例 (bps)</Divider>
+        <Divider orientation="left">买卖总税率（bps）</Divider>
         <Row gutter={16}>
-          <Col xs={12} md={6}><BpsField label="买入税总" name="buyTaxBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="卖出税总" name="sellTaxBps" /></Col>
+          <Col xs={12} md={6}><BpsField label="买入总税率" name="buyTaxBps" /></Col>
+          <Col xs={12} md={6}><BpsField label="卖出总税率" name="sellTaxBps" /></Col>
         </Row>
 
-        <Divider orientation="left">买入税分配 (bps)</Divider>
+        <Divider orientation="left">买入税收分配（bps）</Divider>
         <Row gutter={16}>
-          <Col xs={12} md={6}><BpsField label="Builder 买入" name="buyTaxBuilderBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="金库" name="buyTaxVaultBps" /></Col>
+          <Col xs={12} md={6}><BpsField label="划入 Builder 购买池" name="buyTaxBuilderBps" /></Col>
+          <Col xs={12} md={6}><BpsField label="划入金库" name="buyTaxVaultBps" /></Col>
         </Row>
 
-        <Divider orientation="left">卖出税分配 (bps)</Divider>
+        <Divider orientation="left">卖出税收分配（bps）</Divider>
         <Row gutter={16}>
-          <Col xs={12} md={6}><BpsField label="Builder" name="sellTaxBuilderBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="Owner" name="sellTaxOwnerBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="金库" name="sellTaxVaultBps" /></Col>
+          <Col xs={12} md={6}><BpsField label="划入 Builder" name="sellTaxBuilderBps" /></Col>
+          <Col xs={12} md={6}><BpsField label="划入管理员" name="sellTaxOwnerBps" /></Col>
+          <Col xs={12} md={6}><BpsField label="划入金库" name="sellTaxVaultBps" /></Col>
         </Row>
 
-        <Divider orientation="left">入金分配 (bps)</Divider>
+        <Divider orientation="left">入金资金分配（bps）</Divider>
         <Row gutter={16}>
           <Col xs={12} md={6}><BpsField label="LP 建仓" name="lpBuildBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="节点池" name="nodeBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="Builder 买" name="builderBuyBps" /></Col>
+          <Col xs={12} md={6}><BpsField label="节点奖励池" name="nodeBps" /></Col>
+          <Col xs={12} md={6}><BpsField label="Builder 购买" name="builderBuyBps" /></Col>
           <Col xs={12} md={6}><BpsField label="金库" name="vaultBps" /></Col>
           <Col xs={12} md={6}><BpsField label="直推奖池" name="directPoolBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="直推奖" name="directRewardBps" /></Col>
+          <Col xs={12} md={6}><BpsField label="直推即时奖" name="directRewardBps" /></Col>
         </Row>
 
-        <Divider orientation="left">静态/动态参数</Divider>
+        <Divider orientation="left">静态产出与退场</Divider>
         <Row gutter={16}>
-          <Col xs={12} md={6}><BpsField label="日静态 (bps)" name="dailyStaticBps" /></Col>
+          <Col xs={12} md={6}><BpsField label="每日静态产出（bps）" name="dailyStaticBps" /></Col>
           <Col xs={12} md={6}>
             <Form.Item
-              label={<Tooltip title="每日结算次数（每个周期一次）">日结算次数</Tooltip>}
+              label={<Tooltip title="一天内进行几次静态结算，例如24 表示每小时一次">每日结算次数</Tooltip>}
               name="settlementPeriodsPerDay"
               rules={[{ required: true }]}
             >
@@ -293,7 +293,7 @@ export default function ConfigParams() {
           </Col>
           <Col xs={12} md={6}>
             <Form.Item
-              label={<Tooltip title="退场倍数（bps），30000 = 3 倍本金">退场倍数 (bps)</Tooltip>}
+              label={<Tooltip title="退场以本金为基础乘以一个倍数。以 bps 表示，例如30000 = 3 倍本金。">退场倍数（bps）</Tooltip>}
               name="exitMultipleBps"
               rules={[{ required: true }]}
             >
@@ -302,7 +302,7 @@ export default function ConfigParams() {
           </Col>
         </Row>
 
-        <Divider orientation="left">团队 10 代奖励 (bps)</Divider>
+        <Divider orientation="left">团队 10 代动态奖励（bps）</Divider>
         <Row gutter={16}>
           {Array.from({ length: 10 }).map((_, index) => (
             <Col xs={12} md={6} lg={4} key={index}>
@@ -317,18 +317,18 @@ export default function ConfigParams() {
           ))}
         </Row>
 
-        <Divider orientation="left">通缩 / 回购</Divider>
+        <Divider orientation="left">通缩与回购</Divider>
         <Row gutter={16}>
-          <Col xs={12} md={6}><BpsField label="每小时通缩 (bps)" name="deflationHourlyBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="日通缩上限 (bps)" name="deflationDailyCapBps" /></Col>
+          <Col xs={12} md={6}><BpsField label="每小时通缩比例（bps）" name="deflationHourlyBps" /></Col>
+          <Col xs={12} md={6}><BpsField label="每日通缩上限（bps）" name="deflationDailyCapBps" /></Col>
           <Col xs={12} md={6}>
-            <Form.Item label="启用回购" name="buybackEnabled" valuePropName="checked">
+            <Form.Item label="启用自动回购" name="buybackEnabled" valuePropName="checked">
               <Switch />
             </Form.Item>
           </Col>
           <Col xs={12} md={6}>
-            <Form.Item label="每分钟回购 (BNB)" name="buybackPerMinuteBnb" rules={[{ required: true }]}>
-              <Input placeholder="0.1" />
+            <Form.Item label="每分钟回购金额（BNB）" name="buybackPerMinuteBnb" rules={[{ required: true }]}>
+              <Input placeholder="例：0.1" />
             </Form.Item>
           </Col>
         </Row>
@@ -341,10 +341,10 @@ export default function ConfigParams() {
             icon={<SaveOutlined />}
             loading={submitting}
           >
-            提交到链上 (setProtocolConfig)
+            提交到链上
           </Button>
           <Tag color={wallet.account ? "green" : "default"}>
-            {wallet.account ? `Owner 钱包：${wallet.account.slice(0, 10)}…` : "未连接钱包"}
+            {wallet.account ? `签名钱包：${wallet.account.slice(0, 10)}…` : "尚未连接钱包"}
           </Tag>
         </Space>
       </Form>

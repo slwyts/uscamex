@@ -35,30 +35,30 @@ import ConfigOperator from "./pages/ConfigOperator";
 const { Sider, Content, Header } = Layout;
 
 const QUERY_ITEMS = [
-  { key: "/query/overview", icon: <DashboardOutlined />, label: <Link to="/query/overview">总览</Link> },
-  { key: "/query/team", icon: <BranchesOutlined />, label: <Link to="/query/team">团队结构</Link> },
-  { key: "/query/user", icon: <UserOutlined />, label: <Link to="/query/user">用户详情</Link> },
+  { key: "/query/overview", icon: <DashboardOutlined />, label: <Link to="/query/overview">运营总览</Link> },
+  { key: "/query/team", icon: <BranchesOutlined />, label: <Link to="/query/team">推荐团队</Link> },
+  { key: "/query/user", icon: <UserOutlined />, label: <Link to="/query/user">用户档案</Link> },
   { key: "/query/users", icon: <TeamOutlined />, label: <Link to="/query/users">用户列表</Link> },
   { key: "/query/nodes", icon: <NodeIndexOutlined />, label: <Link to="/query/nodes">节点收益</Link> },
-  { key: "/query/positions", icon: <GoldOutlined />, label: <Link to="/query/positions">持仓清单</Link> },
-  { key: "/query/journal", icon: <HistoryOutlined />, label: <Link to="/query/journal">执行流水</Link> },
+  { key: "/query/positions", icon: <GoldOutlined />, label: <Link to="/query/positions">持仓明细</Link> },
+  { key: "/query/journal", icon: <HistoryOutlined />, label: <Link to="/query/journal">链下执行流水</Link> },
   {
     key: "/query/config-history",
     icon: <AuditOutlined />,
-    label: <Link to="/query/config-history">配置历史</Link>,
+    label: <Link to="/query/config-history">参数变更记录</Link>,
   },
   {
     key: "/query/node-history",
     icon: <HistoryOutlined />,
-    label: <Link to="/query/node-history">节点历史</Link>,
+    label: <Link to="/query/node-history">节点变更记录</Link>,
   },
 ];
 
 const CONFIG_ITEMS = [
-  { key: "/config/params", icon: <SettingOutlined />, label: <Link to="/config/params">业务参数</Link> },
-  { key: "/config/nodes", icon: <NodeIndexOutlined />, label: <Link to="/config/nodes">节点管理</Link> },
-  { key: "/config/lp", icon: <RocketOutlined />, label: <Link to="/config/lp">LP 初始化</Link> },
-  { key: "/config/operator", icon: <WalletOutlined />, label: <Link to="/config/operator">Operator/Owner 操作</Link> },
+  { key: "/config/params", icon: <SettingOutlined />, label: <Link to="/config/params">协议参数</Link> },
+  { key: "/config/nodes", icon: <NodeIndexOutlined />, label: <Link to="/config/nodes">节点配置</Link> },
+  { key: "/config/lp", icon: <RocketOutlined />, label: <Link to="/config/lp">流动性建仓</Link> },
+  { key: "/config/operator", icon: <WalletOutlined />, label: <Link to="/config/operator">权限与高级操作</Link> },
 ];
 
 export default function App() {
@@ -99,7 +99,7 @@ export default function App() {
       <Sider width={232} style={{ background: "#11131a", borderRight: "1px solid #1f2230" }}>
         <div className="brand-row">
           <span className="brand-dot">U</span>
-          <span>USCAMEX Admin</span>
+          <span>USCAMEX 管理后台</span>
         </div>
         <Menu
           theme="dark"
@@ -113,7 +113,7 @@ export default function App() {
               type: "group",
               label: (
                 <span style={{ color: "rgba(255,255,255,0.45)", fontSize: 12 }}>
-                  数据查询
+                  查询
                 </span>
               ),
               children: QUERY_ITEMS,
@@ -123,7 +123,7 @@ export default function App() {
               type: "group",
               label: (
                 <span style={{ color: "rgba(255,255,255,0.45)", fontSize: 12 }}>
-                  配置修改
+                  管理
                 </span>
               ),
               children: CONFIG_ITEMS,
@@ -131,7 +131,7 @@ export default function App() {
           ]}
         />
         <div style={{ padding: "12px 18px", color: "rgba(255,255,255,0.35)", fontSize: 11 }}>
-          <WalletOutlined /> 链上为准 · 链下索引仅辅助查询
+          <WalletOutlined /> 数据以链上为准，本面板仅用于查看与签发链上交易
         </div>
       </Sider>
       <Layout>

@@ -65,7 +65,7 @@ function JournalPanel() {
         </Card>
       )}
       <Card
-        title="执行流水"
+        title="链下执行流水"
         extra={
           <Button size="small" icon={<ReloadOutlined />} loading={query.isFetching} onClick={() => query.refetch()}>
             刷新
@@ -109,16 +109,16 @@ function JournalPanel() {
                 </Tooltip>
               ),
             },
-            { title: "类型", dataIndex: "kind", width: 160 },
+            { title: "业务类型", dataIndex: "kind", width: 160 },
             {
               title: "状态",
               dataIndex: "status",
               width: 110,
               render: (v: string) => <Tag color={STATUS_COLOR[v] ?? "default"}>{v}</Tag>,
             },
-            { title: "尝试", dataIndex: "attempts", width: 70, align: "right" },
+            { title: "尝试次数", dataIndex: "attempts", width: 90, align: "right" },
             {
-              title: "Tx Hash",
+              title: "交易哈希",
               dataIndex: "tx_hash",
               width: 200,
               render: (v: string | null) =>
@@ -131,7 +131,7 @@ function JournalPanel() {
                 ),
             },
             {
-              title: "错误",
+              title: "错误信息",
               dataIndex: "error",
               ellipsis: true,
               render: (v: string | null) => (v ? <span style={{ color: "#ff7875" }}>{v}</span> : "-"),
