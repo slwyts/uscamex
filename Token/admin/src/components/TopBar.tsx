@@ -1,8 +1,13 @@
 import { Space, Button, Tag, Drawer, Form, Input, InputNumber, App } from "antd";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { SettingOutlined, LinkOutlined, SafetyOutlined } from "@ant-design/icons";
 import { useWallet } from "../hooks/useWallet";
-import { loadSettings, saveSettings, type OperatorSettings } from "../utils/settings";
+import {
+  SETTINGS_CHANGED_EVENT,
+  loadSettings,
+  saveSettings,
+  type OperatorSettings,
+} from "../utils/settings";
 import { shortAddress } from "../utils/address";
 
 export default function TopBar() {
@@ -11,6 +16,16 @@ export default function TopBar() {
   const [open, setOpen] = useState(false);
   const [settings, setSettings] = useState<OperatorSettings>(() => loadSettings());
   const [form] = Form.useForm<OperatorSettings>();
+
+  useEffect(() => {
+    const refresh = () => setSettings(loadSettings());
+    window.addEventListener(SETTINGS_CHANGED_EVENT, refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener(SETTINGS_CHANGED_EVENT, refresh);
+      window.removeEventListener("storage", refresh);
+    };
+  }, []);
 
   const handleConnect = async () => {
     try {

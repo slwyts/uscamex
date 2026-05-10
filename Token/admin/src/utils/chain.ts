@@ -35,6 +35,9 @@ export async function signOwnerMessage(account: string): Promise<{ message: stri
   const provider = getInjectedProvider();
   const signer = await provider.getSigner(account);
   const settings = loadSettings();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(settings.tokenAddress)) {
+    throw new Error("未读取到合约地址，请先在【连接设置】里填写或等待自动同步完成");
+  }
   const message = [
     "USCAMEX Admin",
     `address=${account.toLowerCase()}`,

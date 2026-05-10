@@ -1,4 +1,5 @@
 import { Layout, Menu } from "antd";
+import { useEffect } from "react";
 import { Routes, Route, Link, useLocation, Navigate } from "react-router-dom";
 import {
   DashboardOutlined,
@@ -14,6 +15,7 @@ import {
   AuditOutlined,
 } from "@ant-design/icons";
 import TopBar from "./components/TopBar";
+import { bootstrapSettingsFromBackend } from "./utils/settings";
 import QueryOverview from "./pages/QueryOverview";
 import QueryTeam from "./pages/QueryTeam";
 import QueryUser from "./pages/QueryUser";
@@ -61,6 +63,12 @@ export default function App() {
   const location = useLocation();
   const selected = [location.pathname];
   const groupKey = location.pathname.startsWith("/config") ? "g-config" : "g-query";
+
+  useEffect(() => {
+    bootstrapSettingsFromBackend().catch(() => {
+      // backend may be temporarily unreachable; settings remain as last saved
+    });
+  }, []);
 
   return (
     <Layout className="app-shell">
