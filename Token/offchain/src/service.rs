@@ -70,9 +70,13 @@ where
 
         let planned_commands = match indexed.event.clone() {
             ChainEvent::RefBound { user, referrer, .. } => {
-                // Tolerate the bootstrap RefBound(root, root) emitted by the
-                // on-chain constructor: the offchain state pre-binds the root.
-                if user == referrer && self.state.is_bound(&user) {
+                // Tolerate any self-referral RefBound(x, x): emitted both by
+                // the on-chain constructor (root bootstrap) and by
+                // transferOwnership when the new owner has no upline yet.
+                if user == referrer {
+                    if !self.state.is_bound(&user) {
+                        self.state.ensure_user_mut(&user);
+                    }
                     0
                 } else {
                     self.engine

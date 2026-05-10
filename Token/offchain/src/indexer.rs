@@ -271,9 +271,14 @@ pub fn apply_event(
 
     match event {
         ChainEvent::RefBound { user, referrer, .. } => {
-            // Tolerate the bootstrap RefBound(root, root) emitted by the on-chain
-            // constructor — the offchain state already pre-binds the root address.
-            if user == referrer && state.is_bound(&user) {
+            // Tolerate any self-referral RefBound(x, x): emitted both by the
+            // on-chain constructor (root bootstrap) and by transferOwnership
+            // when the new owner has no upline yet. Just register the user
+            // in offchain state without binding an upline.
+            if user == referrer {
+                if !state.is_bound(&user) {
+                    state.ensure_user_mut(&user);
+                }
                 state.processed_events.insert(id);
                 return Ok(false);
             }
