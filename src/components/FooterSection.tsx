@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import Image from "next/image";
 import Logo from "./Logo";
 import { FadeUp, ScaleIn } from "./Animations";
@@ -21,22 +20,13 @@ const socialLinks = [
   { icon: TelegramIcon, href: "#", label: "Telegram" },
 ];
 
-const NODE_ADDRESS = "0x000000000000000000000000000000000000dEaD";
-
 export default function FooterSection() {
-  const [copied, setCopied] = useState(false);
   const { t } = useLocale();
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(NODE_ADDRESS);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
 
   const footerLinks = [
     { label: t("footer.terms"), href: "#" },
     { label: t("footer.privacy"), href: "#" },
-    { label: t("footer.whitepaper"), href: "#whitepaper" },
+    { label: t("footer.whitepaper"), href: "/whitepaper.pdf", external: true as const },
     { label: t("footer.compliance"), href: "#" },
   ];
 
@@ -66,7 +56,7 @@ export default function FooterSection() {
 
             {/* Content */}
             <div className="relative z-10 pt-16 md:pt-24 px-6 md:px-12">
-              {/* Header + Genesis Node */}
+              {/* Header */}
               <FadeUp className="text-center max-w-[560px] mx-auto">
                 <h2 className="text-[24px] md:text-[36px] font-bold tracking-[-0.02em] gradient-text">
                   {t("footer.title")}
@@ -75,25 +65,12 @@ export default function FooterSection() {
                   {t("footer.desc")}
                 </p>
 
-                {/* Contract address */}
-                <div className="mt-8 rounded-xl bg-[#0a0a0f] border border-white/[0.06] p-4">
-                  <p className="text-[12px] text-white/40 mb-2">{t("footer.addressLabel")}</p>
-                  <div className="flex items-center gap-3">
-                    <code className="flex-1 text-[13px] md:text-[15px] text-[#f5c842] font-mono break-all text-left">
-                      {NODE_ADDRESS}
-                    </code>
-                    <button
-                      onClick={handleCopy}
-                      className="flex-shrink-0 px-4 py-2 rounded-lg bg-[#f5c842] text-[#0a0a0f] text-[13px] font-bold hover:bg-[#f5c842]/90 transition-colors duration-200 cursor-pointer"
-                    >
-                      {copied ? t("footer.copied") : t("footer.copy")}
-                    </button>
-                  </div>
-                </div>
-
-                <p className="mt-4 text-[12px] text-white/30 leading-[1.6]">
-                  {t("footer.addressNote")}
-                </p>
+                <a
+                  href="#node-sale"
+                  className="mt-8 inline-flex items-center gap-2 px-6 py-3 rounded-full bg-[#f5c842] text-[#0a0a0f] text-[14px] font-bold hover:bg-[#f5c842]/90 transition-colors shadow-[0_0_24px_rgba(245,200,66,0.25)]"
+                >
+                  {t("footer.cta")}
+                </a>
               </FadeUp>
 
               {/* Footer */}
@@ -105,6 +82,9 @@ export default function FooterSection() {
                       <a
                         key={link.label}
                         href={link.href}
+                        {...(("external" in link && link.external)
+                          ? { target: "_blank", rel: "noopener" }
+                          : {})}
                         className="text-[13px] text-white/40 hover:text-[#f5c842] transition-colors duration-200"
                       >
                         {link.label}

@@ -37,6 +37,7 @@
     "typechain-types",
     "test",
     "scripts",
-    "hardhat.config.ts"
+    "hardhat.config.ts",
+    "Token/**"
   ]
 }

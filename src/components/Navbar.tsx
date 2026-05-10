@@ -11,10 +11,11 @@ export default function Navbar() {
   const { locale, setLocale, t } = useLocale();
 
   const navLinks = [
+    { label: t("nav.nodeSale"), href: "#node-sale" },
     { label: t("nav.predictions"), href: "#predictions" },
     { label: t("nav.fanTokens"), href: "#fan-tokens" },
     { label: t("nav.ecosystem"), href: "#ecosystem" },
-    { label: t("nav.whitepaper"), href: "#whitepaper" },
+    { label: t("nav.whitepaper"), href: "/whitepaper.pdf", external: true as const },
   ];
 
   const toggleLocale = () => setLocale(locale === "zh" ? "en" : "zh");
@@ -37,6 +38,9 @@ export default function Navbar() {
             <a
               key={link.href}
               href={link.href}
+              {...(("external" in link && link.external)
+                ? { target: "_blank", rel: "noopener" }
+                : {})}
               className="px-4 py-2 text-[15px] text-white/65 hover:text-[#f5c842] transition-colors duration-200"
             >
               {link.label}
@@ -54,7 +58,7 @@ export default function Navbar() {
           </button>
 
           <a
-            href="#buy"
+            href="#node-sale"
             className="flex items-center px-5 py-2.5 rounded-full border border-[#f5c842]/30 bg-[#f5c842] text-[#0a0a0f] text-[15px] font-bold hover:bg-[#f5c842]/90 transition-colors duration-200 shadow-[0_0_20px_rgba(245,200,66,0.2)]"
           >
             {t("nav.buy")}
@@ -93,6 +97,9 @@ export default function Navbar() {
               <a
                 key={link.href}
                 href={link.href}
+                {...(("external" in link && link.external)
+                  ? { target: "_blank", rel: "noopener" }
+                  : {})}
                 className="px-4 py-3 text-[15px] text-white/65 hover:text-[#f5c842] hover:bg-white/5 rounded-xl transition-colors"
                 onClick={() => setMobileOpen(false)}
               >
@@ -107,7 +114,8 @@ export default function Navbar() {
                 {locale === "zh" ? "English" : "中文"}
               </button>
               <a
-                href="#buy"
+                href="#node-sale"
+                onClick={() => setMobileOpen(false)}
                 className="flex-1 px-5 py-3 rounded-full bg-[#f5c842] text-[#0a0a0f] text-[15px] font-bold text-center"
               >
                 {t("nav.buy")}
