@@ -13,7 +13,6 @@ import {
   Row,
   Col,
   Divider,
-  Typography,
 } from "antd";
 import { ReloadOutlined, ThunderboltOutlined, SwapOutlined, UserSwitchOutlined } from "@ant-design/icons";
 import { Interface } from "ethers";
@@ -135,21 +134,19 @@ export default function ConfigOperator() {
         )}
       </Card>
 
-      <PullPairCard disabled={!isOperator} pairBalance={snap?.pairTokenBalance ?? 0n} onDone={refresh} />
+      <PullPairCard pairBalance={snap?.pairTokenBalance ?? 0n} onDone={refresh} />
 
-      <OperatorCallCard disabled={!isOperator} />
+      <OperatorCallCard />
 
-      <TransferOwnershipCard disabled={!isOwner} currentOwner={snap?.owner ?? ""} onDone={refresh} />
+      <TransferOwnershipCard currentOwner={snap?.owner ?? ""} onDone={refresh} />
     </Space>
   );
 }
 
 function PullPairCard({
-  disabled,
   pairBalance,
   onDone,
 }: {
-  disabled: boolean;
   pairBalance: bigint;
   onDone: () => Promise<void>;
 }) {
@@ -170,12 +167,11 @@ function PullPairCard({
     }
     modal.confirm({
       title: `从 LP 池中抽取 ${(bps / 100).toFixed(2)}% 的 USCAME`,
-      content: `预计抽取 ${preview} USCAME 返回合约，随后由金库与回购流程接管。该操作会冲击价格，请选择合适的比例。`,
+      content: `预计抽取 ${preview} USCAME 返回合约（LP 池中代币减少、BNB 不变，市场价格将随之上涨）。请根据市场状况选择合适的比例。`,
       okText: "签名并上链",
-      okButtonProps: { danger: true },
       onOk: async () => {
         if (!wallet.account) {
-          message.error("请使用运营钱包（Operator）连接");
+          message.error("请先连接钱包");
           return;
         }
         setSubmitting(true);
@@ -197,19 +193,19 @@ function PullPairCard({
     <Card
       title={
         <Space>
-          <SwapOutlined /> 从 LP 池抽取代币（限运营账户）
+          <SwapOutlined /> 从 LP 池抽取代币到合约自身
         </Space>
       }
     >
       <Alert
-        type="warning"
+        type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="执行后会立即拉低代币价格"
-        description="该操作按输入的比例（bps）从 LP 池中抽走 USCAME并返回合约本身，随后会触发 PancakeSwap 重新同步价格。请仅在需要调控价格或配合回购计划时使用，并选择谨慎的比例。"
+        message="执行后会推高代币价格（通缩逻辑）"
+        description="该操作按输入的比例（bps）从 LP 池中抽走 USCAME 并返回合约本身。池中代币减少、BNB 保持不变，根据恒积公式 x·y=k，单位代币价格将上涨；收回的代币留存在合约作为「LP 建设者分红池」。每小时自动执行一次的底池通缩使用的也是同一逻辑。"
       />
       <Space size="large" align="end">
-        <Form layout="vertical" disabled={disabled}>
+        <Form layout="vertical">
           <Form.Item label="抽取比例（bps，1 = 0.01%）">
             <InputNumber
               min={1}
@@ -224,25 +220,18 @@ function PullPairCard({
         <Statistic title="预计抽取量" value={`${preview} USCAME`} />
         <Button
           type="primary"
-          danger
           icon={<ThunderboltOutlined />}
-          disabled={disabled}
           loading={submitting}
           onClick={submit}
         >
           发起抽取
         </Button>
       </Space>
-      {disabled && (
-        <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
-          仅合约运营账户（Operator）可发起本操作。
-        </Typography.Paragraph>
-      )}
     </Card>
   );
 }
 
-function OperatorCallCard({ disabled }: { disabled: boolean }) {
+function OperatorCallCard() {
   const { message, modal } = App.useApp();
   const wallet = useWallet();
   const [target, setTarget] = useState("");
@@ -276,7 +265,7 @@ function OperatorCallCard({ disabled }: { disabled: boolean }) {
       okButtonProps: { danger: true },
       onOk: async () => {
         if (!wallet.account) {
-          message.error("请使用运营钱包（Operator）连接");
+          message.error("请先连接钱包");
           return;
         }
         setSubmitting(true);
@@ -294,15 +283,15 @@ function OperatorCallCard({ disabled }: { disabled: boolean }) {
   };
 
   return (
-    <Card title={<Space>代合约发起任意调用（限运营账户）</Space>}>
+    <Card title={<Space>代合约发起任意调用（高危）</Space>}>
       <Alert
         type="error"
         showIcon
         style={{ marginBottom: 16 }}
         message="高危操作，请仅在必要时使用"
-        description="该接口允许运营账户代合约身份对任意地址发起交易，且可动用合约持有的 BNB。仅在合约升级、资金迁移等严格评审后的场景使用。提交前请逐字核对 calldata。"
+        description="该接口允许代合约身份对任意地址发起交易，且可动用合约持有的 BNB。仅在合约升级、资金迁移等严格评审后的场景使用。提交前请逐字核对 calldata。"
       />
-      <Form layout="vertical" disabled={disabled}>
+      <Form layout="vertical">
         <Row gutter={16}>
           <Col xs={24} md={14}>
             <Form.Item label="目标合约地址（target）">
@@ -323,7 +312,7 @@ function OperatorCallCard({ disabled }: { disabled: boolean }) {
             style={{ fontFamily: "monospace" }}
           />
         </Form.Item>
-        <Button danger type="primary" loading={submitting} onClick={submit} disabled={disabled}>
+        <Button danger type="primary" loading={submitting} onClick={submit}>
           发起调用
         </Button>
       </Form>
@@ -332,11 +321,9 @@ function OperatorCallCard({ disabled }: { disabled: boolean }) {
 }
 
 function TransferOwnershipCard({
-  disabled,
   currentOwner,
   onDone,
 }: {
-  disabled: boolean;
   currentOwner: string;
   onDone: () => Promise<void>;
 }) {
@@ -370,7 +357,7 @@ function TransferOwnershipCard({
       okButtonProps: { danger: true },
       onOk: async () => {
         if (!wallet.account) {
-          message.error("请使用现任管理员钱包连接");
+          message.error("请先连接钱包");
           return;
         }
         setSubmitting(true);
@@ -389,7 +376,7 @@ function TransferOwnershipCard({
   };
 
   return (
-    <Card title={<Space><UserSwitchOutlined /> 转移合约管理员权限（限现任管理员）</Space>}>
+    <Card title={<Space><UserSwitchOutlined /> 转移合约管理员权限</Space>}>
       <Alert
         type="warning"
         showIcon
@@ -397,11 +384,11 @@ function TransferOwnershipCard({
         message="一旦转移不可撤销"
         description="建议将管理员转移到多签钱包（例如 Gnosis Safe）以提高资金与参数变更的安全性，不建议转移到另一个普通账户。"
       />
-      <Form layout="vertical" disabled={disabled}>
+      <Form layout="vertical">
         <Form.Item label="新管理员地址">
           <Input value={next} onChange={(e) => setNext(e.target.value.trim())} placeholder="0x..." />
         </Form.Item>
-        <Button danger type="primary" loading={submitting} onClick={submit} disabled={disabled}>
+        <Button danger type="primary" loading={submitting} onClick={submit}>
           转移管理员权限
         </Button>
       </Form>

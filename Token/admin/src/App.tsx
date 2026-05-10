@@ -13,6 +13,7 @@ import {
   RocketOutlined,
   GoldOutlined,
   AuditOutlined,
+  DownloadOutlined,
 } from "@ant-design/icons";
 import TopBar from "./components/TopBar";
 import { bootstrapSettingsFromBackend } from "./utils/settings";
@@ -31,6 +32,7 @@ import ConfigParams from "./pages/ConfigParams";
 import ConfigNodes from "./pages/ConfigNodes";
 import ConfigLp from "./pages/ConfigLp";
 import ConfigOperator from "./pages/ConfigOperator";
+import WithdrawAssets from "./pages/WithdrawAssets";
 
 const { Sider, Content, Header } = Layout;
 
@@ -58,6 +60,7 @@ const CONFIG_ITEMS = [
   { key: "/config/params", icon: <SettingOutlined />, label: <Link to="/config/params">协议参数</Link> },
   { key: "/config/nodes", icon: <NodeIndexOutlined />, label: <Link to="/config/nodes">节点配置</Link> },
   { key: "/config/lp", icon: <RocketOutlined />, label: <Link to="/config/lp">流动性建仓</Link> },
+  { key: "/config/withdraw", icon: <DownloadOutlined />, label: <Link to="/config/withdraw">资产提取</Link> },
   { key: "/config/operator", icon: <WalletOutlined />, label: <Link to="/config/operator">权限与高级操作</Link> },
 ];
 
@@ -162,6 +165,7 @@ export default function App() {
             <Route path="/config/params" element={<ConfigParams />} />
             <Route path="/config/nodes" element={<ConfigNodes />} />
             <Route path="/config/lp" element={<ConfigLp />} />
+            <Route path="/config/withdraw" element={<WithdrawAssets />} />
             <Route path="/config/operator" element={<ConfigOperator />} />
             <Route path="*" element={<Navigate to="/query/overview" replace />} />
           </Routes>

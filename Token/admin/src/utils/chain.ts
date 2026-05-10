@@ -23,6 +23,16 @@ export async function ethCall(data: string): Promise<string> {
   return provider.call({ to: settings.tokenAddress, data });
 }
 
+export async function ethCallTo(to: string, data: string): Promise<string> {
+  const provider = getReadProvider();
+  return provider.call({ to, data });
+}
+
+export async function getNativeBalance(address: string): Promise<bigint> {
+  const provider = getReadProvider();
+  return provider.getBalance(address);
+}
+
 export async function sendTokenTransaction(data: string, fromAddress: string): Promise<string> {
   const provider = getInjectedProvider();
   const signer = await provider.getSigner(fromAddress);
