@@ -1,6 +1,6 @@
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::mpsc;
 
 use crate::config::ProtocolConfig;
 use crate::journal::ExecutionJournal;
@@ -9,6 +9,65 @@ use ethers_core::utils::keccak256;
 use postgres::{Client, NoTls};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+/// Worker-thread wrapper around the synchronous `postgres::Client`. The sync
+/// crate spins up its own internal Tokio runtime and panics with
+/// "Cannot start a runtime from within a runtime" if called from inside an
+/// async context (our `#[tokio::main]`). Hosting the `Client` on a dedicated
+/// std thread and dispatching jobs through a channel keeps the existing
+/// synchronous storage API intact while remaining safe to call from async
+/// code.
+pub struct PgClient {
+    sender: mpsc::Sender<Job>,
+}
+
+type Job = Box<dyn FnOnce(&mut Client) + Send + 'static>;
+
+impl PgClient {
+    pub fn connect(database_url: &str) -> Result<Self, postgres::Error> {
+        let url = database_url.to_string();
+        let (init_tx, init_rx) = mpsc::channel::<Result<(), postgres::Error>>();
+        let (tx, rx) = mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("uscamex-pg".into())
+            .spawn(move || {
+                let mut client = match Client::connect(&url, NoTls) {
+                    Ok(client) => {
+                        let _ = init_tx.send(Ok(()));
+                        client
+                    }
+                    Err(error) => {
+                        let _ = init_tx.send(Err(error));
+                        return;
+                    }
+                };
+                while let Ok(job) = rx.recv() {
+                    job(&mut client);
+                }
+            })
+            .expect("spawn uscamex-pg worker thread");
+        init_rx
+            .recv()
+            .expect("uscamex-pg worker thread terminated before initial reply")?;
+        Ok(Self { sender: tx })
+    }
+
+    pub fn run<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut Client) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let (tx, rx) = mpsc::channel::<R>();
+        let job: Job = Box::new(move |client| {
+            let _ = tx.send(f(client));
+        });
+        self.sender
+            .send(job)
+            .expect("uscamex-pg worker thread closed");
+        rx.recv()
+            .expect("uscamex-pg worker thread dropped reply channel")
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigHistoryEntry {
@@ -183,7 +242,7 @@ impl From<serde_json::Error> for PostgresStorageError {
 }
 
 pub struct PostgresDatabase {
-    client: RefCell<Client>,
+    client: PgClient,
 }
 
 impl fmt::Debug for PostgresDatabase {
@@ -197,15 +256,16 @@ impl fmt::Debug for PostgresDatabase {
 impl PostgresDatabase {
     pub fn connect(database_url: &str) -> Result<Self, postgres::Error> {
         Ok(Self {
-            client: RefCell::new(Client::connect(database_url, NoTls)?),
+            client: PgClient::connect(database_url)?,
         })
     }
 
     pub fn run_migrations(&self) -> Result<(), postgres::Error> {
-        let mut client = self.client.borrow_mut();
-        client.batch_execute(include_str!("../migrations/0001_operator_schema.sql"))?;
-        client.batch_execute(include_str!("../migrations/0002_config_history_meta.sql"))?;
-        Ok(())
+        self.client.run(|client| -> Result<(), postgres::Error> {
+            client.batch_execute(include_str!("../migrations/0001_operator_schema.sql"))?;
+            client.batch_execute(include_str!("../migrations/0002_config_history_meta.sql"))?;
+            Ok(())
+        })
     }
 
     pub fn try_save_protocol_config(
@@ -237,50 +297,49 @@ impl PostgresDatabase {
             Some(value) => Some(to_i64(value)?),
             None => None,
         };
-        let mut client = self.client.borrow_mut();
-        let mut transaction = client.transaction()?;
-        transaction.execute(
-            "INSERT INTO protocol_config (key, payload, updated_by) VALUES ('current', $1::jsonb, $2) \
-             ON CONFLICT (key) DO UPDATE SET payload = EXCLUDED.payload, updated_by = EXCLUDED.updated_by, updated_at = now()",
-            &[&payload, &updated_by],
-        )?;
-        let last = transaction.query_opt(
-            "SELECT payload_hash, tx_hash FROM protocol_config_history ORDER BY id DESC LIMIT 1",
-            &[],
-        )?;
-        let mut should_insert = true;
-        if let Some(row) = last {
-            let last_hash: Option<String> = row.get(0);
-            let last_tx: Option<String> = row.get(1);
-            if last_hash.as_deref() == Some(&payload_hash) {
-                // No payload change. Insert only when the source tx differs and
-                // the new event provides a tx_hash (i.e. ProtocolConfigUpdated
-                // emitted but config rolled back to a previous value).
-                let new_tx = tx_hash.map(|value| value.to_ascii_lowercase());
-                if new_tx.is_none() || new_tx == last_tx {
-                    should_insert = false;
+        let updated_by = updated_by.to_string();
+        let tx_hash_lower = tx_hash.map(|value| value.to_ascii_lowercase());
+        self.client
+            .run(move |client| -> Result<bool, PostgresStorageError> {
+                let mut transaction = client.transaction()?;
+                transaction.execute(
+                    "INSERT INTO protocol_config (key, payload, updated_by) VALUES ('current', $1::jsonb, $2) \
+                     ON CONFLICT (key) DO UPDATE SET payload = EXCLUDED.payload, updated_by = EXCLUDED.updated_by, updated_at = now()",
+                    &[&payload, &updated_by],
+                )?;
+                let last = transaction.query_opt(
+                    "SELECT payload_hash, tx_hash FROM protocol_config_history ORDER BY id DESC LIMIT 1",
+                    &[],
+                )?;
+                let mut should_insert = true;
+                if let Some(row) = last {
+                    let last_hash: Option<String> = row.get(0);
+                    let last_tx: Option<String> = row.get(1);
+                    if last_hash.as_deref() == Some(&payload_hash) {
+                        if tx_hash_lower.is_none() || tx_hash_lower == last_tx {
+                            should_insert = false;
+                        }
+                    }
                 }
-            }
-        }
-        let inserted = if should_insert {
-            let tx_value = tx_hash.map(|value| value.to_ascii_lowercase());
-            transaction.execute(
-                "INSERT INTO protocol_config_history (key, payload, updated_by, block_number, tx_hash, payload_hash) \
-                 VALUES ('current', $1::jsonb, $2, $3, $4, $5)",
-                &[
-                    &payload,
-                    &updated_by,
-                    &block_number_i64,
-                    &tx_value,
-                    &payload_hash,
-                ],
-            )?;
-            true
-        } else {
-            false
-        };
-        transaction.commit()?;
-        Ok(inserted)
+                let inserted = if should_insert {
+                    transaction.execute(
+                        "INSERT INTO protocol_config_history (key, payload, updated_by, block_number, tx_hash, payload_hash) \
+                         VALUES ('current', $1::jsonb, $2, $3, $4, $5)",
+                        &[
+                            &payload,
+                            &updated_by,
+                            &block_number_i64,
+                            &tx_hash_lower,
+                            &payload_hash,
+                        ],
+                    )?;
+                    true
+                } else {
+                    false
+                };
+                transaction.commit()?;
+                Ok(inserted)
+            })
     }
 
     /// Append a node weight change. Returns true when a new history row was
@@ -302,41 +361,46 @@ impl PostgresDatabase {
             None => None,
         };
         let tx_value = tx_hash.map(|value| value.to_ascii_lowercase());
-        let mut client = self.client.borrow_mut();
-        let last = client.query_opt(
-            "SELECT weight, tx_hash FROM node_history WHERE node_address = $1 ORDER BY id DESC LIMIT 1",
-            &[&address],
-        )?;
-        if let Some(row) = last {
-            let last_weight: i64 = row.get(0);
-            let last_tx: Option<String> = row.get(1);
-            if last_weight == weight_i64 && last_tx == tx_value {
-                return Ok(false);
-            }
-        }
-        client.execute(
-            "INSERT INTO node_history (node_address, weight, block_number, tx_hash, updated_by) \
-             VALUES ($1, $2, $3, $4, $5)",
-            &[
-                &address,
-                &weight_i64,
-                &block_number_i64,
-                &tx_value,
-                &updated_by,
-            ],
-        )?;
-        Ok(true)
+        let updated_by = updated_by.to_string();
+        self.client
+            .run(move |client| -> Result<bool, PostgresStorageError> {
+                let last = client.query_opt(
+                    "SELECT weight, tx_hash FROM node_history WHERE node_address = $1 ORDER BY id DESC LIMIT 1",
+                    &[&address],
+                )?;
+                if let Some(row) = last {
+                    let last_weight: i64 = row.get(0);
+                    let last_tx: Option<String> = row.get(1);
+                    if last_weight == weight_i64 && last_tx == tx_value {
+                        return Ok(false);
+                    }
+                }
+                client.execute(
+                    "INSERT INTO node_history (node_address, weight, block_number, tx_hash, updated_by) \
+                     VALUES ($1, $2, $3, $4, $5)",
+                    &[
+                        &address,
+                        &weight_i64,
+                        &block_number_i64,
+                        &tx_value,
+                        &updated_by,
+                    ],
+                )?;
+                Ok(true)
+            })
     }
 
     pub fn try_load_node_history(
         &self,
         limit: i64,
     ) -> Result<Vec<NodeHistoryEntry>, PostgresStorageError> {
-        let rows = self.client.borrow_mut().query(
-            "SELECT id, node_address, weight, block_number, tx_hash, updated_by, created_at::text \
-             FROM node_history ORDER BY id DESC LIMIT $1",
-            &[&limit],
-        )?;
+        let rows = self.client.run(move |client| {
+            client.query(
+                "SELECT id, node_address, weight, block_number, tx_hash, updated_by, created_at::text \
+                 FROM node_history ORDER BY id DESC LIMIT $1",
+                &[&limit],
+            )
+        })?;
         Ok(rows
             .into_iter()
             .map(|row| NodeHistoryEntry {
@@ -367,11 +431,13 @@ impl PostgresDatabase {
         &self,
         limit: i64,
     ) -> Result<Vec<ConfigHistoryEntry>, PostgresStorageError> {
-        let rows = self.client.borrow_mut().query(
-            "SELECT id, payload::text, updated_by, created_at::text, block_number, tx_hash \
-             FROM protocol_config_history ORDER BY id DESC LIMIT $1",
-            &[&limit],
-        )?;
+        let rows = self.client.run(move |client| {
+            client.query(
+                "SELECT id, payload::text, updated_by, created_at::text, block_number, tx_hash \
+                 FROM protocol_config_history ORDER BY id DESC LIMIT $1",
+                &[&limit],
+            )
+        })?;
         rows.into_iter()
             .map(|row| {
                 let payload: String = row.get(1);
@@ -396,53 +462,62 @@ impl PostgresDatabase {
         let block_number = to_i64(event.block_number)?;
         let log_index =
             i32::try_from(event.log_index).map_err(|_| PostgresStorageError::IntegerOutOfRange)?;
-        let mut client = self.client.borrow_mut();
-        let mut transaction = client.transaction()?;
-        transaction.execute(
-            "INSERT INTO chain_blocks (block_number, block_hash) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-            &[&block_number, &event.block_hash],
-        )?;
-        let inserted = transaction.execute(
-            "INSERT INTO chain_events (id, block_number, block_hash, tx_hash, log_index, kind, payload) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb) \
-             ON CONFLICT DO NOTHING",
-            &[
-                &event.id,
-                &block_number,
-                &event.block_hash,
-                &event.tx_hash,
-                &log_index,
-                &event.kind,
-                &event.payload,
-            ],
-        )?;
-        transaction.commit()?;
-        Ok(inserted == 1)
+        self.client
+            .run(move |client| -> Result<bool, PostgresStorageError> {
+                let mut transaction = client.transaction()?;
+                transaction.execute(
+                    "INSERT INTO chain_blocks (block_number, block_hash) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    &[&block_number, &event.block_hash],
+                )?;
+                let inserted = transaction.execute(
+                    "INSERT INTO chain_events (id, block_number, block_hash, tx_hash, log_index, kind, payload) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb) \
+                     ON CONFLICT DO NOTHING",
+                    &[
+                        &event.id,
+                        &block_number,
+                        &event.block_hash,
+                        &event.tx_hash,
+                        &log_index,
+                        &event.kind,
+                        &event.payload,
+                    ],
+                )?;
+                transaction.commit()?;
+                Ok(inserted == 1)
+            })
     }
 
     pub fn try_contains_event(&self, id: &str) -> Result<bool, PostgresStorageError> {
-        let row = self.client.borrow_mut().query_one(
-            "SELECT EXISTS (SELECT 1 FROM chain_events WHERE id = $1)",
-            &[&id],
-        )?;
+        let id = id.to_string();
+        let row = self.client.run(move |client| {
+            client.query_one(
+                "SELECT EXISTS (SELECT 1 FROM chain_events WHERE id = $1)",
+                &[&id],
+            )
+        })?;
         Ok(row.get(0))
     }
 
     pub fn try_record_block(&self, block: StoredBlock) -> Result<(), PostgresStorageError> {
         let block_number = to_i64(block.number)?;
-        self.client.borrow_mut().execute(
-            "INSERT INTO chain_blocks (block_number, block_hash) VALUES ($1, $2) \
-             ON CONFLICT (block_number) DO UPDATE SET block_hash = EXCLUDED.block_hash, indexed_at = now()",
-            &[&block_number, &block.hash],
-        )?;
+        self.client.run(move |client| {
+            client.execute(
+                "INSERT INTO chain_blocks (block_number, block_hash) VALUES ($1, $2) \
+                 ON CONFLICT (block_number) DO UPDATE SET block_hash = EXCLUDED.block_hash, indexed_at = now()",
+                &[&block_number, &block.hash],
+            )
+        })?;
         Ok(())
     }
 
     pub fn try_last_indexed_block(&self) -> Result<Option<StoredBlock>, PostgresStorageError> {
-        let row = self.client.borrow_mut().query_opt(
-            "SELECT block_number, block_hash FROM chain_blocks ORDER BY block_number DESC LIMIT 1",
-            &[],
-        )?;
+        let row = self.client.run(|client| {
+            client.query_opt(
+                "SELECT block_number, block_hash FROM chain_blocks ORDER BY block_number DESC LIMIT 1",
+                &[],
+            )
+        })?;
         row.map(|row| {
             let number = row.get::<_, i64>(0);
             Ok(StoredBlock {
@@ -460,10 +535,13 @@ impl PostgresDatabase {
         observed_hash: &str,
     ) -> Result<bool, PostgresStorageError> {
         let block_number = to_i64(block_number)?;
-        let row = self.client.borrow_mut().query_opt(
-            "SELECT block_hash FROM chain_blocks WHERE block_number = $1",
-            &[&block_number],
-        )?;
+        let observed_hash = observed_hash.to_string();
+        let row = self.client.run(move |client| {
+            client.query_opt(
+                "SELECT block_hash FROM chain_blocks WHERE block_number = $1",
+                &[&block_number],
+            )
+        })?;
         Ok(row
             .map(|row| row.get::<_, String>(0) != observed_hash)
             .unwrap_or(false))
@@ -473,10 +551,13 @@ impl PostgresDatabase {
         &self,
         key: &str,
     ) -> Result<Option<T>, PostgresStorageError> {
-        let row = self.client.borrow_mut().query_opt(
-            "SELECT payload::text FROM operator_snapshots WHERE key = $1",
-            &[&key],
-        )?;
+        let key = key.to_string();
+        let row = self.client.run(move |client| {
+            client.query_opt(
+                "SELECT payload::text FROM operator_snapshots WHERE key = $1",
+                &[&key],
+            )
+        })?;
         row.map(|row| serde_json::from_str(&row.get::<_, String>(0)))
             .transpose()
             .map_err(PostgresStorageError::Json)
@@ -488,11 +569,14 @@ impl PostgresDatabase {
         value: &T,
     ) -> Result<(), PostgresStorageError> {
         let payload = serde_json::to_string(value)?;
-        self.client.borrow_mut().execute(
-            "INSERT INTO operator_snapshots (key, payload) VALUES ($1, $2::jsonb) \
-             ON CONFLICT (key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()",
-            &[&key, &payload],
-        )?;
+        let key = key.to_string();
+        self.client.run(move |client| {
+            client.execute(
+                "INSERT INTO operator_snapshots (key, payload) VALUES ($1, $2::jsonb) \
+                 ON CONFLICT (key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()",
+                &[&key, &payload],
+            )
+        })?;
         Ok(())
     }
 }
