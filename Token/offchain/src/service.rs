@@ -70,10 +70,16 @@ where
 
         let planned_commands = match indexed.event.clone() {
             ChainEvent::RefBound { user, referrer, .. } => {
-                self.engine
-                    .bind(&mut self.state, user, referrer)
-                    .map_err(ServiceError::Engine)?;
-                0
+                // Tolerate the bootstrap RefBound(root, root) emitted by the
+                // on-chain constructor: the offchain state pre-binds the root.
+                if user == referrer && self.state.is_bound(&user) {
+                    0
+                } else {
+                    self.engine
+                        .bind(&mut self.state, user, referrer)
+                        .map_err(ServiceError::Engine)?;
+                    0
+                }
             }
             ChainEvent::Deposit { user, amount, .. } => {
                 let allocation = self
