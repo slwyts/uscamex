@@ -5,7 +5,7 @@ import { motion } from "framer-motion";
 import { FadeUp } from "./Animations";
 import { useLocale } from "@/i18n/context";
 
-const NODE_ADDRESS = "0x776289d56b7e4A6FBc85Ba64F851Cae2351d3a49";
+const NODE_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 const tiers = [
   {
@@ -176,11 +176,9 @@ export default function GenesisNodeSection() {
               </button>
             </div>
 
-            <div className="mt-5 grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="mt-5 grid grid-cols-2 gap-3">
               <Fact label={t("node.fact.network")} value="BNB Chain" />
               <Fact label={t("node.fact.range")} value="0.1 — 5 BNB" />
-              <Fact label={t("node.fact.referral")} value={t("node.fact.referralValue")} />
-              <Fact label={t("node.fact.payout")} value={t("node.fact.payoutValue")} />
             </div>
           </div>
         </FadeUp>
