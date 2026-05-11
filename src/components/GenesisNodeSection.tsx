@@ -11,27 +11,10 @@ const tiers = [
   {
     nameKey: "node.tier.starter.name",
     descKey: "node.tier.starter.desc",
-    amount: "0.5",
+    amount: "1",
     weight: 1,
     accent: "from-[#f5c842]/15 to-transparent",
     ring: "ring-[#f5c842]/25",
-  },
-  {
-    nameKey: "node.tier.super.name",
-    descKey: "node.tier.super.desc",
-    amount: "1.5",
-    weight: 3,
-    accent: "from-[#ff8c42]/20 via-[#f5c842]/10 to-transparent",
-    ring: "ring-[#f5c842]/45",
-    highlight: true,
-  },
-  {
-    nameKey: "node.tier.genesis.name",
-    descKey: "node.tier.genesis.desc",
-    amount: "5.0",
-    weight: 10,
-    accent: "from-[#9b6cff]/20 via-[#f5c842]/10 to-transparent",
-    ring: "ring-[#f5c842]/30",
   },
 ] as const;
 
@@ -78,30 +61,20 @@ export default function GenesisNodeSection() {
           </p>
         </FadeUp>
 
-        {/* Tier cards */}
-        <div className="mt-12 grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-5">
+        {/* Tier card */}
+        <div className="mt-12 max-w-[420px] mx-auto">
           {tiers.map((tier, i) => (
             <FadeUp key={tier.nameKey} delay={i * 0.08}>
               <motion.div
                 whileHover={{ y: -4 }}
                 transition={{ type: "spring", stiffness: 300, damping: 20 }}
-                className={`relative rounded-2xl border border-white/[0.08] bg-[#0f0f17]/80 backdrop-blur-sm p-6 md:p-7 ring-1 ${tier.ring} ${
-                  "highlight" in tier && tier.highlight
-                    ? "md:scale-[1.03] md:-translate-y-1 shadow-[0_24px_64px_-24px_rgba(245,200,66,0.35)]"
-                    : ""
-                }`}
+                className={`relative rounded-2xl border border-white/[0.08] bg-[#0f0f17]/80 backdrop-blur-sm p-6 md:p-7 ring-1 ${tier.ring} shadow-[0_24px_64px_-24px_rgba(245,200,66,0.35)]`}
               >
                 {/* tier accent gradient */}
                 <div
                   aria-hidden
                   className={`absolute inset-0 -z-10 rounded-2xl bg-gradient-to-b ${tier.accent} opacity-70`}
                 />
-
-                {"highlight" in tier && tier.highlight && (
-                  <span className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-[#f5c842] text-[#0a0a0f] text-[11px] font-bold tracking-wider">
-                    {t("node.tier.recommended")}
-                  </span>
-                )}
 
                 <div className="flex items-baseline justify-between">
                   <h3 className="text-[18px] md:text-[20px] font-bold text-white">
@@ -174,11 +147,6 @@ export default function GenesisNodeSection() {
               >
                 {copied ? t("node.copied") : t("node.copy")}
               </button>
-            </div>
-
-            <div className="mt-5 grid grid-cols-2 gap-3">
-              <Fact label={t("node.fact.network")} value="BNB Chain" />
-              <Fact label={t("node.fact.range")} value="0.1 — 5 BNB" />
             </div>
           </div>
         </FadeUp>
