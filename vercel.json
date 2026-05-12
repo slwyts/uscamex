@@ -1,0 +1,15 @@
+{
+  "redirects": [
+    {
+      "source": "/",
+      "has": [
+        {
+          "type": "host",
+          "value": "res.uscamex.info"
+        }
+      ],
+      "destination": "https://www.uscamex.info/",
+      "permanent": false
+    }
+  ]
+}
