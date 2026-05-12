@@ -5,7 +5,28 @@ import { motion } from "framer-motion";
 import { FadeUp } from "./Animations";
 import { useLocale } from "@/i18n/context";
 
-const NODE_ADDRESS = "0x0000000000000000000000000000000000000000";
+const NODE_ADDRESS = "0x3705Ea089E280DBB9e2F42C72983ABC7094B720d";
+// BSC 主网 Chain ID = 56 (0x38)
+const BSC_CHAIN_ID_HEX = "0x38";
+const BSC_CHAIN_PARAMS = {
+  chainId: BSC_CHAIN_ID_HEX,
+  chainName: "BNB Smart Chain",
+  nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
+  rpcUrls: ["https://bsc-dataseed.binance.org/"],
+  blockExplorerUrls: ["https://bscscan.com"],
+};
+// 1 BNB = 10^18 wei = 0xDE0B6B3A7640000
+const ONE_BNB_WEI_HEX = "0xDE0B6B3A7640000";
+
+type Eip1193Provider = {
+  request: (args: { method: string; params?: unknown[] | object }) => Promise<unknown>;
+};
+
+declare global {
+  interface Window {
+    ethereum?: Eip1193Provider;
+  }
+}
 
 const tiers = [
   {
@@ -20,12 +41,106 @@ const tiers = [
 
 export default function GenesisNodeSection() {
   const [copied, setCopied] = useState(false);
+  const [minting, setMinting] = useState(false);
+  const [statusKey, setStatusKey] = useState<string | null>(null);
+  const [statusTone, setStatusTone] = useState<"info" | "success" | "error">("info");
+  const [txHash, setTxHash] = useState<string | null>(null);
   const { t } = useLocale();
 
   const handleCopy = () => {
     navigator.clipboard.writeText(NODE_ADDRESS);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const showStatus = (key: string, tone: "info" | "success" | "error" = "info") => {
+    setStatusKey(key);
+    setStatusTone(tone);
+  };
+
+  const handleMint = async () => {
+    if (minting) return;
+    setTxHash(null);
+    const provider = typeof window !== "undefined" ? window.ethereum : undefined;
+    if (!provider) {
+      showStatus("node.noWallet", "error");
+      return;
+    }
+    setMinting(true);
+    try {
+      // 1. 请求账户连接
+      showStatus("node.connecting", "info");
+      const accounts = (await provider.request({
+        method: "eth_requestAccounts",
+      })) as string[];
+      const from = accounts?.[0];
+      if (!from) {
+        showStatus("node.userRejected", "error");
+        return;
+      }
+
+      // 2. 检查并切换到 BSC 主网
+      const currentChainId = (await provider.request({ method: "eth_chainId" })) as string;
+      if (currentChainId?.toLowerCase() !== BSC_CHAIN_ID_HEX) {
+        showStatus("node.switching", "info");
+        try {
+          await provider.request({
+            method: "wallet_switchEthereumChain",
+            params: [{ chainId: BSC_CHAIN_ID_HEX }],
+          });
+        } catch (switchErr) {
+          const code = (switchErr as { code?: number })?.code;
+          // 4902 = 链未添加，尝试添加
+          if (code === 4902) {
+            try {
+              await provider.request({
+                method: "wallet_addEthereumChain",
+                params: [BSC_CHAIN_PARAMS],
+              });
+            } catch {
+              showStatus("node.wrongChain", "error");
+              return;
+            }
+          } else if (code === 4001) {
+            showStatus("node.userRejected", "error");
+            return;
+          } else {
+            showStatus("node.wrongChain", "error");
+            return;
+          }
+        }
+        // 二次校验
+        const verifyChainId = (await provider.request({ method: "eth_chainId" })) as string;
+        if (verifyChainId?.toLowerCase() !== BSC_CHAIN_ID_HEX) {
+          showStatus("node.wrongChain", "error");
+          return;
+        }
+      }
+
+      // 3. 发起转账：向合约地址转 1 BNB
+      showStatus("node.minting", "info");
+      const hash = (await provider.request({
+        method: "eth_sendTransaction",
+        params: [
+          {
+            from,
+            to: NODE_ADDRESS,
+            value: ONE_BNB_WEI_HEX,
+          },
+        ],
+      })) as string;
+      setTxHash(hash);
+      showStatus("node.mintSuccess", "success");
+    } catch (err) {
+      const code = (err as { code?: number })?.code;
+      if (code === 4001) {
+        showStatus("node.userRejected", "error");
+      } else {
+        showStatus("node.mintFailed", "error");
+      }
+    } finally {
+      setMinting(false);
+    }
   };
 
   return (
@@ -143,10 +258,49 @@ export default function GenesisNodeSection() {
               </code>
               <button
                 onClick={handleCopy}
-                className="px-6 py-3 rounded-xl bg-[#f5c842] text-[#0a0a0f] text-[14px] font-bold hover:bg-[#f5c842]/90 transition-colors duration-200 cursor-pointer shadow-[0_0_24px_rgba(245,200,66,0.25)]"
+                className="px-6 py-3 rounded-xl bg-white/5 border border-white/10 text-[14px] font-bold text-white/85 hover:text-[#f5c842] hover:border-[#f5c842]/40 transition-colors duration-200 cursor-pointer"
               >
                 {copied ? t("node.copied") : t("node.copy")}
               </button>
+            </div>
+
+            {/* 一键铸造按钮 */}
+            <div className="mt-4">
+              <button
+                onClick={handleMint}
+                disabled={minting}
+                className="w-full px-6 py-3.5 rounded-xl bg-[#f5c842] text-[#0a0a0f] text-[15px] font-bold hover:bg-[#f5c842]/90 transition-colors duration-200 cursor-pointer shadow-[0_0_24px_rgba(245,200,66,0.25)] disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
+              >
+                <BoltIcon />
+                {minting ? t("node.minting" as never) : t("node.mint" as never)}
+              </button>
+
+              {statusKey && (
+                <div
+                  className={`mt-3 rounded-lg px-3 py-2 text-[12.5px] border ${
+                    statusTone === "success"
+                      ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-300"
+                      : statusTone === "error"
+                      ? "border-red-400/30 bg-red-400/10 text-red-300"
+                      : "border-white/10 bg-white/5 text-white/70"
+                  }`}
+                >
+                  {t(statusKey as never)}
+                  {txHash && (
+                    <>
+                      {" · "}
+                      <a
+                        href={`https://bscscan.com/tx/${txHash}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline break-all"
+                      >
+                        {txHash.slice(0, 10)}…{txHash.slice(-8)}
+                      </a>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </FadeUp>
@@ -188,6 +342,20 @@ function PdfIcon() {
       <polyline points="14 2 14 8 20 8" />
       <line x1="9" y1="13" x2="15" y2="13" />
       <line x1="9" y1="17" x2="15" y2="17" />
+    </svg>
+  );
+}
+
+function BoltIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path d="M13 2 4 14h7l-1 8 9-12h-7l1-8z" />
     </svg>
   );
 }
