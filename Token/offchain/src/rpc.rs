@@ -57,8 +57,13 @@ impl From<reqwest::Error> for RpcError {
 impl BscRpcClient {
     pub fn new(rpc_url: impl Into<String>, token_address: &str) -> Result<Self, RpcError> {
         let token_address = parse_address(token_address)?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(RpcError::Http)?;
         Ok(Self {
-            client: reqwest::Client::new(),
+            client,
             rpc_url: rpc_url.into(),
             token_address,
         })

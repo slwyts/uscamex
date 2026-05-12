@@ -16,6 +16,15 @@ interface IPancakeRouter {
         external
         payable
         returns (uint256 amountToken, uint256 amountETH, uint256 liquidity);
+
+    function removeLiquidityETHSupportingFeeOnTransferTokens(
+        address token,
+        uint256 liquidity,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
+        address to,
+        uint256 deadline
+    ) external returns (uint256 amountETH);
 }
 
 interface IPancakeFactory {
@@ -24,4 +33,5 @@ interface IPancakeFactory {
 
 interface IPancakePair {
     function sync() external;
+    function approve(address spender, uint256 value) external returns (bool);
 }

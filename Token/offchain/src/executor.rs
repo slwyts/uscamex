@@ -37,6 +37,32 @@ pub enum OperatorCommand {
         user: Address,
         refund_bnb: u128,
     },
+    /// Redeem the caller's LP custody share by invoking
+    /// `operatorRedeemLp(user, lpAmount)` on the token contract. The chain
+    /// layer computes `lpAmount = pair_balance_of_token × user_share /
+    /// total_active_principal`, so the caller must supply the denominator
+    /// snapshot taken at the moment of exit.
+    RedeemUserLp {
+        user: Address,
+        lp_bnb_share: u128,
+        total_active_principal: u128,
+    },
+    /// Convert `tax_token_amount` of project tokens accumulated in the
+    /// token contract's self-custody (from buy/sell tax) into BNB and
+    /// distribute it according to the spec section 4:
+    ///   • `burn_token_amount` of the tokens are burned to the zero
+    ///     address ("剩余项目代币全部销毁至黑洞");
+    ///   • the remainder is swapped to BNB; the BNB output is forwarded
+    ///     to `owner` and the buyback `vault` in proportion to
+    ///     `owner_bnb_bps_of_sold` / `vault_bnb_bps_of_sold`.
+    /// The chain layer expands this single command into the operatorCall
+    /// sequence: approve → swap → burn → call{value} → call{value}.
+    SweepTaxToBnb {
+        tax_token_amount: u128,
+        burn_token_amount: u128,
+        owner_bnb_bps_of_sold: u16,
+        vault_bnb_bps_of_sold: u16,
+    },
 }
 
 impl OperatorCommand {
@@ -51,6 +77,8 @@ impl OperatorCommand {
             Self::PayRewardTokenByBnbValue { .. } => "pay-reward-token",
             Self::BurnTokenByBnbValue { reason, .. } => reason.as_str(),
             Self::ExitPosition { .. } => "exit-position",
+            Self::RedeemUserLp { .. } => "redeem-user-lp",
+            Self::SweepTaxToBnb { .. } => "sweep-tax-to-bnb",
         }
     }
 }
@@ -96,15 +124,12 @@ pub fn commands_for_settlement(settlement: &StaticSettlement) -> Vec<OperatorCom
         amount: settlement.static_bnb,
     }];
     commands.extend(settlement.team_rewards.iter().map(command_for_team_reward));
-    if let Some(refund_bnb) = settlement.exit_refund_bnb {
-        commands.push(OperatorCommand::BurnTokenByBnbValue {
-            amount: refund_bnb,
-            reason: "exit-burn".to_owned(),
-        });
-        commands.push(OperatorCommand::TransferBnb {
-            to: settlement.user.clone(),
-            amount: refund_bnb,
-            reason: "exit-refund".to_owned(),
+    if let Some(lp_bnb_share) = settlement.lp_redeem_bnb_share {
+        commands.push(OperatorCommand::RedeemUserLp {
+            user: settlement.user.clone(),
+            lp_bnb_share,
+            // Denominator already excludes the exiting user's share.
+            total_active_principal: settlement.total_active_lp_principal_bnb.saturating_add(lp_bnb_share),
         });
     }
     commands

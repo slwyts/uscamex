@@ -1,5 +1,5 @@
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::chain::ChainClient;
 use crate::indexer::{classify_system_log, decode_protocol_log, DecodeError, RawLog, SystemEvent};
@@ -71,7 +71,25 @@ pub struct OperatorRuntime<D, C> {
     pub service: OperatorService<D, C>,
     pub rpc: BscRpcClient,
     pub config: RuntimeScanConfig,
+    /// Last UTC+8 settlement slot tag (e.g. "2026-05-12T06") whose
+    /// settlement we have already scheduled. `None` until the first tick
+    /// completes.
+    last_settlement_slot: Option<String>,
+    /// Last hour slot tag (e.g. "2026-05-12T03") for which deflation was
+    /// scheduled.
+    last_deflation_slot: Option<String>,
+    /// Last minute slot tag for which buyback was scheduled.
+    last_buyback_slot: Option<String>,
 }
+
+/// Seconds per day. Settlement period seconds are derived dynamically from
+/// the current `settlement_periods_per_day` config so that switching from
+/// 4 × 6h to 12 × 2h (or any other divisor of 24h) needs no redeploy.
+const SECS_PER_DAY: u64 = 86_400;
+/// UTC+8 offset applied before truncating slot tags so periods align to
+/// Beijing local time (00 / 06 / 12 / 18 for the default 4-per-day cadence,
+/// or every 2h on the 12-per-day cadence).
+const UTC8_OFFSET_SECS: u64 = 8 * 3600;
 
 impl<D, C> OperatorRuntime<D, C>
 where
@@ -88,11 +106,61 @@ where
             service,
             rpc,
             config,
+            last_settlement_slot: None,
+            last_deflation_slot: None,
+            last_buyback_slot: None,
         }
     }
 
     pub async fn run_once(&mut self) -> Result<Option<RuntimeScanSummary>, RuntimeError<C::Error>> {
         scan_confirmed_logs_once(&mut self.service, &self.rpc, &self.config).await
+    }
+
+    /// Evaluate wall-clock-driven schedules (settlement / deflation / buyback)
+    /// and emit any newly due commands. Idempotent across restarts because
+    /// every command planned here is keyed by its slot tag at the journal
+    /// layer.
+    pub fn run_scheduled_ticks(&mut self) -> Result<TickReport, RuntimeError<C::Error>> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let mut report = TickReport::default();
+
+        // Settlement: align to UTC+8 boundaries. The boundary step is
+        // `86400 / settlement_periods_per_day` so 4 periods/day → 6h windows,
+        // 12 periods/day → 2h windows, etc. Period count is read from the
+        // live engine config so the operator picks up any chain-side change
+        // on the next tick.
+        let periods_per_day = self.service.engine.config.settlement_periods_per_day.max(1) as u64;
+        let period_secs = SECS_PER_DAY / periods_per_day;
+        let settlement_slot = format_settlement_slot(now, period_secs, periods_per_day);
+        if self.last_settlement_slot.as_deref() != Some(settlement_slot.as_str()) {
+            report.settled_users = self.service.tick_settlements(&settlement_slot);
+            self.last_settlement_slot = Some(settlement_slot);
+        }
+
+        // Deflation: hourly slot tag in UTC.
+        let deflation_slot = format_hour_slot(now);
+        if self.last_deflation_slot.as_deref() != Some(deflation_slot.as_str()) {
+            let day = now / 86_400;
+            report.deflation_amount = self
+                .service
+                .tick_deflation(day, &deflation_slot)
+                .map_err(RuntimeError::Service)?;
+            self.last_deflation_slot = Some(deflation_slot);
+        }
+
+        // Buyback: per-minute slot tag in UTC.
+        let buyback_slot = format_minute_slot(now);
+        if self.last_buyback_slot.as_deref() != Some(buyback_slot.as_str()) {
+            report.buyback_amount = self
+                .service
+                .tick_buyback(&buyback_slot)
+                .map_err(RuntimeError::Service)?;
+            self.last_buyback_slot = Some(buyback_slot);
+        }
+        Ok(report)
     }
 
     pub async fn run_forever(&mut self) -> Result<(), RuntimeError<C::Error>> {
@@ -113,9 +181,88 @@ where
                 }
                 _ => {}
             }
+            match self.run_scheduled_ticks() {
+                Ok(report) if report.has_activity() => {
+                    println!(
+                        "operator schedule: settled_users={} deflation={:?} buyback={:?}",
+                        report.settled_users, report.deflation_amount, report.buyback_amount,
+                    );
+                    if let Err(error) = self.service.submit_pending() {
+                        eprintln!("scheduled submit_pending failed: {error:?}");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("scheduled tick failed: {error:?}");
+                }
+            }
             tokio::time::sleep(self.config.poll_interval).await;
         }
     }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct TickReport {
+    pub settled_users: usize,
+    pub deflation_amount: Option<u128>,
+    pub buyback_amount: Option<u128>,
+}
+
+impl TickReport {
+    fn has_activity(&self) -> bool {
+        self.settled_users != 0
+            || self.deflation_amount.is_some()
+            || self.buyback_amount.is_some()
+    }
+}
+
+/// Beijing-time period tag. Aligns settlement boundaries to UTC+8 with a
+/// configurable `period_secs`. The tag embeds `periods_per_day` so that if
+/// the operator changes the cadence (e.g. 4 → 12 settlements/day) the old
+/// and new slot tags never collide in the journal — guaranteeing neither
+/// duplicate nor skipped payouts across the transition.
+fn format_settlement_slot(now_unix: u64, period_secs: u64, periods_per_day: u64) -> String {
+    let period_secs = period_secs.max(1);
+    let shifted = now_unix.saturating_add(UTC8_OFFSET_SECS);
+    let slot_index = shifted / period_secs;
+    let slot_start = slot_index * period_secs;
+    let (year, month, day, hour) = unix_seconds_to_ymd_hms(slot_start);
+    let minute = (slot_start / 60) % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}+08/{periods_per_day}")
+}
+
+fn format_hour_slot(now_unix: u64) -> String {
+    let slot_start = (now_unix / 3600) * 3600;
+    let (year, month, day, hour) = unix_seconds_to_ymd_hms(slot_start);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}Z")
+}
+
+fn format_minute_slot(now_unix: u64) -> String {
+    let slot_start = (now_unix / 60) * 60;
+    let (year, month, day, hour) = unix_seconds_to_ymd_hms(slot_start);
+    let minute = (slot_start / 60) % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}Z")
+}
+
+/// Convert seconds since the Unix epoch into a calendar `(year, month, day,
+/// hour)` tuple. Pure integer arithmetic – avoids pulling in `chrono` purely
+/// for slot labels.
+fn unix_seconds_to_ymd_hms(timestamp: u64) -> (u64, u64, u64, u64) {
+    let days = timestamp / 86_400;
+    let seconds_of_day = timestamp % 86_400;
+    let hour = seconds_of_day / 3600;
+    // Civil-from-days algorithm by Howard Hinnant.
+    let z = days as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp.saturating_sub(9) };
+    let final_year = if month <= 2 { year + 1 } else { year };
+    (final_year as u64, month, day, hour)
 }
 
 pub async fn scan_confirmed_logs_once<D, C>(

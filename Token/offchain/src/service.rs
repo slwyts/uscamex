@@ -125,6 +125,81 @@ where
         Ok(Some(commands))
     }
 
+    /// Iterate every active user and run one settlement period for them.
+    /// Returns the number of users newly settled (excludes idempotent skips
+    /// and inactive accounts).
+    pub fn tick_settlements(&mut self, period_key: impl Into<String>) -> usize {
+        let period_key = period_key.into();
+        let active_users: Vec<Address> = self
+            .state
+            .users
+            .iter()
+            .filter(|(_, account)| account.active && account.principal_bnb > 0)
+            .map(|(address, _)| address.clone())
+            .collect();
+        let mut settled = 0usize;
+        for user in active_users {
+            match self.settle_once(user, period_key.clone()) {
+                Ok(Some(_)) => settled += 1,
+                Ok(None) => {}
+                Err(_) => {}
+            }
+        }
+        settled
+    }
+
+    /// Run one deflation tick (hourly). Returns Some(amount_pulled) when the
+    /// command was planned. Caller supplies a slot key like `"day-1:hour-3"`
+    /// for cross-restart idempotency at journal level.
+    pub fn tick_deflation(
+        &mut self,
+        day: u64,
+        slot_key: impl Into<String>,
+    ) -> Result<Option<u128>, ServiceError<C::Error>> {
+        let slot_key = slot_key.into();
+        let amount = self
+            .engine
+            .apply_deflation(&mut self.state, day)
+            .map_err(ServiceError::Engine)?;
+        if amount == 0 {
+            self.persist();
+            return Ok(None);
+        }
+        self.journal.plan_batch(
+            &format!("deflation:{slot_key}"),
+            vec![OperatorCommand::PullPairTokens {
+                bps: self.engine.config.deflation_hourly_bps,
+            }],
+        );
+        self.persist();
+        Ok(Some(amount))
+    }
+
+    /// Run one buyback tick (every minute). `slot_key` is the per-minute
+    /// idempotency tag.
+    pub fn tick_buyback(
+        &mut self,
+        slot_key: impl Into<String>,
+    ) -> Result<Option<u128>, ServiceError<C::Error>> {
+        let slot_key = slot_key.into();
+        let vault_before = self.state.balances.vault_bnb;
+        let burned = self
+            .engine
+            .buyback_tick(&mut self.state)
+            .map_err(ServiceError::Engine)?;
+        if burned == 0 {
+            self.persist();
+            return Ok(None);
+        }
+        let spent = vault_before.saturating_sub(self.state.balances.vault_bnb);
+        self.journal.plan_batch(
+            &format!("buyback:{slot_key}"),
+            vec![OperatorCommand::Buyback { bnb_amount: spent }],
+        );
+        self.persist();
+        Ok(Some(burned))
+    }
+
     pub fn submit_pending(&mut self) -> Result<Vec<String>, ServiceError<C::Error>> {
         let result = submit_pending(&mut self.chain, &mut self.journal);
         self.database.save_journal(&self.journal);

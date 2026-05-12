@@ -55,7 +55,18 @@ pub struct StaticSettlement {
     pub static_bnb: Wei,
     pub team_rewards: Vec<RewardPayout>,
     pub exited: bool,
+    /// Legacy informational field: BNB-denominated principal at the moment
+    /// of exit. Kept for journaling / admin reports.
     pub exit_refund_bnb: Option<Wei>,
+    /// When set, the executor must redeem this user's share of LP custody by
+    /// calling `operatorRedeemLp(user, lp_amount_quoted_from_share)`. Value
+    /// is the user's BNB-denominated LP basis at exit.
+    pub lp_redeem_bnb_share: Option<Wei>,
+    /// Sum of `lp_bnb_principal` across all still-active users at the moment
+    /// of this settlement (after the exit deduction has been applied if this
+    /// settlement triggers an exit). The chain layer divides the contract's
+    /// LP custody by this denominator to obtain the user's LP share.
+    pub total_active_lp_principal_bnb: Wei,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,10 +176,16 @@ impl Engine {
             account.principal_bnb = 0;
             account.static_paid_bnb = 0;
             account.dynamic_paid_bnb = 0;
+            account.lp_bnb_principal = 0;
         }
         account.principal_bnb = account.principal_bnb.saturating_add(amount);
+        account.lp_bnb_principal = account.lp_bnb_principal.saturating_add(lp_bnb);
         account.active = true;
         account.exited = false;
+        state.balances.total_active_lp_principal_bnb = state
+            .balances
+            .total_active_lp_principal_bnb
+            .saturating_add(lp_bnb);
 
         Ok(DepositAllocation {
             user,
@@ -246,18 +263,32 @@ impl Engine {
             / BPS_DENOMINATOR;
         let total_paid = account.static_paid_bnb + account.dynamic_paid_bnb;
         let exited = total_paid >= exit_target;
+        let mut lp_redeem_bnb_share = None;
+        let mut exit_refund_bnb = None;
         if exited {
             account.active = false;
             account.exited = true;
+            exit_refund_bnb = Some(account.principal_bnb);
+            let share = account.lp_bnb_principal;
+            if share != 0 {
+                account.lp_bnb_principal = 0;
+                lp_redeem_bnb_share = Some(share);
+                state.balances.total_active_lp_principal_bnb = state
+                    .balances
+                    .total_active_lp_principal_bnb
+                    .saturating_sub(share);
+            }
         }
-        let exit_refund_bnb = exited.then_some(account.principal_bnb);
 
+        let total_active_lp_principal_bnb = state.balances.total_active_lp_principal_bnb;
         Ok(StaticSettlement {
             user,
             static_bnb,
             team_rewards,
             exited,
             exit_refund_bnb,
+            lp_redeem_bnb_share,
+            total_active_lp_principal_bnb,
         })
     }
 
@@ -265,7 +296,7 @@ impl Engine {
         &self,
         state: &mut ProtocolState,
         user: impl Into<Address>,
-    ) -> Result<Wei, EngineError> {
+    ) -> Result<(Wei, Wei), EngineError> {
         let user = user.into();
         let account = state.ensure_user_mut(&user);
         if !account.active || account.principal_bnb == 0 {
@@ -273,7 +304,14 @@ impl Engine {
         }
         account.active = false;
         account.exited = true;
-        Ok(account.principal_bnb)
+        let principal = account.principal_bnb;
+        let lp_share = account.lp_bnb_principal;
+        account.lp_bnb_principal = 0;
+        state.balances.total_active_lp_principal_bnb = state
+            .balances
+            .total_active_lp_principal_bnb
+            .saturating_sub(lp_share);
+        Ok((principal, lp_share))
     }
 
     pub fn apply_deflation(&self, state: &mut ProtocolState, day: u64) -> Result<Wei, EngineError> {
@@ -394,7 +432,9 @@ impl Engine {
     fn distribute_nodes(&self, state: &mut ProtocolState, amount: Wei) -> Vec<BnbPayout> {
         let total_weight: u32 = state.nodes.iter().map(|node| node.weight).sum();
         if amount == 0 || total_weight == 0 {
-            state.balances.vault_bnb += amount;
+            // No node registered → the spec says the 10% should be routed to
+            // the project owner (eco fund) rather than disappearing.
+            state.balances.owner_bnb = state.balances.owner_bnb.saturating_add(amount);
             return Vec::new();
         }
         let mut paid = 0;
@@ -415,8 +455,10 @@ impl Engine {
                 });
             }
         }
+        // Rounding dust also flows to the owner, keeping vault BNB strictly
+        // reserved for buyback funding.
         let dust = amount.saturating_sub(paid);
-        state.balances.vault_bnb += dust;
+        state.balances.owner_bnb = state.balances.owner_bnb.saturating_add(dust);
         payouts
     }
 

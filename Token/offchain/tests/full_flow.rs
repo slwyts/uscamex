@@ -98,17 +98,11 @@ fn field_sale_full_flow_simulation() {
         let final_settlement = engine.settle_static_period(&mut state, "bob").unwrap();
         if final_settlement.exited {
             let exit_commands = commands_for_settlement(&final_settlement);
-            assert!(
-                exit_commands.contains(&OperatorCommand::BurnTokenByBnbValue {
-                    amount: BNB,
-                    reason: "exit-burn".into(),
-                })
-            );
-            assert!(exit_commands.contains(&OperatorCommand::TransferBnb {
-                to: "bob".into(),
-                amount: BNB,
-                reason: "exit-refund".into(),
-            }));
+            assert!(exit_commands.iter().any(|command| matches!(
+                command,
+                OperatorCommand::RedeemUserLp { user, lp_bnb_share, .. }
+                    if user == "bob" && *lp_bnb_share > 0
+            )));
         }
     }
     assert!(state.user("bob").unwrap().exited);

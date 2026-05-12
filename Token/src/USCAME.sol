@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.34;
 
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
@@ -86,6 +86,7 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     event VaultCreated(address indexed vault);
     event ProtocolConfigUpdated(address indexed operator);
     event NodeUpdated(address indexed node, uint32 weight);
+    event LpRedeemed(address indexed user, uint256 lpAmount, uint256 bnbReturned, uint256 tokenBurned);
 
     modifier onlyOperator() {
         require(msg.sender == owner() || msg.sender == operator, "OPERATOR");
@@ -141,12 +142,44 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         IPancakeRouter pancake = IPancakeRouter(router);
         _approve(address(this), router, tokenAmount);
         pancake.addLiquidityETH{ value: bnbAmount }(
-            address(this), tokenAmount, 0, 0, owner(), block.timestamp
+            address(this), tokenAmount, 0, 0, address(this), block.timestamp
         );
         pair = IPancakeFactory(pancake.factory()).getPair(address(this), pancake.WETH());
         require(pair != address(0), "NO_PAIR");
         initialized = true;
         emit PairInitialized(pair, tokenAmount, bnbAmount);
+    }
+
+    /// Operator-driven exit: redeem `lpAmount` LP held by this contract,
+    /// burn the returned project tokens, and forward the returned BNB to
+    /// `user`. The token contract holds all LP itself (self-custody), so
+    /// the offchain operator orchestrates user exits exclusively through
+    /// this entry point.
+    function operatorRedeemLp(address user, uint256 lpAmount)
+        external
+        onlyOperator
+        nonReentrant
+        returns (uint256 bnbReturned, uint256 tokenBurned)
+    {
+        require(user != address(0) && lpAmount != 0 && pair != address(0), "REDEEM");
+        IPancakePair(pair).approve(router, lpAmount);
+        uint256 tokenBefore = balanceOf(address(this));
+        uint256 ethBefore = address(this).balance;
+        IPancakeRouter(router).removeLiquidityETHSupportingFeeOnTransferTokens(
+            address(this), lpAmount, 0, 0, address(this), block.timestamp
+        );
+        unchecked {
+            tokenBurned = balanceOf(address(this)) - tokenBefore;
+            bnbReturned = address(this).balance - ethBefore;
+        }
+        if (tokenBurned != 0) {
+            _burn(address(this), tokenBurned);
+        }
+        if (bnbReturned != 0) {
+            (bool ok, ) = user.call{ value: bnbReturned }("");
+            require(ok, "REFUND");
+        }
+        emit LpRedeemed(user, lpAmount, bnbReturned, tokenBurned);
     }
 
     function transferOwnership(address nextOwner) public override onlyOwner {
@@ -283,6 +316,19 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
             IPancakePair(pair).sync();
         }
         emit PairTokensPulled(amount, bps);
+    }
+
+    /// Pull an exact amount of project tokens out of the Pair contract into
+    /// this contract's self-custody. Used by the offchain deposit pipeline
+    /// when it needs a precise token quantity to pair against the user's
+    /// BNB for `addLiquidityETH`. Single-sided extraction; `sync()` keeps
+    /// Pair reserves authoritative so AMM math remains consistent.
+    function pullPairTokensExact(uint256 amount) external onlyOperator {
+        require(pair != address(0), "PULL");
+        require(amount != 0 && amount <= balanceOf(pair), "AMOUNT");
+        super._update(pair, address(this), amount);
+        IPancakePair(pair).sync();
+        emit PairTokensPulled(amount, 0);
     }
 
     function burn(uint256 amount) external {

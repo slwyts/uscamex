@@ -36,18 +36,23 @@ impl WorkflowEngine {
         user: impl Into<Address>,
     ) -> Result<Vec<OperatorCommand>, EngineError> {
         let user = user.into();
-        let amount = self.engine.withdraw_lp(state, user.clone())?;
-        Ok(vec![
-            OperatorCommand::BurnTokenByBnbValue {
-                amount,
-                reason: "exit-burn".to_owned(),
-            },
-            OperatorCommand::TransferBnb {
-                to: user,
-                amount,
-                reason: "exit-refund".to_owned(),
-            },
-        ])
+        let (_principal, lp_share) = self.engine.withdraw_lp(state, user.clone())?;
+        let mut commands = Vec::new();
+        if lp_share != 0 {
+            // After withdraw_lp() subtracts this user's contribution the
+            // remaining total is the new denominator; we add `lp_share`
+            // back to recover the pre-exit total used by the chain layer.
+            let total_active_principal = state
+                .balances
+                .total_active_lp_principal_bnb
+                .saturating_add(lp_share);
+            commands.push(OperatorCommand::RedeemUserLp {
+                user,
+                lp_bnb_share: lp_share,
+                total_active_principal,
+            });
+        }
+        Ok(commands)
     }
 
     pub fn on_tick(
@@ -165,7 +170,10 @@ mod tests {
                     .unwrap(),
             );
         }
-        assert!(commands.iter().any(|command| matches!(command, OperatorCommand::BurnTokenByBnbValue { amount, reason } if *amount == BNB && reason == "exit-burn")));
-        assert!(commands.iter().any(|command| matches!(command, OperatorCommand::TransferBnb { to, amount, reason } if to == "alice" && *amount == BNB && reason == "exit-refund")));
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            OperatorCommand::RedeemUserLp { user, lp_bnb_share, .. }
+                if user == "alice" && *lp_bnb_share > 0
+        )));
     }
 }

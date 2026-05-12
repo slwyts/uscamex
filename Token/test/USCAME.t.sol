@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.34;
 
 import { USCAME } from "../src/USCAME.sol";
 import { BuybackVault } from "../src/BuybackVault.sol";
@@ -8,6 +8,8 @@ interface Vm {
     function deal(address who, uint256 newBalance) external;
     function prank(address msgSender) external;
     function expectRevert(bytes calldata revertData) external;
+    function startPrank(address msgSender) external;
+    function stopPrank() external;
 }
 
 contract MiniTest {
@@ -31,6 +33,10 @@ contract MockPair {
     address public immutable weth;
     uint112 public reserveToken;
     uint112 public reserveBnb;
+    // Minimal LP-token surface so the router can pull LP back during exit.
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+    uint256 public totalSupply;
 
     constructor(address token_, address weth_) {
         token = token_;
@@ -47,6 +53,46 @@ contract MockPair {
     function sync() public {
         reserveToken = uint112(USCAME(payable(token)).balanceOf(address(this)));
         reserveBnb = uint112(address(this).balance);
+    }
+
+    function mintLp(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+        totalSupply += amount;
+    }
+
+    function approve(address spender, uint256 value) external returns (bool) {
+        allowance[msg.sender][spender] = value;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 value) external returns (bool) {
+        uint256 allowed = allowance[from][msg.sender];
+        require(allowed >= value, "LP_ALLOWANCE");
+        if (allowed != type(uint256).max) allowance[from][msg.sender] = allowed - value;
+        require(balanceOf[from] >= value, "LP_BAL");
+        balanceOf[from] -= value;
+        balanceOf[to] += value;
+        return true;
+    }
+
+    function burnFor(uint256 lpAmount, address tokenTo, address bnbTo)
+        external
+        returns (uint256 tokenOut, uint256 bnbOut)
+    {
+        require(balanceOf[address(this)] >= lpAmount, "LP");
+        uint256 share = (lpAmount * 1e18) / totalSupply;
+        tokenOut = (USCAME(payable(token)).balanceOf(address(this)) * share) / 1e18;
+        bnbOut = (address(this).balance * share) / 1e18;
+        balanceOf[address(this)] -= lpAmount;
+        totalSupply -= lpAmount;
+        if (tokenOut != 0) {
+            require(USCAME(payable(token)).transfer(tokenTo, tokenOut), "tokenOut");
+        }
+        if (bnbOut != 0) {
+            (bool ok, ) = payable(bnbTo).call{ value: bnbOut }("");
+            require(ok, "bnbOut");
+        }
+        sync();
     }
 }
 
@@ -76,7 +122,7 @@ contract MockRouter {
         uint256 amountTokenDesired,
         uint256,
         uint256,
-        address,
+        address to,
         uint256
     )
         external
@@ -92,7 +138,28 @@ contract MockRouter {
         (bool ok,) = payable(pair).call{ value: msg.value }("");
         require(ok, "pair fund");
         MockPair(payable(pair)).sync();
-        return (amountTokenDesired, msg.value, 1 ether);
+        // Mint LP to `to` so subsequent exits have something to redeem.
+        uint256 minted = msg.value == 0 ? 1 ether : msg.value;
+        MockPair(payable(pair)).mintLp(to, minted);
+        return (amountTokenDesired, msg.value, minted);
+    }
+
+    function removeLiquidityETHSupportingFeeOnTransferTokens(
+        address token,
+        uint256 liquidity,
+        uint256,
+        uint256,
+        address to,
+        uint256
+    ) external returns (uint256 amountETH) {
+        address pair = factory.pair();
+        require(pair != address(0), "NO_PAIR");
+        // Pull LP from caller to the pair, then burn it.
+        require(
+            MockPair(payable(pair)).transferFrom(msg.sender, pair, liquidity),
+            "lp pull"
+        );
+        (, amountETH) = MockPair(payable(pair)).burnFor(liquidity, to, to);
     }
 }
 
@@ -419,5 +486,305 @@ contract USCAMETest is MiniTest {
         assertEq(address(token).balance, 0.5 ether);
         assertEq(carol.balance, 0.1 ether);
         assertEq(token.vault().balance, 0.1 ether);
+    }
+
+    // --------------------------------------------------------------------
+    // Self-custody LP & operatorRedeemLp
+    // --------------------------------------------------------------------
+
+    function testInitialLpStaysSelfCustodied() public {
+        // Spec invariant: 100% of initial LP must live on the token contract
+        // itself so the operator can orchestrate user exits without holding
+        // any LP off-chain.
+        address pair = token.pair();
+        assertTrue(MockPair(payable(pair)).balanceOf(address(token)) > 0);
+        assertEq(MockPair(payable(pair)).balanceOf(address(this)), 0);
+    }
+
+    function testOperatorRedeemLpBurnsTokenAndForwardsBnb() public {
+        // Drive enough BNB into the contract that the pair has fresh liquidity
+        // to redeem against, then exit a chunk back to `alice`.
+        vm.prank(alice);
+        assertTrue(token.transfer(address(this), 0));
+        vm.deal(alice, 5 ether);
+        vm.prank(alice);
+        (bool ok,) = payable(address(token)).call{ value: 5 ether }("");
+        assertTrue(ok);
+
+        address pair = token.pair();
+        uint256 totalLp = MockPair(payable(pair)).balanceOf(address(token));
+        uint256 lpToBurn = totalLp / 10;
+        uint256 bnbBefore = alice.balance;
+        uint256 totalSupplyBefore = token.totalSupply();
+
+        vm.prank(operator);
+        (uint256 bnbReturned, uint256 tokenBurned) = token.operatorRedeemLp(alice, lpToBurn);
+
+        assertTrue(bnbReturned > 0);
+        assertTrue(tokenBurned > 0);
+        assertEq(alice.balance, bnbBefore + bnbReturned);
+        // Tokens that came back from LP must be burned (totalSupply drops).
+        assertEq(token.totalSupply(), totalSupplyBefore - tokenBurned);
+        // Contract no longer holds the burned-side LP.
+        assertEq(MockPair(payable(pair)).balanceOf(address(token)), totalLp - lpToBurn);
+    }
+
+    function testOperatorRedeemLpOnlyOperator() public {
+        vm.expectRevert(bytes("OPERATOR"));
+        vm.prank(bob);
+        token.operatorRedeemLp(alice, 1);
+    }
+
+    function testOperatorRedeemLpRejectsZeroArgs() public {
+        vm.expectRevert(bytes("REDEEM"));
+        vm.prank(operator);
+        token.operatorRedeemLp(address(0), 1);
+
+        vm.expectRevert(bytes("REDEEM"));
+        vm.prank(operator);
+        token.operatorRedeemLp(alice, 0);
+    }
+
+    // --------------------------------------------------------------------
+    // pullPairTokensExact
+    // --------------------------------------------------------------------
+
+    function testPullPairTokensExactMovesPreciseAmount() public {
+        address pair = token.pair();
+        uint256 pairBefore = token.balanceOf(pair);
+        uint256 want = 12345 ether;
+        vm.prank(operator);
+        token.pullPairTokensExact(want);
+        assertEq(token.balanceOf(pair), pairBefore - want);
+        assertEq(token.balanceOf(address(token)), want);
+        // sync() keeps Pair reserves authoritative.
+        assertEq(uint256(MockPair(payable(pair)).reserveToken()), pairBefore - want);
+    }
+
+    function testPullPairTokensExactOnlyOperator() public {
+        vm.expectRevert(bytes("OPERATOR"));
+        vm.prank(bob);
+        token.pullPairTokensExact(1 ether);
+    }
+
+    function testPullPairTokensExactRejectsBadAmount() public {
+        address pair = token.pair();
+        uint256 pairBal = token.balanceOf(pair);
+        vm.expectRevert(bytes("AMOUNT"));
+        vm.prank(operator);
+        token.pullPairTokensExact(0);
+        vm.expectRevert(bytes("AMOUNT"));
+        vm.prank(operator);
+        token.pullPairTokensExact(pairBal + 1);
+    }
+
+    // --------------------------------------------------------------------
+    // burn / burnFrom
+    // --------------------------------------------------------------------
+
+    function testBurnReducesSenderBalance() public {
+        // Get tokens into alice via a buy (3% tax accounted for).
+        configureToken(operator, 300, 1000, uint128(0.1 ether), uint128(5 ether), true);
+        address pair = token.pair();
+        MockPair(payable(pair)).buy(alice, 100 ether);
+
+        uint256 supplyBefore = token.totalSupply();
+        uint256 aliceBefore = token.balanceOf(alice);
+        vm.prank(alice);
+        token.burn(10 ether);
+        assertEq(token.balanceOf(alice), aliceBefore - 10 ether);
+        assertEq(token.totalSupply(), supplyBefore - 10 ether);
+    }
+
+    function testBurnFromOnlyOperator() public {
+        configureToken(operator, 300, 1000, uint128(0.1 ether), uint128(5 ether), true);
+        address pair = token.pair();
+        MockPair(payable(pair)).buy(alice, 100 ether);
+
+        // Non-operator can't burnFrom.
+        vm.expectRevert(bytes("OPERATOR"));
+        vm.prank(bob);
+        token.burnFrom(alice, 1 ether);
+
+        uint256 supplyBefore = token.totalSupply();
+        uint256 aliceBefore = token.balanceOf(alice);
+        vm.prank(operator);
+        token.burnFrom(alice, 5 ether);
+        assertEq(token.balanceOf(alice), aliceBefore - 5 ether);
+        assertEq(token.totalSupply(), supplyBefore - 5 ether);
+    }
+
+    // --------------------------------------------------------------------
+    // Config validator branch coverage
+    // --------------------------------------------------------------------
+
+    function testProtocolConfigValidationCoversAllBranches() public {
+        USCAME.ProtocolConfigInput memory base = token.getProtocolConfig();
+
+        USCAME.ProtocolConfigInput memory zeroOp = base;
+        zeroOp.operator = address(0);
+        (bool a,) = address(token)
+            .call(abi.encodeWithSelector(token.setProtocolConfig.selector, zeroOp));
+        assertTrue(!a);
+
+        USCAME.ProtocolConfigInput memory highSell = base;
+        highSell.sellTaxBps = 2501;
+        (bool b,) = address(token)
+            .call(abi.encodeWithSelector(token.setProtocolConfig.selector, highSell));
+        assertTrue(!b);
+
+        USCAME.ProtocolConfigInput memory badDist = base;
+        badDist.lpBuildBps = 5000;
+        badDist.nodeBps = 5000;
+        badDist.builderBuyBps = 5000; // sum > BPS
+        (bool c,) = address(token)
+            .call(abi.encodeWithSelector(token.setProtocolConfig.selector, badDist));
+        assertTrue(!c);
+
+        USCAME.ProtocolConfigInput memory directRewardTooHigh = base;
+        directRewardTooHigh.directPoolBps = 1000;
+        directRewardTooHigh.directRewardBps = 2000;
+        (bool d,) = address(token)
+            .call(abi.encodeWithSelector(token.setProtocolConfig.selector, directRewardTooHigh));
+        assertTrue(!d);
+
+        USCAME.ProtocolConfigInput memory zeroPeriods = base;
+        zeroPeriods.settlementPeriodsPerDay = 0;
+        (bool e,) = address(token)
+            .call(abi.encodeWithSelector(token.setProtocolConfig.selector, zeroPeriods));
+        assertTrue(!e);
+
+        USCAME.ProtocolConfigInput memory zeroExit = base;
+        zeroExit.exitMultipleBps = 0;
+        (bool f,) = address(token)
+            .call(abi.encodeWithSelector(token.setProtocolConfig.selector, zeroExit));
+        assertTrue(!f);
+
+        USCAME.ProtocolConfigInput memory deflationBad = base;
+        deflationBad.deflationHourlyBps = 500;
+        deflationBad.deflationDailyCapBps = 100; // hourly > daily
+        (bool g,) = address(token)
+            .call(abi.encodeWithSelector(token.setProtocolConfig.selector, deflationBad));
+        assertTrue(!g);
+
+        USCAME.ProtocolConfigInput memory buySplitBad = base;
+        buySplitBad.buyTaxBps = 300;
+        buySplitBad.buyTaxBuilderBps = 200;
+        buySplitBad.buyTaxVaultBps = 200; // 400 > 300
+        (bool h,) = address(token)
+            .call(abi.encodeWithSelector(token.setProtocolConfig.selector, buySplitBad));
+        assertTrue(!h);
+
+        USCAME.ProtocolConfigInput memory sellSplitBad = base;
+        sellSplitBad.sellTaxBps = 1000;
+        sellSplitBad.sellTaxBuilderBps = 400;
+        sellSplitBad.sellTaxOwnerBps = 400;
+        sellSplitBad.sellTaxVaultBps = 400; // 1200 > 1000
+        (bool i,) = address(token)
+            .call(abi.encodeWithSelector(token.setProtocolConfig.selector, sellSplitBad));
+        assertTrue(!i);
+
+        USCAME.ProtocolConfigInput memory teamBad = base;
+        teamBad.teamRewardBps[0] = 10_001; // > BPS
+        (bool j,) = address(token)
+            .call(abi.encodeWithSelector(token.setProtocolConfig.selector, teamBad));
+        assertTrue(!j);
+    }
+
+    // --------------------------------------------------------------------
+    // Internal-address bnb routing (router/pair/vault/operator/owner)
+    // --------------------------------------------------------------------
+
+    function testInternalBnbSendersBypassDepositPath() public {
+        // Funds from owner / operator / router / pair / vault must be
+        // accepted as treasury top-ups even without a referrer binding.
+        vm.deal(operator, 1 ether);
+        vm.prank(operator);
+        (bool a,) = payable(address(token)).call{ value: 0.5 ether }("");
+        assertTrue(a);
+
+        vm.deal(address(router), 1 ether);
+        vm.prank(address(router));
+        (bool b,) = payable(address(token)).call{ value: 0.5 ether }("");
+        assertTrue(b);
+
+        address pair = token.pair();
+        vm.deal(pair, 1 ether);
+        vm.prank(pair);
+        (bool c,) = payable(address(token)).call{ value: 0.5 ether }("");
+        assertTrue(c);
+    }
+
+    function testDepositAboveMaxIsRejected() public {
+        vm.prank(alice);
+        assertTrue(token.transfer(address(this), 0));
+        vm.deal(alice, 10 ether);
+        vm.prank(alice);
+        (bool ok,) = payable(address(token)).call{ value: 6 ether }(""); // > 5 ether max
+        assertTrue(!ok);
+    }
+
+    // --------------------------------------------------------------------
+    // Misc guards
+    // --------------------------------------------------------------------
+
+    function testOperatorCallRejectsZeroTarget() public {
+        vm.expectRevert(bytes("TARGET"));
+        vm.prank(operator);
+        token.operatorCall(address(0), 0, "");
+    }
+
+    function testTransferOwnershipRejectsZero() public {
+        vm.expectRevert(bytes("OWNER_ZERO"));
+        token.transferOwnership(address(0));
+    }
+
+    function testSetNodeRejectsZeroAddress() public {
+        vm.expectRevert(bytes("NODE"));
+        token.setNode(address(0), 1);
+    }
+
+    function testSetNodeRemovalAndReplacementMaintainsList() public {
+        token.setNode(alice, 1);
+        token.setNode(bob, 2);
+        token.setNode(carol, 3);
+        assertEq(token.nodeCount(), 3);
+
+        // Remove the middle one — last element swaps into its slot.
+        token.setNode(bob, 0);
+        assertEq(token.nodeCount(), 2);
+        assertEq(uint256(token.nodeWeight(bob)), 0);
+        // Re-add bob, ensure list grows cleanly.
+        token.setNode(bob, 7);
+        assertEq(token.nodeCount(), 3);
+        assertEq(uint256(token.nodeWeight(bob)), 7);
+        // Update weight in place — list size unchanged.
+        token.setNode(alice, 9);
+        assertEq(token.nodeCount(), 3);
+        assertEq(uint256(token.nodeWeight(alice)), 9);
+    }
+
+    function testSelfReferralBindingRejected() public {
+        // alice tries to bind herself as her own referrer via 0-transfer
+        // from alice -> alice; SELF_REF guard must trip.
+        vm.prank(alice);
+        (bool ok,) = address(token)
+            .call(abi.encodeWithSignature("transfer(address,uint256)", alice, uint256(0)));
+        assertTrue(!ok);
+    }
+
+    function testTaxedTransferToOperatorIsExemptAndFullAmount() public {
+        configureToken(operator, 300, 1000, uint128(0.1 ether), uint128(5 ether), true);
+        address pair = token.pair();
+        MockPair(payable(pair)).buy(alice, 100 ether);
+        // alice -> operator: operator is fee-exempt, so transfer carries
+        // full amount with zero tax taken.
+        uint256 aliceBefore = token.balanceOf(alice);
+        uint256 contractBefore = token.balanceOf(address(token));
+        vm.prank(alice);
+        assertTrue(token.transfer(operator, 5 ether));
+        assertEq(token.balanceOf(alice), aliceBefore - 5 ether);
+        assertEq(token.balanceOf(operator), 5 ether);
+        assertEq(token.balanceOf(address(token)), contractBefore);
     }
 }

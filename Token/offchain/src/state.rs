@@ -19,6 +19,11 @@ pub struct UserAccount {
     pub principal_bnb: Wei,
     pub static_paid_bnb: Wei,
     pub dynamic_paid_bnb: Wei,
+    /// BNB-denominated share of LP this user has contributed and not yet
+    /// redeemed. Used at exit time to compute the LP fraction to remove from
+    /// the token contract's custody.
+    #[serde(default)]
+    pub lp_bnb_principal: Wei,
     pub active: bool,
     pub exited: bool,
 }
@@ -39,6 +44,12 @@ pub struct ProtocolBalances {
     pub tax_burned_token_value_bnb: Wei,
     pub node_paid_bnb: BTreeMap<Address, Wei>,
     pub direct_paid_bnb: BTreeMap<Address, Wei>,
+    /// Sum of `lp_bnb_principal` across all currently active users. Used at
+    /// LP-redeem time so the chain layer can compute the exact LP-token
+    /// fraction this user owns against the token contract's self-custodied
+    /// LP balance: `user_lp = pair_balance × user_share / total_share`.
+    #[serde(default)]
+    pub total_active_lp_principal_bnb: Wei,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

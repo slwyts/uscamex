@@ -125,13 +125,7 @@ fn raw_chain_logs_drive_operator_restart_rewards_and_exit_linkage() {
     assert!(restarted.journal.records.values().any(|record| {
         matches!(
             &record.command,
-            OperatorCommand::BurnTokenByBnbValue { amount, reason } if *amount == BNB && reason == "exit-burn"
-        )
-    }));
-    assert!(restarted.journal.records.values().any(|record| {
-        matches!(
-            &record.command,
-            OperatorCommand::TransferBnb { to, amount, reason } if to == BOB && *amount == BNB && reason == "exit-refund"
+            OperatorCommand::RedeemUserLp { user, lp_bnb_share, .. } if user == BOB && *lp_bnb_share > 0
         )
     }));
 }

@@ -169,7 +169,25 @@ impl BscTransactionClient {
         let bnb_min = apply_slippage(bnb_amount, self.context.slippage_bps)?;
         let router = self.context.router_address.clone();
         let token = self.context.token_address.clone();
-        let owner = self.context.owner_address.clone();
+
+        // After LP initialization the token contract self-custodies LP
+        // but generally holds very little of its own ERC20 supply (the
+        // initial mint went into the Pair). The deposit pipeline therefore
+        // first pulls exactly `token_amount` project tokens out of the
+        // Pair into the token contract, then approves the router and
+        // injects both legs of liquidity. This matches the spec section 8
+        // ("代币从 LP 底池取出") while keeping AMM reserves authoritative
+        // through Pair.sync().
+        let pull = encode_function_calldata(
+            "pullPairTokensExact(uint256)",
+            &[u256_word(token_amount)],
+        )?;
+        let pull_hash = self.submit_evm_call(EvmCall {
+            target: token.clone(),
+            value: 0,
+            data: format!("0x{}", hex_encode(&pull)),
+        })?;
+
         let approve = encode_function_calldata(
             "approve(address,uint256)",
             &[
@@ -185,12 +203,12 @@ impl BscTransactionClient {
                 u256_word(token_amount),
                 u256_word(token_min),
                 u256_word(bnb_min),
-                address_word(&normalize_address(&owner)?),
+                address_word(&normalize_address(&token)?),
                 u256_word(self.deadline()?),
             ],
         )?;
         let liquidity_hash = self.submit_operator_call(&router, bnb_amount, &add_liquidity)?;
-        Ok(format!("{approve_hash},{liquidity_hash}"))
+        Ok(format!("{pull_hash},{approve_hash},{liquidity_hash}"))
     }
 
     fn submit_builder_buy(&mut self, bnb_amount: u128) -> Result<String, BscTransactionError> {
@@ -264,6 +282,194 @@ impl BscTransactionClient {
         let token = self.context.token_address.clone();
         let burn = encode_burn_call(burn_amount)?;
         self.submit_operator_call(&token, 0, &burn)
+    }
+
+    /// Sweep `tax_token_amount` tokens that have accumulated in the token
+    /// contract's self-custody (from buy/sell tax) by orchestrating, via
+    /// `operatorCall`, the sequence:
+    ///   1. token.approve(router, sell_amount)
+    ///   2. token.burn(burn_token_amount) — sends to zero address
+    ///   3. router.swapExactTokensForETHSupportingFeeOnTransferTokens(...)
+    ///   4. token.operatorCall(owner, ownerBnb, "")
+    ///   5. token.operatorCall(vault, vaultBnb, "")
+    /// All steps are individual transactions sharing the same idempotency
+    /// batch tag from the journal. We compute the expected BNB output up
+    /// front from current pair reserves so the swap can supply a sane
+    /// `amountOutMin`.
+    fn submit_sweep_tax_to_bnb(
+        &mut self,
+        tax_token_amount: u128,
+        burn_token_amount: u128,
+        owner_bnb_bps_of_sold: u16,
+        vault_bnb_bps_of_sold: u16,
+    ) -> Result<String, BscTransactionError> {
+        if tax_token_amount == 0 || burn_token_amount > tax_token_amount {
+            return Err(BscTransactionError::InvalidAmount);
+        }
+        let sell_amount = tax_token_amount.saturating_sub(burn_token_amount);
+        let token = self.context.token_address.clone();
+        let router = self.context.router_address.clone();
+        let weth = self.weth_address()?;
+
+        let mut hashes: Vec<String> = Vec::new();
+
+        if burn_token_amount != 0 {
+            let burn = encode_burn_call(burn_token_amount)?;
+            hashes.push(self.submit_operator_call(&token, 0, &burn)?);
+        }
+
+        if sell_amount != 0 {
+            // approve(router, sell_amount) — token contract is msg.sender, so
+            // we route through operatorCall(token, 0, approve(router, amount)).
+            let approve = encode_function_calldata(
+                "approve(address,uint256)",
+                &[address_word(&normalize_address(&router)?), u256_word(sell_amount)],
+            )?;
+            hashes.push(self.submit_operator_call(&token, 0, &approve)?);
+
+            let reserves = self.pair_reserves()?;
+            // selling tokens for BNB → input reserve is token, output is BNB.
+            let bnb_out = v2_amount_out(sell_amount, reserves.token_reserve, reserves.bnb_reserve)?;
+            let amount_out_min = apply_slippage(bnb_out, self.context.slippage_bps)?;
+            let swap = encode_swap_exact_tokens_for_eth(
+                sell_amount,
+                amount_out_min,
+                &token,
+                &weth,
+                &token, // BNB lands back in the token contract for routing.
+                self.deadline()?,
+            )?;
+            hashes.push(self.submit_operator_call(&router, 0, &swap)?);
+
+            // Forward the freshly-received BNB. We split on the *expected*
+            // gross output because the contract sees only its own balance;
+            // residual dust stays in the contract for the next sweep.
+            let owner_amt = (U256::from(bnb_out)
+                .saturating_mul(U256::from(owner_bnb_bps_of_sold as u128))
+                / U256::from(10_000u128))
+                .as_u128();
+            let vault_amt = (U256::from(bnb_out)
+                .saturating_mul(U256::from(vault_bnb_bps_of_sold as u128))
+                / U256::from(10_000u128))
+                .as_u128();
+            if owner_amt != 0 {
+                let owner_addr = self.context.owner_address.clone();
+                let fwd = encode_operator_call(&owner_addr, owner_amt, &[])?;
+                let fwd_bytes = decode_hex_bytes(&fwd)?;
+                hashes.push(self.submit_operator_call(&token, 0, &fwd_bytes)?);
+            }
+            if vault_amt != 0 {
+                let vault_addr = self.context.vault_address.clone();
+                let fwd = encode_operator_call(&vault_addr, vault_amt, &[])?;
+                let fwd_bytes = decode_hex_bytes(&fwd)?;
+                hashes.push(self.submit_operator_call(&token, 0, &fwd_bytes)?);
+            }
+        }
+
+        Ok(hashes.join(","))
+    }
+
+    fn submit_redeem_user_lp(
+        &mut self,
+        user: &str,
+        lp_bnb_share: u128,
+        total_active_principal: u128,
+    ) -> Result<String, BscTransactionError> {
+        if lp_bnb_share == 0 || total_active_principal == 0 {
+            return Err(BscTransactionError::InvalidAmount);
+        }
+        if lp_bnb_share > total_active_principal {
+            // Stale denominator: refuse rather than over-redeem.
+            return Err(BscTransactionError::Rpc(
+                "lp share exceeds active principal denominator".to_owned(),
+            ));
+        }
+        let token = self.context.token_address.clone();
+        let pair_address = self.pair_address()?;
+        let pair_balance = self.pair_balance_of(&pair_address, &token)?;
+        if pair_balance == 0 {
+            return Err(BscTransactionError::Rpc(
+                "token contract has no LP custody".to_owned(),
+            ));
+        }
+        let pair_total_supply = self.pair_total_supply(&pair_address)?;
+        let reserves = self.pair_reserves()?;
+        if pair_total_supply == 0 || reserves.bnb_reserve == 0 {
+            return Err(BscTransactionError::InvalidAmount);
+        }
+        // Fraction-based formula: the contract holds `pair_balance` LP for all
+        // active users combined; this user owns `share / total` of that
+        // custody. The result is independent of current BNB price.
+        let lp_to_remove = U256::from(pair_balance)
+            .saturating_mul(U256::from(lp_bnb_share))
+            .checked_div(U256::from(total_active_principal))
+            .ok_or(BscTransactionError::InvalidAmount)?;
+        let lp_to_remove = u256_to_u128(lp_to_remove)?.min(pair_balance);
+        if lp_to_remove == 0 {
+            return Err(BscTransactionError::InvalidAmount);
+        }
+        // BNB-side safety check: estimate the BNB the user will receive
+        // (`lp_to_remove × bnb_reserve / total_supply`) and refuse if the
+        // pair clearly cannot honour the redemption. This catches the
+        // "everyone exits at the same instant" cascade and the
+        // "impermanent-loss undershoot" case before we burn user LP.
+        let expected_bnb_out = U256::from(lp_to_remove)
+            .saturating_mul(U256::from(reserves.bnb_reserve))
+            .checked_div(U256::from(pair_total_supply))
+            .ok_or(BscTransactionError::InvalidAmount)?;
+        let expected_bnb_out = u256_to_u128(expected_bnb_out)?;
+        if expected_bnb_out == 0 {
+            return Err(BscTransactionError::Rpc(
+                "pair BNB reserve would return zero refund".to_owned(),
+            ));
+        }
+        // Hard floor: if the user would receive less than half of their LP
+        // BNB principal we bail out and surface a "LP_RESERVE_INSUFFICIENT"
+        // signal via the journal instead of silently under-paying.
+        let floor = lp_bnb_share / 2;
+        if expected_bnb_out < floor {
+            return Err(BscTransactionError::Rpc(format!(
+                "LP_RESERVE_INSUFFICIENT: expected_bnb_out={expected_bnb_out} < floor={floor}"
+            )));
+        }
+        let redeem = encode_function_calldata(
+            "operatorRedeemLp(address,uint256)",
+            &[
+                address_word(&normalize_address(user)?),
+                u256_word(lp_to_remove),
+            ],
+        )?;
+        // operatorRedeemLp is a direct method on the token contract; the
+        // operator wallet is privileged via the `onlyOperator` modifier so we
+        // call it directly rather than going through `operatorCall`.
+        self.submit_evm_call(EvmCall {
+            target: token,
+            value: 0,
+            data: format!("0x{}", hex_encode(&redeem)),
+        })
+    }
+
+    fn pair_address(&self) -> Result<String, BscTransactionError> {
+        let token = normalize_address(&self.context.token_address)?;
+        let pair = parse_address_word(&self.eth_call_to(&token, &function_selector("pair()"))?)?;
+        if pair == "0x0000000000000000000000000000000000000000" {
+            return Err(BscTransactionError::Rpc(
+                "pair is not initialized".to_owned(),
+            ));
+        }
+        Ok(pair)
+    }
+
+    fn pair_balance_of(&self, pair: &str, account: &str) -> Result<u128, BscTransactionError> {
+        let mut data = function_selector("balanceOf(address)");
+        data.push_str(&address_word(&normalize_address(account)?));
+        let result = self.eth_call_to(pair, &data)?;
+        parse_u128_word(&result, 0)
+    }
+
+    fn pair_total_supply(&self, pair: &str) -> Result<u128, BscTransactionError> {
+        let result = self.eth_call_to(pair, &function_selector("totalSupply()"))?;
+        parse_u128_word(&result, 0)
     }
 
     fn submit_operator_call(
@@ -441,6 +647,22 @@ impl ChainClient for BscTransactionClient {
             OperatorCommand::BurnTokenByBnbValue { amount, .. } => {
                 self.submit_burn_token_by_bnb_value(*amount)
             }
+            OperatorCommand::RedeemUserLp {
+                user,
+                lp_bnb_share,
+                total_active_principal,
+            } => self.submit_redeem_user_lp(user, *lp_bnb_share, *total_active_principal),
+            OperatorCommand::SweepTaxToBnb {
+                tax_token_amount,
+                burn_token_amount,
+                owner_bnb_bps_of_sold,
+                vault_bnb_bps_of_sold,
+            } => self.submit_sweep_tax_to_bnb(
+                *tax_token_amount,
+                *burn_token_amount,
+                *owner_bnb_bps_of_sold,
+                *vault_bnb_bps_of_sold,
+            ),
             OperatorCommand::ExitPosition { .. } => Err(CommandEncodeError::Unsupported(
                 "legacy exit-position is replaced by separate burn/refund commands",
             )
@@ -557,6 +779,12 @@ pub fn encode_command_call(
         OperatorCommand::BurnTokenByBnbValue { .. } => Err(CommandEncodeError::Unsupported(
             "token burn requires token amount quote at execution time",
         )),
+        OperatorCommand::RedeemUserLp { .. } => Err(CommandEncodeError::Unsupported(
+            "redeem-user-lp requires live pair reserves and totalSupply",
+        )),
+        OperatorCommand::SweepTaxToBnb { .. } => Err(CommandEncodeError::Unsupported(
+            "sweep-tax requires live pair reserves and is orchestrated as a multi-tx batch",
+        )),
         OperatorCommand::ExitPosition { .. } => Err(CommandEncodeError::Unsupported(
             "legacy exit-position is replaced by separate burn/refund commands",
         )),
@@ -617,6 +845,29 @@ fn encode_swap_exact_eth_for_tokens(
 
 fn encode_burn_call(amount: u128) -> Result<Vec<u8>, CommandEncodeError> {
     encode_function_calldata("burn(uint256)", &[u256_word(amount)])
+}
+
+fn encode_swap_exact_tokens_for_eth(
+    amount_in: u128,
+    amount_out_min: u128,
+    token: &str,
+    weth: &str,
+    to: &str,
+    deadline: u128,
+) -> Result<Vec<u8>, CommandEncodeError> {
+    decode_hex_bytes(&encode_function_call(
+        "swapExactTokensForETHSupportingFeeOnTransferTokens(uint256,uint256,address[],address,uint256)",
+        &[
+            u256_word(amount_in),
+            u256_word(amount_out_min),
+            u256_word(160),
+            address_word(&normalize_address(to)?),
+            u256_word(deadline),
+            u256_word(2),
+            address_word(&normalize_address(token)?),
+            address_word(&normalize_address(weth)?),
+        ],
+    ))
 }
 
 fn encode_function_call(signature: &str, words: &[String]) -> String {
