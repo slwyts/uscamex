@@ -60,6 +60,7 @@ impl std::error::Error for CommandEncodeError {}
 pub enum BscTransactionError {
     Encode(CommandEncodeError),
     Http(reqwest::Error),
+    Json(serde_json::Error),
     Rpc(String),
     MissingResult,
     InvalidHex,
@@ -86,6 +87,12 @@ impl From<CommandEncodeError> for BscTransactionError {
 impl From<reqwest::Error> for BscTransactionError {
     fn from(error: reqwest::Error) -> Self {
         Self::Http(error)
+    }
+}
+
+impl From<serde_json::Error> for BscTransactionError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
     }
 }
 
@@ -164,29 +171,32 @@ impl BscTransactionClient {
         token_value_bnb: u128,
     ) -> Result<String, BscTransactionError> {
         let reserves = self.pair_reserves()?;
-        let token_amount = quote_token_amount(token_value_bnb, &reserves)?;
-        let token_min = apply_slippage(token_amount, self.context.slippage_bps)?;
+        if token_value_bnb == 0 {
+            return Err(BscTransactionError::InvalidAmount);
+        }
+        let token_amount = quote_synced_pull_token_amount(bnb_amount, &reserves)?;
         let bnb_min = apply_slippage(bnb_amount, self.context.slippage_bps)?;
         let router = self.context.router_address.clone();
         let token = self.context.token_address.clone();
 
-        // After LP initialization the token contract self-custodies LP
-        // but generally holds very little of its own ERC20 supply (the
-        // initial mint went into the Pair). The deposit pipeline therefore
-        // first pulls exactly `token_amount` project tokens out of the
-        // Pair into the token contract, then approves the router and
-        // injects both legs of liquidity. This matches the spec section 8
-        // ("代币从 LP 底池取出") while keeping AMM reserves authoritative
-        // through Pair.sync().
-        let pull = encode_function_calldata(
-            "pullPairTokensExact(uint256)",
-            &[u256_word(token_amount)],
-        )?;
+        // `pullPairTokensExact` syncs the Pair after removing tokens, so the
+        // amount to pull must be solved against the post-pull reserve. For
+        // BNB amount x and reserves T/B, pull p = x*T/(B+x); after sync the
+        // router's optimal token side for x BNB is p again.
+        let pull =
+            encode_function_calldata("pullPairTokensExact(uint256)", &[u256_word(token_amount)])?;
         let pull_hash = self.submit_evm_call(EvmCall {
             target: token.clone(),
             value: 0,
             data: format!("0x{}", hex_encode(&pull)),
         })?;
+
+        let post_pull_reserves = self.pair_reserves()?;
+        let router_token_amount = quote_token_amount(bnb_amount, &post_pull_reserves)?;
+        let token_min = apply_slippage(
+            router_token_amount.min(token_amount),
+            self.context.slippage_bps,
+        )?;
 
         let approve = encode_function_calldata(
             "approve(address,uint256)",
@@ -218,14 +228,40 @@ impl BscTransactionClient {
         let router = self.context.router_address.clone();
         let weth = self.weth_address()?;
         let token = self.context.token_address.clone();
+        let operator = format!("{:#x}", self.wallet.address());
+        let before = self.erc20_balance_of(&token, &operator)?;
+
+        // Pancake V2 Pair rejects swap recipients equal to token0/token1.
+        // Buy into the operator wallet first, then transfer the received
+        // project tokens back into token self-custody as builder inventory.
         let swap = encode_swap_exact_eth_for_tokens(
             amount_out_min,
             &weth,
             &token,
-            &token,
+            &operator,
             self.deadline()?,
         )?;
-        self.submit_operator_call(&router, bnb_amount, &swap)
+        let swap_hash = self.submit_operator_call(&router, bnb_amount, &swap)?;
+        let after = self.erc20_balance_of(&token, &operator)?;
+        let received = after
+            .checked_sub(before)
+            .ok_or(BscTransactionError::InvalidAmount)?;
+        if received == 0 {
+            return Err(BscTransactionError::InvalidAmount);
+        }
+        let transfer = encode_function_calldata(
+            "transfer(address,uint256)",
+            &[
+                address_word(&normalize_address(&token)?),
+                u256_word(received),
+            ],
+        )?;
+        let transfer_hash = self.submit_evm_call(EvmCall {
+            target: token,
+            value: 0,
+            data: format!("0x{}", hex_encode(&transfer)),
+        })?;
+        Ok(format!("{swap_hash},{transfer_hash}"))
     }
 
     fn submit_buyback(&mut self, bnb_amount: u128) -> Result<String, BscTransactionError> {
@@ -299,14 +335,21 @@ impl BscTransactionClient {
     fn submit_sweep_tax_to_bnb(
         &mut self,
         tax_token_amount: u128,
+        builder_token_amount: u128,
         burn_token_amount: u128,
         owner_bnb_bps_of_sold: u16,
         vault_bnb_bps_of_sold: u16,
     ) -> Result<String, BscTransactionError> {
-        if tax_token_amount == 0 || burn_token_amount > tax_token_amount {
+        if tax_token_amount == 0
+            || builder_token_amount.saturating_add(burn_token_amount) > tax_token_amount
+            || u32::from(owner_bnb_bps_of_sold) + u32::from(vault_bnb_bps_of_sold)
+                > BPS_DENOMINATOR as u32
+        {
             return Err(BscTransactionError::InvalidAmount);
         }
-        let sell_amount = tax_token_amount.saturating_sub(burn_token_amount);
+        let sell_amount = tax_token_amount
+            .saturating_sub(builder_token_amount)
+            .saturating_sub(burn_token_amount);
         let token = self.context.token_address.clone();
         let router = self.context.router_address.clone();
         let weth = self.weth_address()?;
@@ -323,7 +366,10 @@ impl BscTransactionClient {
             // we route through operatorCall(token, 0, approve(router, amount)).
             let approve = encode_function_calldata(
                 "approve(address,uint256)",
-                &[address_word(&normalize_address(&router)?), u256_word(sell_amount)],
+                &[
+                    address_word(&normalize_address(&router)?),
+                    u256_word(sell_amount),
+                ],
             )?;
             hashes.push(self.submit_operator_call(&token, 0, &approve)?);
 
@@ -347,11 +393,11 @@ impl BscTransactionClient {
             let owner_amt = (U256::from(bnb_out)
                 .saturating_mul(U256::from(owner_bnb_bps_of_sold as u128))
                 / U256::from(10_000u128))
-                .as_u128();
+            .as_u128();
             let vault_amt = (U256::from(bnb_out)
                 .saturating_mul(U256::from(vault_bnb_bps_of_sold as u128))
                 / U256::from(10_000u128))
-                .as_u128();
+            .as_u128();
             if owner_amt != 0 {
                 let owner_addr = self.context.owner_address.clone();
                 let fwd = encode_operator_call(&owner_addr, owner_amt, &[])?;
@@ -461,9 +507,13 @@ impl BscTransactionClient {
     }
 
     fn pair_balance_of(&self, pair: &str, account: &str) -> Result<u128, BscTransactionError> {
+        self.erc20_balance_of(pair, account)
+    }
+
+    fn erc20_balance_of(&self, token: &str, account: &str) -> Result<u128, BscTransactionError> {
         let mut data = function_selector("balanceOf(address)");
         data.push_str(&address_word(&normalize_address(account)?));
-        let result = self.eth_call_to(pair, &data)?;
+        let result = self.eth_call_to(token, &data)?;
         parse_u128_word(&result, 0)
     }
 
@@ -587,7 +637,7 @@ impl BscTransactionClient {
 
     fn wait_for_confirmed_receipt(&self, tx_hash: &str) -> Result<(), BscTransactionError> {
         for _ in 0..self.receipt_poll_limit {
-            let receipt: Option<TransactionReceipt> = self.rpc(
+            let receipt: Option<TransactionReceipt> = self.rpc_optional(
                 "eth_getTransactionReceipt",
                 vec![serde_json::Value::String(tx_hash.to_owned())],
             )?;
@@ -622,11 +672,42 @@ impl BscTransactionClient {
             })
             .send()?
             .error_for_status()?
-            .json::<JsonRpcResponse<T>>()?;
+            .json::<JsonRpcResponse>()?;
         if let Some(error) = response.error {
             return Err(BscTransactionError::Rpc(error.message));
         }
-        response.result.ok_or(BscTransactionError::MissingResult)
+        if response.result.is_null() {
+            return Err(BscTransactionError::MissingResult);
+        }
+        serde_json::from_value(response.result).map_err(BscTransactionError::Json)
+    }
+
+    fn rpc_optional<T: DeserializeOwned>(
+        &self,
+        method: &'static str,
+        params: Vec<serde_json::Value>,
+    ) -> Result<Option<T>, BscTransactionError> {
+        let response = self
+            .http
+            .post(&self.rpc_url)
+            .json(&JsonRpcRequest {
+                jsonrpc: "2.0",
+                id: 1,
+                method,
+                params,
+            })
+            .send()?
+            .error_for_status()?
+            .json::<JsonRpcResponse>()?;
+        if let Some(error) = response.error {
+            return Err(BscTransactionError::Rpc(error.message));
+        }
+        if response.result.is_null() {
+            return Ok(None);
+        }
+        serde_json::from_value(response.result)
+            .map(Some)
+            .map_err(BscTransactionError::Json)
     }
 }
 
@@ -654,11 +735,13 @@ impl ChainClient for BscTransactionClient {
             } => self.submit_redeem_user_lp(user, *lp_bnb_share, *total_active_principal),
             OperatorCommand::SweepTaxToBnb {
                 tax_token_amount,
+                builder_token_amount,
                 burn_token_amount,
                 owner_bnb_bps_of_sold,
                 vault_bnb_bps_of_sold,
             } => self.submit_sweep_tax_to_bnb(
                 *tax_token_amount,
+                *builder_token_amount,
                 *burn_token_amount,
                 *owner_bnb_bps_of_sold,
                 *vault_bnb_bps_of_sold,
@@ -736,6 +819,9 @@ where
         };
         journal
             .mark_submitted(&id, tx_hash.clone())
+            .map_err(SubmitPendingError::Journal)?;
+        journal
+            .mark_confirmed(&id)
             .map_err(SubmitPendingError::Journal)?;
         tx_hashes.push(tx_hash);
     }
@@ -988,6 +1074,18 @@ fn quote_token_amount(
     )
 }
 
+fn quote_synced_pull_token_amount(
+    bnb_value: u128,
+    reserves: &PairReserves,
+) -> Result<u128, BscTransactionError> {
+    if bnb_value == 0 || reserves.bnb_reserve == 0 || reserves.token_reserve == 0 {
+        return Err(BscTransactionError::InvalidAmount);
+    }
+    let numerator = U256::from(bnb_value) * U256::from(reserves.token_reserve);
+    let denominator = U256::from(reserves.bnb_reserve) + U256::from(bnb_value);
+    u256_to_u128((numerator + denominator - U256::from(1u8)) / denominator)
+}
+
 fn v2_amount_out(
     amount_in: u128,
     reserve_in: u128,
@@ -1035,8 +1133,9 @@ struct JsonRpcRequest<P> {
 }
 
 #[derive(Debug, Deserialize)]
-struct JsonRpcResponse<T> {
-    result: Option<T>,
+struct JsonRpcResponse {
+    #[serde(default)]
+    result: serde_json::Value,
     error: Option<JsonRpcError>,
 }
 
@@ -1055,6 +1154,7 @@ struct TransactionReceipt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::CommandStatus;
 
     #[test]
     fn recorded_client_keeps_submission_order() {
@@ -1087,6 +1187,10 @@ mod tests {
             client.submitted,
             vec![OperatorCommand::Buyback { bnb_amount: 2 }]
         );
+        assert!(matches!(
+            journal.records.get(&ids[1]).unwrap().status,
+            CommandStatus::Confirmed { .. }
+        ));
     }
 
     #[test]
@@ -1181,6 +1285,10 @@ mod tests {
             bnb_reserve: 100,
         };
         assert_eq!(quote_token_amount(1, &reserves).unwrap(), 10_000);
+        assert_eq!(
+            quote_synced_pull_token_amount(10, &reserves).unwrap(),
+            90_910
+        );
         assert_eq!(apply_slippage(10_000, 500).unwrap(), 9_500);
         assert_eq!(v2_amount_out(1, 100, 1_000_000).unwrap(), 9_876);
     }

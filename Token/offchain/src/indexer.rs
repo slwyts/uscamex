@@ -1,12 +1,13 @@
 use std::fmt;
 
-use crate::engine::{Engine, EngineError};
+use crate::engine::{Engine, EngineError, TaxSide};
 use crate::state::{Address, ProtocolState};
 use crate::storage::StoredEvent;
 use ethers_core::utils::keccak256;
 
 pub const REF_BOUND_SIGNATURE: &str = "RefBound(address,address)";
 pub const DEPOSIT_SIGNATURE: &str = "Deposit(address,uint256,address)";
+pub const TAX_COLLECTED_SIGNATURE: &str = "TaxCollected(address,address,uint256,uint8)";
 pub const PROTOCOL_CONFIG_UPDATED_SIGNATURE: &str = "ProtocolConfigUpdated(address)";
 pub const NODE_UPDATED_SIGNATURE: &str = "NodeUpdated(address,uint32)";
 
@@ -39,12 +40,21 @@ pub enum ChainEvent {
         user: Address,
         amount: u128,
     },
+    TaxCollected {
+        id: String,
+        from: Address,
+        to: Address,
+        amount: u128,
+        side: TaxSide,
+    },
 }
 
 impl ChainEvent {
     pub fn id(&self) -> &str {
         match self {
-            Self::RefBound { id, .. } | Self::Deposit { id, .. } => id,
+            Self::RefBound { id, .. }
+            | Self::Deposit { id, .. }
+            | Self::TaxCollected { id, .. } => id,
         }
     }
 }
@@ -67,6 +77,7 @@ impl IndexedEvent {
         match self.event {
             ChainEvent::RefBound { .. } => "RefBound",
             ChainEvent::Deposit { .. } => "Deposit",
+            ChainEvent::TaxCollected { .. } => "TaxCollected",
         }
     }
 
@@ -80,6 +91,22 @@ impl IndexedEvent {
             ChainEvent::Deposit { user, amount, .. } => serde_json::json!({
                 "user": user,
                 "amount": amount.to_string(),
+            })
+            .to_string(),
+            ChainEvent::TaxCollected {
+                from,
+                to,
+                amount,
+                side,
+                ..
+            } => serde_json::json!({
+                "from": from,
+                "to": to,
+                "amount": amount.to_string(),
+                "side": match side {
+                    TaxSide::Buy => "buy",
+                    TaxSide::Sell => "sell",
+                },
             })
             .to_string(),
         }
@@ -136,6 +163,10 @@ pub fn deposit_topic() -> String {
     event_topic(DEPOSIT_SIGNATURE)
 }
 
+pub fn tax_collected_topic() -> String {
+    event_topic(TAX_COLLECTED_SIGNATURE)
+}
+
 pub fn protocol_config_updated_topic() -> String {
     event_topic(PROTOCOL_CONFIG_UPDATED_SIGNATURE)
 }
@@ -182,6 +213,9 @@ pub fn decode_protocol_log(log: RawLog) -> Result<Option<IndexedEvent>, DecodeEr
     if topic == deposit_topic() {
         return Ok(Some(decode_deposit(log)?));
     }
+    if topic == tax_collected_topic() {
+        return Ok(Some(decode_tax_collected(log)?));
+    }
     Ok(None)
 }
 
@@ -211,6 +245,32 @@ fn decode_deposit(log: RawLog) -> Result<IndexedEvent, DecodeError> {
     })
 }
 
+fn decode_tax_collected(log: RawLog) -> Result<IndexedEvent, DecodeError> {
+    let from = decode_topic_address(log.topics.get(1).ok_or(DecodeError::MissingTopic)?)?;
+    let to = decode_topic_address(log.topics.get(2).ok_or(DecodeError::MissingTopic)?)?;
+    let words = decode_data_words(&log.data, 2)?;
+    let amount = decode_u128_hex_word(words[0])?;
+    let side = match decode_u8_hex_word(words[1])? {
+        1 => TaxSide::Buy,
+        2 => TaxSide::Sell,
+        _ => return Err(DecodeError::InvalidData),
+    };
+    let id = event_id(&log);
+    Ok(IndexedEvent {
+        block_number: log.block_number,
+        block_hash: log.block_hash,
+        tx_hash: log.tx_hash,
+        log_index: log.log_index,
+        event: ChainEvent::TaxCollected {
+            id,
+            from,
+            to,
+            amount,
+            side,
+        },
+    })
+}
+
 fn event_id(log: &RawLog) -> String {
     format!("{}:{}", log.tx_hash.to_ascii_lowercase(), log.log_index)
 }
@@ -225,6 +285,10 @@ fn decode_topic_address(topic: &str) -> Result<Address, DecodeError> {
 
 fn decode_u128_word(data: &str) -> Result<u128, DecodeError> {
     let word = strip_0x(data).ok_or(DecodeError::InvalidData)?;
+    decode_u128_hex_word(word)
+}
+
+fn decode_u128_hex_word(word: &str) -> Result<u128, DecodeError> {
     if word.len() != 64 || !word.chars().all(|char| char.is_ascii_hexdigit()) {
         return Err(DecodeError::InvalidData);
     }
@@ -232,6 +296,28 @@ fn decode_u128_word(data: &str) -> Result<u128, DecodeError> {
         return Err(DecodeError::UintOverflow);
     }
     u128::from_str_radix(&word[32..], 16).map_err(|_| DecodeError::InvalidData)
+}
+
+fn decode_u8_hex_word(word: &str) -> Result<u8, DecodeError> {
+    if word.len() != 64 || !word.chars().all(|char| char.is_ascii_hexdigit()) {
+        return Err(DecodeError::InvalidData);
+    }
+    if word[..62].chars().any(|char| char != '0') {
+        return Err(DecodeError::UintOverflow);
+    }
+    u8::from_str_radix(&word[62..], 16).map_err(|_| DecodeError::InvalidData)
+}
+
+fn decode_data_words(data: &str, expected: usize) -> Result<Vec<&str>, DecodeError> {
+    let data = strip_0x(data).ok_or(DecodeError::InvalidData)?;
+    if data.len() != expected * 64 || !data.chars().all(|char| char.is_ascii_hexdigit()) {
+        return Err(DecodeError::InvalidData);
+    }
+    Ok(data
+        .as_bytes()
+        .chunks(64)
+        .map(|chunk| std::str::from_utf8(chunk).map_err(|_| DecodeError::InvalidData))
+        .collect::<Result<Vec<_>, _>>()?)
 }
 
 fn decode_u32_word(data: &str) -> Result<u32, DecodeError> {
@@ -286,6 +372,22 @@ pub fn apply_event(
         }
         ChainEvent::Deposit { user, amount, .. } => {
             engine.deposit(state, user, amount)?;
+        }
+        ChainEvent::TaxCollected { side, amount, .. } => {
+            let tax_bps = match side {
+                TaxSide::Buy => engine.config.buy_tax_bps,
+                TaxSide::Sell => engine.config.sell_tax_bps,
+            };
+            if tax_bps == 0 || state.pair.token_reserve == 0 {
+                state.processed_events.insert(id);
+                return Ok(false);
+            }
+            let gross_bnb_value = amount
+                .saturating_mul(crate::config::BPS_DENOMINATOR)
+                .saturating_mul(state.pair.bnb_reserve)
+                / u128::from(tax_bps)
+                / state.pair.token_reserve;
+            engine.apply_trade_tax(state, side, gross_bnb_value)?;
         }
     }
 
@@ -357,5 +459,31 @@ mod tests {
         .unwrap();
         assert_eq!(deposit.id(), "0xdef:0");
         assert!(matches!(deposit.event, ChainEvent::Deposit { amount, .. } if amount == BNB));
+    }
+
+    #[test]
+    fn decodes_tax_collected_logs() {
+        let from = "0000000000000000000000001111111111111111111111111111111111111111";
+        let to = "0000000000000000000000002222222222222222222222222222222222222222";
+        let tax = decode_protocol_log(RawLog {
+            block_number: 12,
+            block_hash: "0xblock3".into(),
+            tx_hash: "0xF00".into(),
+            log_index: 3,
+            topics: vec![
+                tax_collected_topic(),
+                format!("0x{from}"),
+                format!("0x{to}"),
+            ],
+            data: format!("0x{:064x}{:064x}", 3 * BNB, 2u8),
+        })
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(tax.id(), "0xf00:3");
+        assert!(matches!(
+            tax.event,
+            ChainEvent::TaxCollected { amount, side: TaxSide::Sell, .. } if amount == 3 * BNB
+        ));
     }
 }

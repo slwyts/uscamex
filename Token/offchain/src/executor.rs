@@ -50,15 +50,18 @@ pub enum OperatorCommand {
     /// Convert `tax_token_amount` of project tokens accumulated in the
     /// token contract's self-custody (from buy/sell tax) into BNB and
     /// distribute it according to the spec section 4:
+    ///   • `builder_token_amount` stays in the token contract as LP builder
+    ///     dividend inventory;
     ///   • `burn_token_amount` of the tokens are burned to the zero
     ///     address ("剩余项目代币全部销毁至黑洞");
-    ///   • the remainder is swapped to BNB; the BNB output is forwarded
+    ///   • the remaining token amount is swapped to BNB; the BNB output is forwarded
     ///     to `owner` and the buyback `vault` in proportion to
     ///     `owner_bnb_bps_of_sold` / `vault_bnb_bps_of_sold`.
     /// The chain layer expands this single command into the operatorCall
     /// sequence: approve → swap → burn → call{value} → call{value}.
     SweepTaxToBnb {
         tax_token_amount: u128,
+        builder_token_amount: u128,
         burn_token_amount: u128,
         owner_bnb_bps_of_sold: u16,
         vault_bnb_bps_of_sold: u16,

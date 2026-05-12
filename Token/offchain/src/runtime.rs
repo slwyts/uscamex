@@ -321,7 +321,10 @@ where
         number: to_block,
         hash: to_hash,
     });
-    summary.submitted_transactions = service.submit_pending().map_err(RuntimeError::Service)?;
+    match service.submit_pending() {
+        Ok(transactions) => summary.submitted_transactions = transactions,
+        Err(error) => eprintln!("scan submit_pending failed: {error:?}"),
+    }
     Ok(Some(summary))
 }
 

@@ -2,7 +2,8 @@ use std::fmt;
 
 use crate::config::ProtocolConfig;
 use crate::indexer::{
-    deposit_topic, node_updated_topic, protocol_config_updated_topic, ref_bound_topic, RawLog,
+    deposit_topic, node_updated_topic, protocol_config_updated_topic, ref_bound_topic,
+    tax_collected_topic, RawLog,
 };
 use crate::state::Node;
 use ethers_core::types::Address;
@@ -244,6 +245,7 @@ impl BscRpcClient {
             "topics": [[
                 ref_bound_topic(),
                 deposit_topic(),
+                tax_collected_topic(),
                 protocol_config_updated_topic(),
                 node_updated_topic(),
             ]],

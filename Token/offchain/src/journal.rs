@@ -51,12 +51,7 @@ impl ExecutionJournal {
     pub fn pending_commands(&self) -> Vec<(String, OperatorCommand)> {
         self.records
             .values()
-            .filter(|record| {
-                matches!(
-                    record.status,
-                    CommandStatus::Pending | CommandStatus::Failed { .. }
-                )
-            })
+            .filter(|record| matches!(record.status, CommandStatus::Pending))
             .map(|record| (record.id.clone(), record.command.clone()))
             .collect()
     }
@@ -122,7 +117,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn batch_planning_is_idempotent_and_retryable() {
+    fn batch_planning_is_idempotent_and_failed_commands_are_manual() {
         let mut journal = ExecutionJournal::default();
         let commands = vec![
             OperatorCommand::CreditVault { amount: 1 },
@@ -142,8 +137,7 @@ mod tests {
         journal.mark_failed(&first[1], "nonce-too-low").unwrap();
 
         let pending = journal.pending_commands();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].0, first[1]);
+        assert!(pending.is_empty());
         assert_eq!(journal.confirmed_count(), 1);
     }
 }

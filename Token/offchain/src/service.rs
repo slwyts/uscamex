@@ -1,12 +1,14 @@
 use std::fmt;
 
 use crate::chain::{submit_pending, ChainClient, SubmitPendingError};
-use crate::engine::{Engine, EngineError};
+use crate::config::BPS_DENOMINATOR;
+use crate::engine::{Engine, EngineError, TaxSide};
 use crate::executor::{commands_for_deposit, commands_for_settlement, OperatorCommand};
 use crate::indexer::{ChainEvent, IndexedEvent};
 use crate::journal::ExecutionJournal;
 use crate::state::{Address, ProtocolState};
 use crate::storage::OperatorDatabase;
+use ethers_core::types::U256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceError<ChainError> {
@@ -95,6 +97,16 @@ where
                 self.journal
                     .plan_batch(&format!("deposit:{event_id}"), commands);
                 count
+            }
+            ChainEvent::TaxCollected { amount, side, .. } => {
+                match self.plan_tax_sweep(amount, side)? {
+                    Some(command) => {
+                        self.journal
+                            .plan_batch(&format!("tax:{event_id}"), vec![command]);
+                        1
+                    }
+                    None => 0,
+                }
             }
         };
 
@@ -206,10 +218,147 @@ where
         result.map_err(ServiceError::Submit)
     }
 
+    fn plan_tax_sweep(
+        &mut self,
+        tax_token_amount: u128,
+        side: TaxSide,
+    ) -> Result<Option<OperatorCommand>, ServiceError<C::Error>> {
+        if tax_token_amount == 0 {
+            return Ok(None);
+        }
+        let tax_split = TaxSplit::from_engine(&self.engine, side);
+        if tax_split.tax_bps == 0 {
+            return Ok(None);
+        }
+
+        let gross_bnb_value = gross_bnb_value_from_tax_tokens(
+            tax_token_amount,
+            tax_split.tax_bps,
+            self.state.pair.token_reserve,
+            self.state.pair.bnb_reserve,
+        );
+        self.engine
+            .apply_trade_tax(&mut self.state, side, gross_bnb_value)
+            .map_err(ServiceError::Engine)?;
+
+        let builder_token_amount =
+            prorate_tax_tokens(tax_token_amount, tax_split.builder_bps, tax_split.tax_bps);
+        let burn_token_amount =
+            prorate_tax_tokens(tax_token_amount, tax_split.burn_bps, tax_split.tax_bps);
+        let sell_token_amount = tax_token_amount
+            .saturating_sub(builder_token_amount)
+            .saturating_sub(burn_token_amount);
+        self.state.balances.builder_token_amount = self
+            .state
+            .balances
+            .builder_token_amount
+            .saturating_add(builder_token_amount);
+        self.state.balances.burned_tokens = self
+            .state
+            .balances
+            .burned_tokens
+            .saturating_add(burn_token_amount);
+
+        if burn_token_amount == 0 && sell_token_amount == 0 {
+            return Ok(None);
+        }
+
+        let owner_bnb_bps_of_sold = split_bps_of_sold(tax_split.owner_bps, tax_split.sell_bps);
+        let vault_bnb_bps_of_sold = if tax_split.vault_bps == 0 {
+            0
+        } else {
+            (BPS_DENOMINATOR as u16).saturating_sub(owner_bnb_bps_of_sold)
+        };
+
+        Ok(Some(OperatorCommand::SweepTaxToBnb {
+            tax_token_amount,
+            builder_token_amount,
+            burn_token_amount,
+            owner_bnb_bps_of_sold,
+            vault_bnb_bps_of_sold,
+        }))
+    }
+
     fn persist(&mut self) {
         self.database.save_state(&self.state);
         self.database.save_journal(&self.journal);
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TaxSplit {
+    tax_bps: u16,
+    builder_bps: u16,
+    owner_bps: u16,
+    vault_bps: u16,
+    burn_bps: u16,
+    sell_bps: u16,
+}
+
+impl TaxSplit {
+    fn from_engine(engine: &Engine, side: TaxSide) -> Self {
+        match side {
+            TaxSide::Buy => Self::new(
+                engine.config.buy_tax_bps,
+                engine.config.buy_tax_builder_bps,
+                0,
+                engine.config.buy_tax_vault_bps,
+            ),
+            TaxSide::Sell => Self::new(
+                engine.config.sell_tax_bps,
+                engine.config.sell_tax_builder_bps,
+                engine.config.sell_tax_owner_bps,
+                engine.config.sell_tax_vault_bps,
+            ),
+        }
+    }
+
+    fn new(tax_bps: u16, builder_bps: u16, owner_bps: u16, vault_bps: u16) -> Self {
+        let distributed = builder_bps
+            .saturating_add(owner_bps)
+            .saturating_add(vault_bps);
+        let burn_bps = tax_bps.saturating_sub(distributed);
+        let sell_bps = owner_bps.saturating_add(vault_bps);
+        Self {
+            tax_bps,
+            builder_bps,
+            owner_bps,
+            vault_bps,
+            burn_bps,
+            sell_bps,
+        }
+    }
+}
+
+fn gross_bnb_value_from_tax_tokens(
+    tax_token_amount: u128,
+    tax_bps: u16,
+    token_reserve: u128,
+    bnb_reserve: u128,
+) -> u128 {
+    if tax_bps == 0 || token_reserve == 0 || bnb_reserve == 0 {
+        return 0;
+    }
+    (U256::from(tax_token_amount)
+        .saturating_mul(U256::from(BPS_DENOMINATOR))
+        .saturating_mul(U256::from(bnb_reserve))
+        / U256::from(tax_bps)
+        / U256::from(token_reserve))
+    .as_u128()
+}
+
+fn prorate_tax_tokens(tax_token_amount: u128, part_bps: u16, tax_bps: u16) -> u128 {
+    if part_bps == 0 || tax_bps == 0 {
+        return 0;
+    }
+    (U256::from(tax_token_amount) * U256::from(part_bps) / U256::from(tax_bps)).as_u128()
+}
+
+fn split_bps_of_sold(part_bps: u16, sell_bps: u16) -> u16 {
+    if part_bps == 0 || sell_bps == 0 {
+        return 0;
+    }
+    ((u32::from(part_bps) * BPS_DENOMINATOR as u32) / u32::from(sell_bps)) as u16
 }
 
 #[cfg(test)]
@@ -275,7 +424,53 @@ mod tests {
             .journal
             .records
             .values()
-            .all(|record| matches!(record.status, CommandStatus::Submitted { .. })));
+            .all(|record| matches!(record.status, CommandStatus::Confirmed { .. })));
+    }
+
+    #[test]
+    fn service_plans_tax_sweep_from_tax_collected_event() {
+        let mut service = service();
+        service.state.pair.token_reserve = 1_000 * BNB;
+        service.state.pair.bnb_reserve = 10 * BNB;
+
+        let tax = IndexedEvent {
+            block_number: 3,
+            block_hash: "0xblock3".into(),
+            tx_hash: "0xtax".into(),
+            log_index: 0,
+            event: ChainEvent::TaxCollected {
+                id: "0xtax:0".into(),
+                from: "0xpair".into(),
+                to: "0xalice".into(),
+                amount: 3 * BNB,
+                side: TaxSide::Buy,
+            },
+        };
+
+        assert_eq!(
+            service.process_event(tax),
+            Ok(EventOutcome::Applied {
+                planned_commands: 1
+            })
+        );
+        assert_eq!(service.state.balances.builder_token_amount, BNB);
+        assert_eq!(service.state.balances.builder_token_value_bnb, BNB / 100);
+        assert_eq!(service.state.balances.vault_bnb, 2 * BNB / 100);
+        let command = &service.journal.records["tax:0xtax:0:0:sweep-tax-to-bnb"].command;
+        assert!(matches!(
+            command,
+            OperatorCommand::SweepTaxToBnb {
+                tax_token_amount,
+                builder_token_amount,
+                burn_token_amount,
+                owner_bnb_bps_of_sold,
+                vault_bnb_bps_of_sold,
+            } if *tax_token_amount == 3 * BNB
+                && *builder_token_amount == BNB
+                && *burn_token_amount == 0
+                && *owner_bnb_bps_of_sold == 0
+                && *vault_bnb_bps_of_sold == 10_000
+        ));
     }
 
     #[test]

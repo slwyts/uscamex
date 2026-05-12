@@ -570,17 +570,21 @@ impl PostgresDatabase {
         key: &str,
         value: &T,
     ) -> Result<(), PostgresStorageError> {
-        let payload = serde_json::to_value(value)?;
+        let payload = serialize_snapshot(value)?;
         let key = key.to_string();
         self.client.run(move |client| {
             client.execute(
-                "INSERT INTO operator_snapshots (key, payload) VALUES ($1, $2) \
+                "INSERT INTO operator_snapshots (key, payload) VALUES ($1, ($2::text)::jsonb) \
                  ON CONFLICT (key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()",
                 &[&key, &payload],
             )
         })?;
         Ok(())
     }
+}
+
+fn serialize_snapshot<T: Serialize>(value: &T) -> Result<String, PostgresStorageError> {
+    serde_json::to_string(value).map_err(PostgresStorageError::Json)
 }
 
 impl OperatorDatabase for PostgresDatabase {
@@ -745,9 +749,14 @@ mod tests {
     fn state_and_journal_are_json_roundtrippable_for_postgres_snapshots() {
         let mut state = ProtocolState::new("root");
         state.ensure_user_mut("alice").principal_bnb = BNB;
+        state.pair.token_reserve = 1_000_000_000_000_000_000_000_000_000;
         let state_json = serde_json::to_string(&state).unwrap();
         let restored_state: ProtocolState = serde_json::from_str(&state_json).unwrap();
         assert_eq!(restored_state.user("alice").unwrap().principal_bnb, BNB);
+        assert_eq!(restored_state.pair.token_reserve, state.pair.token_reserve);
+
+        let snapshot_json = serialize_snapshot(&state).unwrap();
+        assert!(snapshot_json.contains("1000000000000000000000000000"));
 
         let mut journal = ExecutionJournal::default();
         journal.plan_batch(
