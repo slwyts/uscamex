@@ -33,6 +33,7 @@ pub struct RuntimeScanSummary {
     pub synced_protocol_config: bool,
     pub synced_nodes: bool,
     pub synced_pair_reserves: bool,
+    pub synced_vault_balance: bool,
     pub raw_logs: usize,
     pub decoded_events: usize,
     pub applied_events: usize,
@@ -210,9 +211,7 @@ pub struct TickReport {
 
 impl TickReport {
     fn has_activity(&self) -> bool {
-        self.settled_users != 0
-            || self.deflation_amount.is_some()
-            || self.buyback_amount.is_some()
+        self.settled_users != 0 || self.deflation_amount.is_some() || self.buyback_amount.is_some()
     }
 }
 
@@ -260,7 +259,11 @@ fn unix_seconds_to_ymd_hms(timestamp: u64) -> (u64, u64, u64, u64) {
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp.saturating_sub(9) };
+    let month = if mp < 10 {
+        mp + 3
+    } else {
+        mp.saturating_sub(9)
+    };
     let final_year = if month <= 2 { year + 1 } else { year };
     (final_year as u64, month, day, hour)
 }
@@ -290,6 +293,7 @@ where
     let synced_protocol_config = sync_protocol_config(service, rpc).await?;
     let synced_nodes = sync_nodes(service, rpc).await?;
     let synced_pair_reserves = sync_pair_reserves(service, rpc).await?;
+    let synced_vault_balance = sync_vault_balance(service, rpc).await?;
     let to_block = from_block
         .saturating_add(config.max_blocks_per_scan.saturating_sub(1))
         .min(safe_head);
@@ -315,6 +319,7 @@ where
     summary.synced_protocol_config = synced_protocol_config;
     summary.synced_nodes = synced_nodes;
     summary.synced_pair_reserves = synced_pair_reserves;
+    summary.synced_vault_balance = synced_vault_balance;
     summary.chain_config_events = chain_config_events;
     summary.chain_node_events = chain_node_events;
     service.database.record_block(StoredBlock {
@@ -339,6 +344,9 @@ where
 {
     let chain_config = rpc.protocol_config().await.map_err(RuntimeError::Rpc)?;
     service.engine.config = chain_config.config;
+    if !chain_config.buy_enabled {
+        service.engine.config.buyback_enabled = false;
+    }
     Ok(true)
 }
 
@@ -389,6 +397,9 @@ where
                     config_count += 1;
                 }
                 service.engine.config = chain_config.config;
+                if !chain_config.buy_enabled {
+                    service.engine.config.buyback_enabled = false;
+                }
             }
             SystemEvent::NodeUpdated {
                 block_number,
@@ -447,6 +458,22 @@ where
     };
     service.state.pair.token_reserve = reserves.token_reserve;
     service.state.pair.bnb_reserve = reserves.bnb_reserve;
+    service.database.save_state(&service.state);
+    Ok(true)
+}
+
+async fn sync_vault_balance<D, C>(
+    service: &mut OperatorService<D, C>,
+    rpc: &BscRpcClient,
+) -> Result<bool, RuntimeError<C::Error>>
+where
+    D: OperatorDatabase,
+    C: ChainClient,
+    C::Error: fmt::Debug,
+{
+    let vault = rpc.vault().await.map_err(RuntimeError::Rpc)?;
+    service.state.balances.vault_bnb =
+        rpc.native_balance(vault).await.map_err(RuntimeError::Rpc)?;
     service.database.save_state(&service.state);
     Ok(true)
 }

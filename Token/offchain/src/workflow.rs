@@ -63,7 +63,13 @@ impl WorkflowEngine {
     ) -> Result<Vec<OperatorCommand>, EngineError> {
         let mut commands = Vec::new();
         if tick.run_static {
-            for user in active_users {
+            let mut ordered_users = active_users.to_vec();
+            ordered_users.sort_by(|left, right| {
+                referral_depth(state, left)
+                    .cmp(&referral_depth(state, right))
+                    .then_with(|| left.cmp(right))
+            });
+            for user in &ordered_users {
                 if state
                     .user(user)
                     .map(|account| account.active)
@@ -90,6 +96,25 @@ impl WorkflowEngine {
         }
         Ok(commands)
     }
+}
+
+fn referral_depth(state: &ProtocolState, user: &str) -> usize {
+    let mut depth = 0usize;
+    let mut cursor = user.to_owned();
+    while depth < 1024 {
+        let Some(next) = state
+            .user(&cursor)
+            .and_then(|account| account.referrer.clone())
+        else {
+            break;
+        };
+        if next == cursor || next.is_empty() {
+            break;
+        }
+        depth += 1;
+        cursor = next;
+    }
+    depth
 }
 
 #[cfg(test)]

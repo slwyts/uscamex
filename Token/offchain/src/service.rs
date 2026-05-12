@@ -142,13 +142,18 @@ where
     /// and inactive accounts).
     pub fn tick_settlements(&mut self, period_key: impl Into<String>) -> usize {
         let period_key = period_key.into();
-        let active_users: Vec<Address> = self
+        let mut active_users: Vec<Address> = self
             .state
             .users
             .iter()
             .filter(|(_, account)| account.active && account.principal_bnb > 0)
             .map(|(address, _)| address.clone())
             .collect();
+        active_users.sort_by(|left, right| {
+            referral_depth(&self.state, left)
+                .cmp(&referral_depth(&self.state, right))
+                .then_with(|| left.cmp(right))
+        });
         let mut settled = 0usize;
         for user in active_users {
             match self.settle_once(user, period_key.clone()) {
@@ -283,6 +288,25 @@ where
         self.database.save_state(&self.state);
         self.database.save_journal(&self.journal);
     }
+}
+
+fn referral_depth(state: &ProtocolState, user: &str) -> usize {
+    let mut depth = 0usize;
+    let mut cursor = user.to_owned();
+    while depth < 1024 {
+        let Some(next) = state
+            .user(&cursor)
+            .and_then(|account| account.referrer.clone())
+        else {
+            break;
+        };
+        if next == cursor || next.is_empty() {
+            break;
+        }
+        depth += 1;
+        cursor = next;
+    }
+    depth
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -542,5 +566,65 @@ mod tests {
         assert!(first.is_some());
         let duplicate = service.settle_once("alice", "2026-05-10T00").unwrap();
         assert!(duplicate.is_none());
+    }
+
+    #[test]
+    fn settlement_tick_settles_uplines_before_downlines_at_exit_boundary() {
+        let config = ProtocolConfig {
+            daily_static_bps: 10_000,
+            direct_reward_bps: 0,
+            exit_multiple_bps: 10_000,
+            ..ProtocolConfig::default()
+        };
+        let mut service = OperatorService::restore_or_new(
+            Engine::new(config),
+            MemoryDatabase::default(),
+            RecordedClient::default(),
+            "root",
+        );
+        service
+            .engine
+            .bind(&mut service.state, "z-alice", "root")
+            .unwrap();
+        service
+            .engine
+            .deposit(&mut service.state, "z-alice", BNB)
+            .unwrap();
+        service
+            .engine
+            .bind(&mut service.state, "a-bob", "z-alice")
+            .unwrap();
+        service
+            .engine
+            .deposit(&mut service.state, "a-bob", BNB)
+            .unwrap();
+        service.state.ensure_user_mut("z-alice").static_paid_bnb = BNB - 1;
+
+        let settled = service.tick_settlements("period-1");
+
+        assert_eq!(settled, 2);
+        let command =
+            &service.journal.records["static:z-alice:period-1:0:pay-reward-token"].command;
+        assert!(matches!(
+            command,
+            OperatorCommand::PayRewardTokenByBnbValue { to, amount }
+                if to == "z-alice" && *amount == 1
+        ));
+        assert!(matches!(
+            service.journal.records
+                ["static:z-alice:period-1:1:redeem-user-lp"]
+                .command,
+            OperatorCommand::RedeemUserLp { ref user, .. } if user == "z-alice"
+        ));
+        assert!(service.state.user("z-alice").unwrap().exited);
+        assert_eq!(service.state.user("z-alice").unwrap().dynamic_paid_bnb, 0);
+        assert!(service
+            .state
+            .processed_settlements
+            .contains("static:z-alice:period-1"));
+        assert!(service
+            .state
+            .processed_settlements
+            .contains("static:a-bob:period-1"));
     }
 }

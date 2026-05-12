@@ -183,6 +183,31 @@ impl BscRpcClient {
         }))
     }
 
+    pub async fn native_balance(&self, address: Address) -> Result<u128, RpcError> {
+        let response = self
+            .client
+            .post(&self.rpc_url)
+            .json(&JsonRpcRequest {
+                jsonrpc: "2.0",
+                id: 1,
+                method: "eth_getBalance",
+                params: vec![
+                    serde_json::Value::String(format_address(address)),
+                    serde_json::Value::String("latest".to_owned()),
+                ],
+            })
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<JsonRpcResponse<String>>()
+            .await?;
+        if let Some(error) = response.error {
+            return Err(RpcError::Rpc(error.message));
+        }
+        let result = response.result.ok_or(RpcError::MissingResult)?;
+        parse_hex_u128(&result)
+    }
+
     pub async fn block_number(&self) -> Result<u64, RpcError> {
         let response = self
             .client
@@ -360,6 +385,10 @@ fn raw_log_from_rpc(log: JsonRpcLog) -> Result<RawLog, RpcError> {
 
 fn parse_hex_u64(value: &str) -> Result<u64, RpcError> {
     u64::from_str_radix(value.trim_start_matches("0x"), 16).map_err(|_| RpcError::InvalidHex)
+}
+
+fn parse_hex_u128(value: &str) -> Result<u128, RpcError> {
+    u128::from_str_radix(value.trim_start_matches("0x"), 16).map_err(|_| RpcError::InvalidHex)
 }
 
 fn hex_quantity(value: u64) -> String {

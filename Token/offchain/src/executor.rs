@@ -118,21 +118,30 @@ pub fn commands_for_deposit(allocation: &DepositAllocation) -> Vec<OperatorComma
             });
         }
     }
+    for redeem in &allocation.lp_redeems {
+        commands.push(OperatorCommand::RedeemUserLp {
+            user: redeem.user.clone(),
+            lp_bnb_share: redeem.lp_bnb_share,
+            total_active_principal: redeem.total_active_principal,
+        });
+    }
     commands
 }
 
 pub fn commands_for_settlement(settlement: &StaticSettlement) -> Vec<OperatorCommand> {
-    let mut commands = vec![OperatorCommand::PayRewardTokenByBnbValue {
-        to: settlement.user.clone(),
-        amount: settlement.static_bnb,
-    }];
+    let mut commands = Vec::new();
+    if settlement.static_bnb != 0 {
+        commands.push(OperatorCommand::PayRewardTokenByBnbValue {
+            to: settlement.user.clone(),
+            amount: settlement.static_bnb,
+        });
+    }
     commands.extend(settlement.team_rewards.iter().map(command_for_team_reward));
-    if let Some(lp_bnb_share) = settlement.lp_redeem_bnb_share {
+    for redeem in &settlement.lp_redeems {
         commands.push(OperatorCommand::RedeemUserLp {
-            user: settlement.user.clone(),
-            lp_bnb_share,
-            // Denominator already excludes the exiting user's share.
-            total_active_principal: settlement.total_active_lp_principal_bnb.saturating_add(lp_bnb_share),
+            user: redeem.user.clone(),
+            lp_bnb_share: redeem.lp_bnb_share,
+            total_active_principal: redeem.total_active_principal,
         });
     }
     commands
@@ -162,6 +171,7 @@ mod tests {
             vault_bnb: 10,
             direct_bnb: 10,
             direct_referrer: Some("root".into()),
+            lp_redeems: Vec::new(),
         };
         let commands = commands_for_deposit(&allocation);
         assert!(commands.contains(&OperatorCommand::TransferBnb {

@@ -7,7 +7,7 @@ use uscamex_operator::service::OperatorService;
 use uscamex_operator::settings::OperatorSettings;
 use uscamex_operator::storage::PostgresDatabase;
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = OperatorSettings::from_env()?;
     let admin_database = PostgresDatabase::connect(&settings.database_url)?;
@@ -34,8 +34,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         settings.confirmations,
     )?;
+    let mut initial_config = chain_config.config;
+    if !chain_config.buy_enabled {
+        initial_config.buyback_enabled = false;
+    }
     let service = OperatorService::restore_or_new(
-        Engine::new(chain_config.config),
+        Engine::new(initial_config),
         runtime_database,
         chain,
         owner.clone(),

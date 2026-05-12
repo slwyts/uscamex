@@ -33,6 +33,7 @@ pub struct DepositAllocation {
     pub vault_bnb: Wei,
     pub direct_bnb: Wei,
     pub direct_referrer: Option<Address>,
+    pub lp_redeems: Vec<LpRedeem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +48,13 @@ pub struct RewardPayout {
     pub user: Address,
     pub amount: Wei,
     pub generation: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LpRedeem {
+    pub user: Address,
+    pub lp_bnb_share: Wei,
+    pub total_active_principal: Wei,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +75,7 @@ pub struct StaticSettlement {
     /// settlement triggers an exit). The chain layer divides the contract's
     /// LP custody by this denominator to obtain the user's LP share.
     pub total_active_lp_principal_bnb: Wei,
+    pub lp_redeems: Vec<LpRedeem>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,11 +153,23 @@ impl Engine {
         let direct_referrer = state
             .user(&user)
             .and_then(|account| account.referrer.clone());
-        let direct_bnb = direct_referrer
+        let configured_direct_bnb = direct_referrer
             .as_ref()
             .filter(|referrer| *referrer != &user)
             .map(|_| bps(amount, self.config.direct_reward_bps))
             .unwrap_or(0);
+        let mut direct_bnb = configured_direct_bnb;
+        let mut lp_redeems = Vec::new();
+        if let Some(referrer) = direct_referrer.as_ref() {
+            if let Some(account) = state.user(referrer) {
+                if account.exited && !account.active {
+                    direct_bnb = 0;
+                } else if account.active && account.principal_bnb > 0 {
+                    direct_bnb =
+                        direct_bnb.min(self.remaining_exit_room(state, referrer).unwrap_or(0));
+                }
+            }
+        }
         let direct_remainder = direct_pool.saturating_sub(direct_bnb);
 
         state.pair.bnb_reserve = state.pair.bnb_reserve.saturating_add(lp_bnb);
@@ -160,15 +181,6 @@ impl Engine {
             .balances
             .vault_bnb
             .saturating_add(vault_base + direct_remainder);
-        if let Some(referrer) = direct_referrer.as_ref() {
-            if direct_bnb != 0 {
-                *state
-                    .balances
-                    .direct_paid_bnb
-                    .entry(referrer.clone())
-                    .or_default() += direct_bnb;
-            }
-        }
 
         let account = state.ensure_user_mut(&user);
         if account.exited && !account.active {
@@ -187,6 +199,26 @@ impl Engine {
             .total_active_lp_principal_bnb
             .saturating_add(lp_bnb);
 
+        if let Some(referrer) = direct_referrer.as_ref() {
+            if direct_bnb != 0 {
+                *state
+                    .balances
+                    .direct_paid_bnb
+                    .entry(referrer.clone())
+                    .or_default() += direct_bnb;
+                if state
+                    .user(referrer)
+                    .map(|account| account.active && account.principal_bnb > 0)
+                    .unwrap_or(false)
+                {
+                    state.ensure_user_mut(referrer).dynamic_paid_bnb += direct_bnb;
+                    if let Some(redeem) = self.exit_if_cap_reached(state, referrer) {
+                        lp_redeems.push(redeem);
+                    }
+                }
+            }
+        }
+
         Ok(DepositAllocation {
             user,
             amount,
@@ -198,6 +230,7 @@ impl Engine {
             vault_bnb: vault_base + direct_remainder,
             direct_bnb,
             direct_referrer,
+            lp_redeems,
         })
     }
 
@@ -232,10 +265,12 @@ impl Engine {
             return Err(EngineError::InvalidConfig);
         }
 
-        let static_bnb = bps(account.principal_bnb, self.config.daily_static_bps)
+        let period_static_bnb = bps(account.principal_bnb, self.config.daily_static_bps)
             / Wei::from(self.config.settlement_periods_per_day);
+        let static_bnb = period_static_bnb.min(self.remaining_exit_room(state, &user).unwrap_or(0));
         let ancestors = self.ancestors(state, &user, 10);
         let mut team_rewards = Vec::new();
+        let mut lp_redeems = Vec::new();
 
         state.ensure_user_mut(&user).static_paid_bnb += static_bnb;
         for (index, ancestor) in ancestors.iter().enumerate() {
@@ -243,41 +278,55 @@ impl Engine {
             let reward_rate = self.config.team_reward_bps[index];
             let eligible = state
                 .user(ancestor)
-                .map(|account| account.active && account.direct_count >= u32::from(generation))
+                .map(|account| {
+                    account.active
+                        && account.principal_bnb > 0
+                        && account.direct_count >= u32::from(generation)
+                })
                 .unwrap_or(false);
-            if eligible {
-                let amount = bps(static_bnb, reward_rate);
-                state.ensure_user_mut(ancestor).dynamic_paid_bnb += amount;
-                team_rewards.push(RewardPayout {
-                    user: ancestor.clone(),
-                    amount,
-                    generation,
-                });
+            if !eligible {
+                continue;
+            }
+
+            let room = self.remaining_exit_room(state, ancestor).unwrap_or(0);
+            let amount = bps(static_bnb, reward_rate).min(room);
+            if amount == 0 {
+                if room == 0 {
+                    if let Some(redeem) = self.exit_if_cap_reached(state, ancestor) {
+                        lp_redeems.push(redeem);
+                    }
+                }
+                continue;
+            }
+
+            state.ensure_user_mut(ancestor).dynamic_paid_bnb += amount;
+            team_rewards.push(RewardPayout {
+                user: ancestor.clone(),
+                amount,
+                generation,
+            });
+            if let Some(redeem) = self.exit_if_cap_reached(state, ancestor) {
+                lp_redeems.push(redeem);
             }
         }
 
-        let account = state.ensure_user_mut(&user);
-        let exit_target = account
-            .principal_bnb
-            .saturating_mul(Wei::from(self.config.exit_multiple_bps))
-            / BPS_DENOMINATOR;
-        let total_paid = account.static_paid_bnb + account.dynamic_paid_bnb;
-        let exited = total_paid >= exit_target;
+        let user_redeem = self.exit_if_cap_reached(state, &user);
         let mut lp_redeem_bnb_share = None;
         let mut exit_refund_bnb = None;
-        if exited {
-            account.active = false;
-            account.exited = true;
-            exit_refund_bnb = Some(account.principal_bnb);
-            let share = account.lp_bnb_principal;
-            if share != 0 {
-                account.lp_bnb_principal = 0;
-                lp_redeem_bnb_share = Some(share);
-                state.balances.total_active_lp_principal_bnb = state
-                    .balances
-                    .total_active_lp_principal_bnb
-                    .saturating_sub(share);
-            }
+        let exited = state
+            .user(&user)
+            .map(|account| !account.active && account.exited)
+            .unwrap_or(false);
+        if let Some(redeem) = user_redeem {
+            exit_refund_bnb = state.user(&user).map(|account| account.principal_bnb);
+            lp_redeem_bnb_share = Some(redeem.lp_bnb_share);
+            lp_redeems.push(redeem);
+        } else if exited {
+            exit_refund_bnb = state.user(&user).map(|account| account.principal_bnb);
+        }
+
+        if lp_redeem_bnb_share == Some(0) {
+            lp_redeem_bnb_share = None;
         }
 
         let total_active_lp_principal_bnb = state.balances.total_active_lp_principal_bnb;
@@ -289,6 +338,7 @@ impl Engine {
             exit_refund_bnb,
             lp_redeem_bnb_share,
             total_active_lp_principal_bnb,
+            lp_redeems,
         })
     }
 
@@ -494,6 +544,57 @@ impl Engine {
         }
         result
     }
+
+    fn exit_if_cap_reached(&self, state: &mut ProtocolState, user: &str) -> Option<LpRedeem> {
+        let account = state.user(user)?;
+        if !account.active || account.principal_bnb == 0 {
+            return None;
+        }
+        let exit_target = account
+            .principal_bnb
+            .saturating_mul(Wei::from(self.config.exit_multiple_bps))
+            / BPS_DENOMINATOR;
+        let total_paid = account
+            .static_paid_bnb
+            .saturating_add(account.dynamic_paid_bnb);
+        if total_paid < exit_target {
+            return None;
+        }
+
+        let total_active_principal = state.balances.total_active_lp_principal_bnb;
+        let account = state.ensure_user_mut(user);
+        account.active = false;
+        account.exited = true;
+        let lp_bnb_share = account.lp_bnb_principal;
+        account.lp_bnb_principal = 0;
+        state.balances.total_active_lp_principal_bnb = state
+            .balances
+            .total_active_lp_principal_bnb
+            .saturating_sub(lp_bnb_share);
+        if lp_bnb_share == 0 || total_active_principal == 0 {
+            return None;
+        }
+        Some(LpRedeem {
+            user: user.to_owned(),
+            lp_bnb_share,
+            total_active_principal,
+        })
+    }
+
+    fn remaining_exit_room(&self, state: &ProtocolState, user: &str) -> Option<Wei> {
+        let account = state.user(user)?;
+        if !account.active || account.principal_bnb == 0 {
+            return Some(0);
+        }
+        let exit_target = account
+            .principal_bnb
+            .saturating_mul(Wei::from(self.config.exit_multiple_bps))
+            / BPS_DENOMINATOR;
+        let total_paid = account
+            .static_paid_bnb
+            .saturating_add(account.dynamic_paid_bnb);
+        Some(exit_target.saturating_sub(total_paid))
+    }
 }
 
 #[cfg(test)]
@@ -547,9 +648,54 @@ mod tests {
     }
 
     #[test]
+    fn direct_referral_counts_toward_dynamic_exit_cap() {
+        let config = ProtocolConfig {
+            exit_multiple_bps: 10_000,
+            ..ProtocolConfig::default()
+        };
+        let engine = Engine::new(config);
+        let mut state = ProtocolState::new("root");
+        engine.bind(&mut state, "alice", "root").unwrap();
+        engine.deposit(&mut state, "alice", BNB).unwrap();
+        engine.bind(&mut state, "bob", "alice").unwrap();
+        state.ensure_user_mut("alice").static_paid_bnb = BNB - 1;
+
+        let allocation = engine.deposit(&mut state, "bob", BNB).unwrap();
+
+        assert_eq!(allocation.direct_bnb, 1);
+        assert_eq!(allocation.vault_bnb, (BNB / 10) + (BNB / 10 - 1));
+        assert_eq!(state.user("alice").unwrap().dynamic_paid_bnb, 1);
+        assert!(state.user("alice").unwrap().exited);
+        assert_eq!(allocation.lp_redeems.len(), 1);
+        assert_eq!(allocation.lp_redeems[0].user, "alice");
+        assert_eq!(
+            allocation.lp_redeems[0].total_active_principal,
+            6 * BNB / 10
+        );
+        assert_eq!(state.balances.total_active_lp_principal_bnb, 3 * BNB / 10);
+    }
+
+    #[test]
+    fn exited_direct_referrer_reward_is_redirected_to_vault() {
+        let engine = engine();
+        let mut state = ProtocolState::new("root");
+        engine.bind(&mut state, "alice", "root").unwrap();
+        engine.deposit(&mut state, "alice", BNB).unwrap();
+        engine.withdraw_lp(&mut state, "alice").unwrap();
+        engine.bind(&mut state, "bob", "alice").unwrap();
+
+        let allocation = engine.deposit(&mut state, "bob", BNB).unwrap();
+
+        assert_eq!(allocation.direct_bnb, 0);
+        assert_eq!(allocation.vault_bnb, BNB / 5);
+        assert!(!state.balances.direct_paid_bnb.contains_key("alice"));
+    }
+
+    #[test]
     fn static_settlement_pays_team_and_exits_at_cap() {
         let config = ProtocolConfig {
             daily_static_bps: 10_000,
+            direct_reward_bps: 0,
             exit_multiple_bps: 10_000,
             ..ProtocolConfig::default()
         };
@@ -570,6 +716,117 @@ mod tests {
             engine.settle_static_period(&mut state, "bob").unwrap();
         }
         assert!(state.user("bob").unwrap().exited);
+    }
+
+    #[test]
+    fn team_rewards_require_active_principal_position() {
+        let config = ProtocolConfig {
+            daily_static_bps: 10_000,
+            exit_multiple_bps: 1_000_000,
+            ..ProtocolConfig::default()
+        };
+        let engine = Engine::new(config);
+        let mut state = ProtocolState::new("root");
+        engine.bind(&mut state, "alice", "root").unwrap();
+        engine.deposit(&mut state, "alice", BNB).unwrap();
+
+        let settlement = engine.settle_static_period(&mut state, "alice").unwrap();
+
+        assert!(settlement.team_rewards.is_empty());
+        assert_eq!(state.user("root").unwrap().dynamic_paid_bnb, 0);
+    }
+
+    #[test]
+    fn zero_team_reward_rates_do_not_plan_zero_payouts() {
+        let config = ProtocolConfig {
+            daily_static_bps: 10_000,
+            team_reward_bps: [0, 900, 800, 700, 600, 500, 500, 500, 500, 500],
+            direct_reward_bps: 0,
+            exit_multiple_bps: 1_000_000,
+            ..ProtocolConfig::default()
+        };
+        let engine = Engine::new(config);
+        let mut state = ProtocolState::new("root");
+        engine.bind(&mut state, "alice", "root").unwrap();
+        engine.deposit(&mut state, "alice", BNB).unwrap();
+        engine.bind(&mut state, "bob", "alice").unwrap();
+        engine.deposit(&mut state, "bob", BNB).unwrap();
+
+        let settlement = engine.settle_static_period(&mut state, "bob").unwrap();
+
+        assert!(settlement.team_rewards.is_empty());
+        assert_eq!(state.user("alice").unwrap().dynamic_paid_bnb, 0);
+    }
+
+    #[test]
+    fn static_settlement_caps_final_reward_at_exit_target() {
+        let config = ProtocolConfig {
+            daily_static_bps: 10_000,
+            direct_reward_bps: 0,
+            exit_multiple_bps: 10_000,
+            ..ProtocolConfig::default()
+        };
+        let engine = Engine::new(config);
+        let mut state = ProtocolState::new("root");
+        engine.bind(&mut state, "alice", "root").unwrap();
+        engine.deposit(&mut state, "alice", BNB).unwrap();
+        state.ensure_user_mut("alice").static_paid_bnb = BNB - 1;
+
+        let settlement = engine.settle_static_period(&mut state, "alice").unwrap();
+
+        assert_eq!(settlement.static_bnb, 1);
+        assert!(state.user("alice").unwrap().exited);
+        assert_eq!(state.user("alice").unwrap().static_paid_bnb, BNB);
+    }
+
+    #[test]
+    fn team_reward_caps_final_dynamic_reward_at_exit_target() {
+        let config = ProtocolConfig {
+            daily_static_bps: 10_000,
+            direct_reward_bps: 0,
+            exit_multiple_bps: 10_000,
+            ..ProtocolConfig::default()
+        };
+        let engine = Engine::new(config);
+        let mut state = ProtocolState::new("root");
+        engine.bind(&mut state, "alice", "root").unwrap();
+        engine.deposit(&mut state, "alice", BNB).unwrap();
+        engine.bind(&mut state, "bob", "alice").unwrap();
+        engine.deposit(&mut state, "bob", BNB).unwrap();
+        state.ensure_user_mut("alice").static_paid_bnb = BNB - 1;
+
+        let settlement = engine.settle_static_period(&mut state, "bob").unwrap();
+
+        assert_eq!(settlement.team_rewards[0].amount, 1);
+        assert!(state.user("alice").unwrap().exited);
+        assert_eq!(state.user("alice").unwrap().dynamic_paid_bnb, 1);
+        assert_eq!(state.user("alice").unwrap().static_paid_bnb, BNB - 1);
+    }
+
+    #[test]
+    fn team_reward_exit_redeems_ancestor_lp_immediately() {
+        let config = ProtocolConfig {
+            daily_static_bps: 10_000,
+            direct_reward_bps: 0,
+            exit_multiple_bps: 10_000,
+            ..ProtocolConfig::default()
+        };
+        let engine = Engine::new(config);
+        let mut state = ProtocolState::new("root");
+        engine.bind(&mut state, "alice", "root").unwrap();
+        engine.deposit(&mut state, "alice", BNB).unwrap();
+        engine.bind(&mut state, "bob", "alice").unwrap();
+        engine.deposit(&mut state, "bob", BNB).unwrap();
+
+        state.ensure_user_mut("alice").static_paid_bnb = BNB - (BNB / 40);
+        let settlement = engine.settle_static_period(&mut state, "bob").unwrap();
+
+        assert_eq!(settlement.team_rewards[0].user, "alice");
+        assert!(state.user("alice").unwrap().exited);
+        assert!(!state.user("alice").unwrap().active);
+        assert_eq!(settlement.lp_redeems.len(), 1);
+        assert_eq!(settlement.lp_redeems[0].user, "alice");
+        assert_eq!(settlement.lp_redeems[0].lp_bnb_share, 3 * BNB / 10);
     }
 
     #[test]
