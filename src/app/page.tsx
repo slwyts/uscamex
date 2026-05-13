@@ -1,5 +1,6 @@
 import Navbar from "@/components/Navbar";
 import Hero from "@/components/Hero";
+import VideoSection from "@/components/VideoSection";
 import GenesisNodeSection from "@/components/GenesisNodeSection";
 import ArenaSection from "@/components/ArenaSection";
 import RealDataSection from "@/components/RealDataSection";
@@ -13,6 +14,7 @@ export default function Home() {
       <div className="bg-stripes" />
       <Navbar />
       <Hero />
+      <VideoSection />
       <GenesisNodeSection />
       {/* Dark sections */}
       <div className="bg-[#0d0d14] rounded-t-[32px]">

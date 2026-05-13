@@ -38,6 +38,7 @@
     "test",
     "scripts",
     "hardhat.config.ts",
-    "Token/**"
+    "Token/**",
+    "public/**/*.ts"
   ]
 }
