@@ -13,6 +13,7 @@ pub mod settings;
 pub mod state;
 pub mod storage;
 pub mod workflow;
+pub mod ws;
 
 pub use config::{ProtocolConfig, BNB, BPS_DENOMINATOR};
 pub use engine::{

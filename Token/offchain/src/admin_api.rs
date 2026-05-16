@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -27,12 +28,89 @@ const DEFAULT_TEAM_DEPTH: u32 = 10;
 const MAX_TEAM_DEPTH: u32 = 50;
 const DEFAULT_PAGE_SIZE: u32 = 50;
 const MAX_PAGE_SIZE: u32 = 500;
+const ADMIN_CHAIN_HEAD_TTL: Duration = Duration::from_secs(10);
+const ADMIN_OWNER_TTL: Duration = Duration::from_secs(300);
+const ADMIN_PROTOCOL_CONFIG_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Clone)]
 pub struct AdminApiState {
     settings: Arc<OperatorSettings>,
     database: Arc<Mutex<PostgresDatabase>>,
     rpc: BscRpcClient,
+    rpc_cache: Arc<Mutex<AdminRpcCache>>,
+}
+
+#[derive(Debug, Default)]
+struct AdminRpcCache {
+    chain_head: Option<TimedCache<Option<u64>>>,
+    owner: Option<TimedCache<ethers_core::types::Address>>,
+    protocol_config_initialized: Option<TimedCache<bool>>,
+}
+
+#[derive(Debug, Clone)]
+struct TimedCache<T> {
+    value: T,
+    refreshed_at: Instant,
+}
+
+fn fresh_cached_value<T: Clone>(entry: &Option<TimedCache<T>>, ttl: Duration) -> Option<T> {
+    entry
+        .as_ref()
+        .filter(|cache| cache.refreshed_at.elapsed() < ttl)
+        .map(|cache| cache.value.clone())
+}
+
+impl AdminApiState {
+    async fn cached_chain_head(&self) -> Option<u64> {
+        if let Ok(cache) = self.rpc_cache.lock() {
+            if let Some(value) = fresh_cached_value(&cache.chain_head, ADMIN_CHAIN_HEAD_TTL) {
+                return value;
+            }
+        }
+        let value = self.rpc.block_number().await.ok();
+        if let Ok(mut cache) = self.rpc_cache.lock() {
+            cache.chain_head = Some(TimedCache {
+                value,
+                refreshed_at: Instant::now(),
+            });
+        }
+        value
+    }
+
+    async fn cached_owner(&self) -> Result<ethers_core::types::Address, AdminApiError> {
+        if let Ok(cache) = self.rpc_cache.lock() {
+            if let Some(value) = fresh_cached_value(&cache.owner, ADMIN_OWNER_TTL) {
+                return Ok(value);
+            }
+        }
+        let value = self.rpc.owner().await?;
+        if let Ok(mut cache) = self.rpc_cache.lock() {
+            cache.owner = Some(TimedCache {
+                value,
+                refreshed_at: Instant::now(),
+            });
+        }
+        Ok(value)
+    }
+
+    async fn cached_protocol_config_initialized(&self) -> Result<bool, AdminApiError> {
+        if let Ok(cache) = self.rpc_cache.lock() {
+            if let Some(value) = fresh_cached_value(
+                &cache.protocol_config_initialized,
+                ADMIN_PROTOCOL_CONFIG_TTL,
+            ) {
+                return Ok(value);
+            }
+        }
+        let value = self.rpc.protocol_config().await?.config.validate().is_ok();
+        if let Ok(mut cache) = self.rpc_cache.lock() {
+            cache.protocol_config_initialized = Some(TimedCache {
+                value,
+                refreshed_at: Instant::now(),
+            });
+        }
+        Ok(value)
+    }
 }
 
 #[derive(Debug)]
@@ -153,6 +231,7 @@ pub async fn serve_admin_api(
         settings: Arc::new(settings),
         database: Arc::new(Mutex::new(database)),
         rpc,
+        rpc_cache: Arc::new(Mutex::new(AdminRpcCache::default())),
     };
     let app = router_with_static(state);
     let listener = TcpListener::bind(bind_addr).await?;
@@ -189,7 +268,11 @@ pub fn router_with_static(state: AdminApiState) -> Router {
                         target.push(trimmed);
                     }
                 }
-                let serve_target = if target.is_file() { target } else { index.clone() };
+                let serve_target = if target.is_file() {
+                    target
+                } else {
+                    index.clone()
+                };
                 match tokio::fs::read(&serve_target).await {
                     Ok(bytes) => {
                         let mime = mime_for(&serve_target);
@@ -248,7 +331,7 @@ pub fn router(state: AdminApiState) -> Router {
 async fn public_health(
     State(state): State<AdminApiState>,
 ) -> Result<Json<PublicHealthResponse>, AdminApiError> {
-    let chain_head = state.rpc.block_number().await.ok();
+    let chain_head = state.cached_chain_head().await;
     Ok(Json(PublicHealthResponse {
         ok: true,
         chain_id: state.settings.chain_id,
@@ -263,7 +346,7 @@ async fn public_health(
 async fn owner(
     State(state): State<AdminApiState>,
 ) -> Result<Json<serde_json::Value>, AdminApiError> {
-    let owner = state.rpc.owner().await?;
+    let owner = state.cached_owner().await?;
     Ok(Json(serde_json::json!({
         "owner": format_address(owner),
         "tokenAddress": state.settings.token_address,
@@ -275,8 +358,8 @@ async fn admin_overview(
     headers: HeaderMap,
 ) -> Result<Json<AdminOverviewResponse>, AdminApiError> {
     let signer = require_owner(&state, &headers).await?;
-    let owner = state.rpc.owner().await?;
-    let chain_head = state.rpc.block_number().await.ok();
+    let owner = state.cached_owner().await?;
+    let chain_head = state.cached_chain_head().await;
     let (has_state_snapshot, pending_commands) = {
         let database = lock_database(&state)?;
         let state_snapshot = database
@@ -287,7 +370,7 @@ async fn admin_overview(
             .map_err(|error| AdminApiError::Database(error.to_string()))?;
         (state_snapshot.is_some(), journal.pending_commands().len())
     };
-    let protocol_config_initialized = state.rpc.protocol_config().await?.config.validate().is_ok();
+    let protocol_config_initialized = state.cached_protocol_config_initialized().await?;
     Ok(Json(AdminOverviewResponse {
         signer: format_address(signer),
         owner: format_address(owner),
@@ -371,8 +454,8 @@ async fn admin_stats(
     headers: HeaderMap,
 ) -> Result<Json<GlobalStatsResponse>, AdminApiError> {
     let signer = require_owner(&state, &headers).await?;
-    let chain_head = state.rpc.block_number().await.ok();
-    let protocol_config_initialized = state.rpc.protocol_config().await?.config.validate().is_ok();
+    let chain_head = state.cached_chain_head().await;
+    let protocol_config_initialized = state.cached_protocol_config_initialized().await?;
 
     let (snapshot, journal, last_block) = {
         let database = lock_database(&state)?;
@@ -1125,17 +1208,15 @@ async fn require_owner(
                 .to_str()
                 .map_err(|_| AdminApiError::AuthMissing("x-uscamex-admin-message-b64"))?
                 .trim();
-            let bytes = base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                raw.as_bytes(),
-            )
-            .or_else(|_| {
-                base64::Engine::decode(
-                    &base64::engine::general_purpose::STANDARD_NO_PAD,
-                    raw.as_bytes(),
-                )
-            })
-            .map_err(|_| AdminApiError::BadSignature)?;
+            let bytes =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, raw.as_bytes())
+                    .or_else(|_| {
+                        base64::Engine::decode(
+                            &base64::engine::general_purpose::STANDARD_NO_PAD,
+                            raw.as_bytes(),
+                        )
+                    })
+                    .map_err(|_| AdminApiError::BadSignature)?;
             String::from_utf8(bytes).map_err(|_| AdminApiError::BadSignature)?
         }
         None => header(headers, "x-uscamex-admin-message")?.to_string(),
@@ -1155,7 +1236,7 @@ async fn require_owner(
     let signer = signature
         .recover(message)
         .map_err(|_| AdminApiError::BadSignature)?;
-    let owner = state.rpc.owner().await?;
+    let owner = state.cached_owner().await?;
     if signer != owner {
         eprintln!(
             "admin auth rejected: signer={:?} owner={:?} chain_id={} token={} msg_first120={:?}",

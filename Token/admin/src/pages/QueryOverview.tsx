@@ -119,7 +119,7 @@ function StatsCard() {
   const { data, isFetching, refetch, error } = useQuery({
     queryKey: ["admin-stats"],
     queryFn: async () => (await api().get<GlobalStats>("/api/admin/stats")).data,
-    refetchInterval: 20_000,
+    refetchInterval: 45_000,
   });
   if (error) {
     return (

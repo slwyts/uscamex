@@ -1,11 +1,12 @@
 use std::fmt;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::chain::ChainClient;
 use crate::indexer::{classify_system_log, decode_protocol_log, DecodeError, RawLog, SystemEvent};
 use crate::rpc::{BscRpcClient, RpcError};
 use crate::service::{EventOutcome, OperatorService, ServiceError};
 use crate::storage::{OperatorDatabase, StoredBlock};
+use crate::ws::WsRuntimeState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeScanConfig {
@@ -13,6 +14,14 @@ pub struct RuntimeScanConfig {
     pub confirmations: u64,
     pub max_blocks_per_scan: u64,
     pub poll_interval: Duration,
+    pub protocol_config_interval: Duration,
+    pub nodes_interval: Duration,
+    pub pair_reserves_interval: Duration,
+    pub vault_balance_interval: Duration,
+    pub failure_backoff_max: Duration,
+    pub ws_stale_after: Duration,
+    pub ws_gap_scan_blocks: u64,
+    pub ws_reconcile_interval: Duration,
 }
 
 impl RuntimeScanConfig {
@@ -22,7 +31,72 @@ impl RuntimeScanConfig {
             confirmations: confirmations.max(1),
             max_blocks_per_scan: 1_000,
             poll_interval: Duration::from_secs(5),
+            protocol_config_interval: Duration::from_secs(300),
+            nodes_interval: Duration::from_secs(60),
+            pair_reserves_interval: Duration::from_secs(30),
+            vault_balance_interval: Duration::from_secs(30),
+            failure_backoff_max: Duration::from_secs(30),
+            ws_stale_after: Duration::from_secs(30),
+            ws_gap_scan_blocks: 100,
+            ws_reconcile_interval: Duration::from_secs(300),
         }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct RuntimeSyncState {
+    last_protocol_config_sync: Option<Instant>,
+    last_nodes_sync: Option<Instant>,
+    last_pair_reserves_sync: Option<Instant>,
+    last_vault_balance_sync: Option<Instant>,
+    last_ws_reconcile: Option<Instant>,
+}
+
+impl RuntimeSyncState {
+    fn is_due(last_sync: Option<Instant>, now: Instant, interval: Duration) -> bool {
+        last_sync
+            .map(|last_sync| now.duration_since(last_sync) >= interval)
+            .unwrap_or(true)
+    }
+
+    fn protocol_config_due(&self, now: Instant, interval: Duration) -> bool {
+        Self::is_due(self.last_protocol_config_sync, now, interval)
+    }
+
+    fn nodes_due(&self, now: Instant, interval: Duration) -> bool {
+        Self::is_due(self.last_nodes_sync, now, interval)
+    }
+
+    fn pair_reserves_due(&self, now: Instant, interval: Duration) -> bool {
+        Self::is_due(self.last_pair_reserves_sync, now, interval)
+    }
+
+    fn vault_balance_due(&self, now: Instant, interval: Duration) -> bool {
+        Self::is_due(self.last_vault_balance_sync, now, interval)
+    }
+
+    fn ws_reconcile_due(&self, now: Instant, interval: Duration) -> bool {
+        Self::is_due(self.last_ws_reconcile, now, interval)
+    }
+
+    fn mark_protocol_config(&mut self, now: Instant) {
+        self.last_protocol_config_sync = Some(now);
+    }
+
+    fn mark_nodes(&mut self, now: Instant) {
+        self.last_nodes_sync = Some(now);
+    }
+
+    fn mark_pair_reserves(&mut self, now: Instant) {
+        self.last_pair_reserves_sync = Some(now);
+    }
+
+    fn mark_vault_balance(&mut self, now: Instant) {
+        self.last_vault_balance_sync = Some(now);
+    }
+
+    fn mark_ws_reconcile(&mut self, now: Instant) {
+        self.last_ws_reconcile = Some(now);
     }
 }
 
@@ -81,6 +155,8 @@ pub struct OperatorRuntime<D, C> {
     last_deflation_slot: Option<String>,
     /// Last minute slot tag for which buyback was scheduled.
     last_buyback_slot: Option<String>,
+    sync_state: RuntimeSyncState,
+    ws_state: Option<WsRuntimeState>,
 }
 
 /// Seconds per day. Settlement period seconds are derived dynamically from
@@ -110,11 +186,25 @@ where
             last_settlement_slot: None,
             last_deflation_slot: None,
             last_buyback_slot: None,
+            sync_state: RuntimeSyncState::default(),
+            ws_state: None,
         }
     }
 
+    pub fn with_ws_state(mut self, ws_state: WsRuntimeState) -> Self {
+        self.ws_state = Some(ws_state);
+        self
+    }
+
     pub async fn run_once(&mut self) -> Result<Option<RuntimeScanSummary>, RuntimeError<C::Error>> {
-        scan_confirmed_logs_once(&mut self.service, &self.rpc, &self.config).await
+        scan_confirmed_logs_once_with_sync_state(
+            &mut self.service,
+            &self.rpc,
+            &self.config,
+            &mut self.sync_state,
+            self.ws_state.as_ref(),
+        )
+        .await
     }
 
     /// Evaluate wall-clock-driven schedules (settlement / deflation / buyback)
@@ -165,22 +255,33 @@ where
     }
 
     pub async fn run_forever(&mut self) -> Result<(), RuntimeError<C::Error>> {
+        let mut consecutive_scan_failures = 0u32;
         loop {
-            match self.run_once().await? {
-                Some(summary)
-                    if summary.raw_logs != 0 || !summary.submitted_transactions.is_empty() =>
-                {
-                    println!(
-                        "operator tick: blocks={}..{} logs={} applied={} planned={} submitted={}",
-                        summary.from_block,
-                        summary.to_block,
-                        summary.raw_logs,
-                        summary.applied_events,
-                        summary.planned_commands,
-                        summary.submitted_transactions.len()
+            match self.run_once().await {
+                Ok(Some(summary)) => {
+                    consecutive_scan_failures = 0;
+                    if summary.raw_logs != 0 || !summary.submitted_transactions.is_empty() {
+                        println!(
+                            "operator tick: blocks={}..{} logs={} applied={} planned={} submitted={}",
+                            summary.from_block,
+                            summary.to_block,
+                            summary.raw_logs,
+                            summary.applied_events,
+                            summary.planned_commands,
+                            summary.submitted_transactions.len()
+                        );
+                    }
+                }
+                Ok(None) => {
+                    consecutive_scan_failures = 0;
+                }
+                Err(error) => {
+                    consecutive_scan_failures = consecutive_scan_failures.saturating_add(1);
+                    eprintln!(
+                        "operator scan failed (consecutive_failures={}): {error:?}",
+                        consecutive_scan_failures
                     );
                 }
-                _ => {}
             }
             match self.run_scheduled_ticks() {
                 Ok(report) if report.has_activity() => {
@@ -197,9 +298,30 @@ where
                     eprintln!("scheduled tick failed: {error:?}");
                 }
             }
-            tokio::time::sleep(self.config.poll_interval).await;
+            tokio::time::sleep(scan_sleep_duration(
+                self.config.poll_interval,
+                self.config.failure_backoff_max,
+                consecutive_scan_failures,
+            ))
+            .await;
         }
     }
+}
+
+fn scan_sleep_duration(
+    poll_interval: Duration,
+    failure_backoff_max: Duration,
+    consecutive_failures: u32,
+) -> Duration {
+    if consecutive_failures == 0 {
+        return poll_interval;
+    }
+    let max_backoff = failure_backoff_max.max(poll_interval);
+    let factor = 1u32 << consecutive_failures.saturating_sub(1).min(4);
+    poll_interval
+        .checked_mul(factor)
+        .unwrap_or(max_backoff)
+        .min(max_backoff)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -278,7 +400,36 @@ where
     C: ChainClient,
     C::Error: fmt::Debug,
 {
-    let chain_head = rpc.block_number().await.map_err(RuntimeError::Rpc)?;
+    let mut sync_state = RuntimeSyncState::default();
+    scan_confirmed_logs_once_with_sync_state(service, rpc, config, &mut sync_state, None).await
+}
+
+async fn scan_confirmed_logs_once_with_sync_state<D, C>(
+    service: &mut OperatorService<D, C>,
+    rpc: &BscRpcClient,
+    config: &RuntimeScanConfig,
+    sync_state: &mut RuntimeSyncState,
+    ws_state: Option<&WsRuntimeState>,
+) -> Result<Option<RuntimeScanSummary>, RuntimeError<C::Error>>
+where
+    D: OperatorDatabase,
+    C: ChainClient,
+    C::Error: fmt::Debug,
+{
+    let now = Instant::now();
+    let ws_snapshot = ws_state.map(|state| state.snapshot(config.ws_stale_after));
+    let ws_usable = ws_snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.connected && !snapshot.stale && snapshot.last_head.is_some()
+    });
+    let chain_head = if ws_usable {
+        ws_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.last_head.as_ref())
+            .map(|head| head.number)
+            .unwrap_or(0)
+    } else {
+        rpc.block_number().await.map_err(RuntimeError::Rpc)?
+    };
     let Some(safe_head) = chain_head.checked_sub(config.confirmations) else {
         return Ok(None);
     };
@@ -290,14 +441,63 @@ where
     if from_block > safe_head {
         return Ok(None);
     }
-    let synced_protocol_config = sync_protocol_config(service, rpc).await?;
-    let synced_nodes = sync_nodes(service, rpc).await?;
-    let synced_pair_reserves = sync_pair_reserves(service, rpc).await?;
-    let synced_vault_balance = sync_vault_balance(service, rpc).await?;
+    let synced_protocol_config =
+        if sync_state.protocol_config_due(now, config.protocol_config_interval) {
+            let synced = sync_protocol_config(service, rpc).await?;
+            sync_state.mark_protocol_config(now);
+            synced
+        } else {
+            false
+        };
+    let synced_nodes = if sync_state.nodes_due(now, config.nodes_interval) {
+        let synced = sync_nodes(service, rpc).await?;
+        sync_state.mark_nodes(now);
+        synced
+    } else {
+        false
+    };
+    let synced_pair_reserves = if sync_state.pair_reserves_due(now, config.pair_reserves_interval) {
+        let synced = sync_pair_reserves(service, rpc).await?;
+        sync_state.mark_pair_reserves(now);
+        synced
+    } else {
+        false
+    };
+    let synced_vault_balance = if sync_state.vault_balance_due(now, config.vault_balance_interval) {
+        let synced = sync_vault_balance(service, rpc).await?;
+        sync_state.mark_vault_balance(now);
+        synced
+    } else {
+        false
+    };
+    let first_ws_head = ws_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.first_head);
+    let ws_covers_range = ws_usable
+        && first_ws_head
+            .map(|first_head| from_block > first_head)
+            .unwrap_or(false);
+    let reconcile_due = ws_usable && sync_state.ws_reconcile_due(now, config.ws_reconcile_interval);
+    let use_http_logs = !ws_covers_range || reconcile_due;
+    let max_scan_blocks = if use_http_logs {
+        config
+            .ws_gap_scan_blocks
+            .max(1)
+            .min(config.max_blocks_per_scan.max(1))
+    } else {
+        config.max_blocks_per_scan.max(1)
+    };
     let to_block = from_block
-        .saturating_add(config.max_blocks_per_scan.saturating_sub(1))
+        .saturating_add(max_scan_blocks.saturating_sub(1))
         .min(safe_head);
-    let to_hash = rpc.block_hash(to_block).await.map_err(RuntimeError::Rpc)?;
+    let to_hash = ws_state
+        .and_then(|state| state.recent_head_hash(to_block))
+        .unwrap_or_else(|| String::new());
+    let to_hash = if to_hash.is_empty() {
+        rpc.block_hash(to_block).await.map_err(RuntimeError::Rpc)?
+    } else {
+        to_hash
+    };
     if let Some(previous) = service.database.last_indexed_block() {
         if previous.number == to_block && previous.hash != to_hash {
             return Err(RuntimeError::ReorgDetected {
@@ -308,13 +508,36 @@ where
         }
     }
 
-    let logs = rpc
-        .protocol_logs(from_block, to_block)
-        .await
-        .map_err(RuntimeError::Rpc)?;
+    let logs = if use_http_logs {
+        let logs = rpc
+            .protocol_logs(from_block, to_block)
+            .await
+            .map_err(RuntimeError::Rpc)?;
+        if ws_usable {
+            sync_state.mark_ws_reconcile(now);
+        }
+        logs
+    } else {
+        ws_state
+            .map(|state| state.drain_logs(from_block, to_block))
+            .unwrap_or_default()
+    };
     let system_events = collect_system_events(&logs)?;
+    let saw_config_event = system_events
+        .iter()
+        .any(|event| matches!(event, SystemEvent::ProtocolConfigUpdated { .. }));
+    let saw_node_event = system_events
+        .iter()
+        .any(|event| matches!(event, SystemEvent::NodeUpdated { .. }));
     let (chain_config_events, chain_node_events) =
         apply_system_events(service, rpc, &system_events).await?;
+    let event_sync_at = Instant::now();
+    if saw_config_event {
+        sync_state.mark_protocol_config(event_sync_at);
+    }
+    if saw_config_event || saw_node_event {
+        sync_state.mark_nodes(event_sync_at);
+    }
     let mut summary = process_raw_logs(service, from_block, to_block, logs)?;
     summary.synced_protocol_config = synced_protocol_config;
     summary.synced_nodes = synced_nodes;

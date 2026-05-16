@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use crate::config::ProtocolConfig;
 use crate::indexer::{
@@ -16,6 +17,13 @@ pub struct BscRpcClient {
     client: reqwest::Client,
     rpc_url: String,
     token_address: Address,
+    address_cache: Arc<Mutex<RpcAddressCache>>,
+}
+
+#[derive(Debug, Default)]
+struct RpcAddressCache {
+    vault: Option<Address>,
+    pair: Option<Address>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +75,7 @@ impl BscRpcClient {
             client,
             rpc_url: rpc_url.into(),
             token_address,
+            address_cache: Arc::new(Mutex::new(RpcAddressCache::default())),
         })
     }
 
@@ -80,15 +89,39 @@ impl BscRpcClient {
     }
 
     pub async fn vault(&self) -> Result<Address, RpcError> {
+        if let Some(vault) = self.cached_vault() {
+            return Ok(vault);
+        }
         let data = function_selector("vault()");
         let output = self.eth_call(&data).await?;
-        parse_address_word(&output)
+        let vault = parse_address_word(&output)?;
+        if let Ok(mut cache) = self.address_cache.lock() {
+            cache.vault = Some(vault);
+        }
+        Ok(vault)
     }
 
     pub async fn pair(&self) -> Result<Address, RpcError> {
+        if let Some(pair) = self.cached_pair() {
+            return Ok(pair);
+        }
         let data = function_selector("pair()");
         let output = self.eth_call(&data).await?;
-        parse_address_word(&output)
+        let pair = parse_address_word(&output)?;
+        if pair != Address::zero() {
+            if let Ok(mut cache) = self.address_cache.lock() {
+                cache.pair = Some(pair);
+            }
+        }
+        Ok(pair)
+    }
+
+    fn cached_vault(&self) -> Option<Address> {
+        self.address_cache.lock().ok().and_then(|cache| cache.vault)
+    }
+
+    fn cached_pair(&self) -> Option<Address> {
+        self.address_cache.lock().ok().and_then(|cache| cache.pair)
     }
 
     pub async fn protocol_config(&self) -> Result<ChainProtocolConfig, RpcError> {
