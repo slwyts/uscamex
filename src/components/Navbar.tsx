@@ -11,10 +11,11 @@ export default function Navbar() {
   const { locale, setLocale, t } = useLocale();
 
   const navLinks = [
-    { label: t("nav.nodeSale"), href: "#node-sale" },
-    { label: t("nav.predictions"), href: "#predictions" },
-    { label: t("nav.fanTokens"), href: "#fan-tokens" },
-    { label: t("nav.ecosystem"), href: "#ecosystem" },
+    { label: t("nav.nodeSale"), href: "/#node-sale" },
+    { label: t("nav.predictions"), href: "/#predictions" },
+    { label: t("nav.fanTokens"), href: "/#fan-tokens" },
+    { label: t("nav.ecosystem"), href: "/#ecosystem" },
+    { label: t("nav.resources"), href: "/resources" },
     { label: t("nav.whitepaper"), href: "/whitepaper.pdf", external: true as const },
   ];
 
@@ -35,16 +36,25 @@ export default function Navbar() {
         {/* Desktop nav */}
         <div className="hidden lg:flex items-center gap-1">
           {navLinks.map((link) => (
-            <a
-              key={link.href}
-              href={link.href}
-              {...(("external" in link && link.external)
-                ? { target: "_blank", rel: "noopener" }
-                : {})}
-              className="px-4 py-2 text-[15px] text-white/65 hover:text-[#f5c842] transition-colors duration-200"
-            >
-              {link.label}
-            </a>
+            ("external" in link && link.external) ? (
+              <a
+                key={link.href}
+                href={link.href}
+                target="_blank"
+                rel="noopener"
+                className="px-4 py-2 text-[15px] text-white/65 hover:text-[#f5c842] transition-colors duration-200"
+              >
+                {link.label}
+              </a>
+            ) : (
+              <Link
+                key={link.href}
+                href={link.href}
+                className="px-4 py-2 text-[15px] text-white/65 hover:text-[#f5c842] transition-colors duration-200"
+              >
+                {link.label}
+              </Link>
+            )
           ))}
         </div>
 
@@ -57,12 +67,12 @@ export default function Navbar() {
             {locale === "zh" ? "EN" : "中"}
           </button>
 
-          <a
-            href="#node-sale"
+          <Link
+            href="/#node-sale"
             className="flex items-center px-5 py-2.5 rounded-full border border-[#f5c842]/30 bg-[#f5c842] text-[#0a0a0f] text-[15px] font-bold hover:bg-[#f5c842]/90 transition-colors duration-200 shadow-[0_0_20px_rgba(245,200,66,0.2)]"
           >
             {t("nav.buy")}
-          </a>
+          </Link>
         </div>
 
         {/* Mobile hamburger */}
@@ -94,17 +104,27 @@ export default function Navbar() {
             className="lg:hidden mt-2 rounded-2xl border border-[#f5c842]/20 bg-[#0a0a0f]/95 backdrop-blur-xl p-4 flex flex-col gap-1"
           >
             {navLinks.map((link) => (
-              <a
-                key={link.href}
-                href={link.href}
-                {...(("external" in link && link.external)
-                  ? { target: "_blank", rel: "noopener" }
-                  : {})}
-                className="px-4 py-3 text-[15px] text-white/65 hover:text-[#f5c842] hover:bg-white/5 rounded-xl transition-colors"
-                onClick={() => setMobileOpen(false)}
-              >
-                {link.label}
-              </a>
+              ("external" in link && link.external) ? (
+                <a
+                  key={link.href}
+                  href={link.href}
+                  target="_blank"
+                  rel="noopener"
+                  className="px-4 py-3 text-[15px] text-white/65 hover:text-[#f5c842] hover:bg-white/5 rounded-xl transition-colors"
+                  onClick={() => setMobileOpen(false)}
+                >
+                  {link.label}
+                </a>
+              ) : (
+                <Link
+                  key={link.href}
+                  href={link.href}
+                  className="px-4 py-3 text-[15px] text-white/65 hover:text-[#f5c842] hover:bg-white/5 rounded-xl transition-colors"
+                  onClick={() => setMobileOpen(false)}
+                >
+                  {link.label}
+                </Link>
+              )
             ))}
             <div className="flex items-center gap-2 mt-2">
               <button
@@ -113,13 +133,13 @@ export default function Navbar() {
               >
                 {locale === "zh" ? "English" : "中文"}
               </button>
-              <a
-                href="#node-sale"
+              <Link
+                href="/#node-sale"
                 onClick={() => setMobileOpen(false)}
                 className="flex-1 px-5 py-3 rounded-full bg-[#f5c842] text-[#0a0a0f] text-[15px] font-bold text-center"
               >
                 {t("nav.buy")}
-              </a>
+              </Link>
             </div>
           </motion.div>
         )}

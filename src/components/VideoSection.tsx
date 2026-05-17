@@ -2,10 +2,8 @@
 
 import { useEffect, useRef } from "react";
 import Hls from "hls.js";
-import { useLocale } from "@/i18n/context";
 
 export default function VideoSection() {
-  const { t } = useLocale();
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {

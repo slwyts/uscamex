@@ -315,17 +315,6 @@ function Dot() {
   );
 }
 
-function Fact({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl bg-white/[0.02] border border-white/[0.05] px-3 py-2.5">
-      <p className="text-[11px] uppercase tracking-wider text-white/35">
-        {label}
-      </p>
-      <p className="mt-0.5 text-[13px] font-semibold text-white/85">{value}</p>
-    </div>
-  );
-}
-
 function PdfIcon() {
   return (
     <svg

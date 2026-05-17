@@ -4,6 +4,7 @@ const locales = {
     "nav.predictions": "预测市场",
     "nav.fanTokens": "粉丝代币",
     "nav.ecosystem": "生态系统",
+    "nav.resources": "资料库",
     "nav.nodeSale": "NFT认购",
     "nav.whitepaper": "白皮书",
     "nav.buy": "Buy $USCAMEX",
@@ -83,6 +84,26 @@ const locales = {
     "data.partner3": "BNB Chain 生态",
     "data.partner3Sub": "低手续费、高速度、透明安全",
 
+    // Resources
+    "resources.badge": "资料库",
+    "resources.title": "项目资料、白皮书与视频讲解",
+    "resources.desc":
+      "集中展示美加墨项目介绍、官方白皮书和视频讲解资料，用户可直接在线查看或下载保存。",
+    "resources.video.label": "视频讲解",
+    "resources.video.title": "USCAMEX 项目讲解视频",
+    "resources.video.open": "打开视频",
+    "resources.card.intro.type": "项目介绍",
+    "resources.card.intro.title": "美加墨 USCAMEX 项目介绍",
+    "resources.card.intro.desc": "适合对外展示和快速了解平台定位、生态规划与核心机制。",
+    "resources.card.video.type": "视频资料",
+    "resources.card.video.title": "项目数据讲解视频",
+    "resources.card.video.desc": "通过视频方式了解项目背景、市场逻辑与资料讲解内容。",
+    "resources.card.whitepaper.type": "白皮书",
+    "resources.card.whitepaper.title": "USCAMEX 官方白皮书",
+    "resources.card.whitepaper.desc": "查看项目机制、链上生态、代币与预测经济模型的完整说明。",
+    "resources.card.openPdf": "查看 PDF",
+    "resources.card.openVideo": "查看视频",
+
     // Token Section
     "token.title1": "$USCAMEX —— 预测经济",
     "token.title2": "的核心燃料",
@@ -116,6 +137,7 @@ const locales = {
     "nav.predictions": "Predictions",
     "nav.fanTokens": "Fan Tokens",
     "nav.ecosystem": "Ecosystem",
+    "nav.resources": "Resources",
     "nav.nodeSale": "NFT Sale",
     "nav.whitepaper": "Whitepaper",
     "nav.buy": "Buy $USCAMEX",
@@ -194,6 +216,26 @@ const locales = {
     "data.partner2Sub": "Official Licensed Partner",
     "data.partner3": "BNB Chain Ecosystem",
     "data.partner3Sub": "Low fees, high speed, transparent & secure",
+
+    // Resources
+    "resources.badge": "Resources",
+    "resources.title": "Project Materials, Whitepaper & Video Briefing",
+    "resources.desc":
+      "Explore USCAMEX project materials, the official whitepaper, and video briefing content in one place for online viewing or download.",
+    "resources.video.label": "Video Briefing",
+    "resources.video.title": "USCAMEX Project Briefing Video",
+    "resources.video.open": "Open Video",
+    "resources.card.intro.type": "Project Intro",
+    "resources.card.intro.title": "USCAMEX Project Introduction",
+    "resources.card.intro.desc": "A presentation-ready overview of platform positioning, ecosystem planning, and core mechanics.",
+    "resources.card.video.type": "Video Material",
+    "resources.card.video.title": "Project Data Briefing Video",
+    "resources.card.video.desc": "Learn the project background, market logic, and supporting material through the briefing video.",
+    "resources.card.whitepaper.type": "Whitepaper",
+    "resources.card.whitepaper.title": "USCAMEX Official Whitepaper",
+    "resources.card.whitepaper.desc": "Review the full project mechanics, on-chain ecosystem, token model, and prediction economy design.",
+    "resources.card.openPdf": "View PDF",
+    "resources.card.openVideo": "View Video",
 
     // Token Section
     "token.title1": "$USCAMEX — The Core Fuel",

@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import Link from "next/link";
 import Logo from "./Logo";
 import { FadeUp, ScaleIn } from "./Animations";
 import { XIcon, DiscordIcon } from "./SocialIcons";
@@ -65,12 +66,12 @@ export default function FooterSection() {
                   {t("footer.desc")}
                 </p>
 
-                <a
-                  href="#node-sale"
+                <Link
+                  href="/#node-sale"
                   className="mt-8 inline-flex items-center gap-2 px-6 py-3 rounded-full bg-[#f5c842] text-[#0a0a0f] text-[14px] font-bold hover:bg-[#f5c842]/90 transition-colors shadow-[0_0_24px_rgba(245,200,66,0.25)]"
                 >
                   {t("footer.cta")}
-                </a>
+                </Link>
               </FadeUp>
 
               {/* Footer */}

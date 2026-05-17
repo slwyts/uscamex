@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Static HLS segments are binary media files with a .ts extension.
+    "public/videos/**/*.ts",
+    // The Token workspace has its own toolchain and generated/vendor outputs.
+    "Token/**",
   ]),
 ]);
 
