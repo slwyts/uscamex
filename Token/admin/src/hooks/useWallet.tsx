@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { App } from "antd";
-import { getInjectedProvider, signOwnerMessage } from "../utils/chain";
+import { ensureWalletChain, getInjectedProvider, signOwnerMessage } from "../utils/chain";
 import { setAdminAuth, clearAdminAuth, hasAdminAuth, fetchOwner } from "../utils/api";
 
 interface WalletState {
@@ -58,6 +58,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       const provider = getInjectedProvider();
       const accounts = await provider.send("eth_requestAccounts", []);
       if (!accounts.length) throw new Error("钱包未返回账户");
+      await ensureWalletChain();
       const account = (accounts[0] as string).toLowerCase();
       setState((prev) => ({ ...prev, account, connecting: false }));
       return account;
