@@ -153,8 +153,8 @@ export default function WithdrawAssets() {
       },
       {
         key: "vault" as SourceKey,
-        title: "Vault 合约",
-        badge: "回购销毁金库",
+        title: "回购销毁资金池",
+        badge: "链上子合约",
         address: snap?.vault || "",
       },
     ],
@@ -180,7 +180,7 @@ export default function WithdrawAssets() {
       return;
     }
     if (source === "vault" && snap.vault === ZERO) {
-      message.error("尚未读取到 Vault 地址");
+      message.error("尚未读取到回购销毁资金池地址");
       return;
     }
     if (asset === "lpToken" && snap.pair === ZERO) {
@@ -208,7 +208,7 @@ export default function WithdrawAssets() {
       title: "确认提取资产？",
       content: (
         <div style={{ wordBreak: "break-all" }}>
-          <div>来源：{source === "token" ? "Token 合约" : "Vault 合约"}</div>
+          <div>来源：{source === "token" ? "Token 合约" : "回购销毁资金池"}</div>
           <div>资产：{selectedAsset.title}</div>
           <div>数量：{formatBnb(wei, selectedAsset.precision)} {selectedAsset.unit}</div>
           <div>接收钱包：{receiver}</div>
@@ -265,7 +265,7 @@ export default function WithdrawAssets() {
           </Col>
           <Col xs={24} md={8}>
             <Statistic
-              title="Vault 合约"
+              title="回购销毁资金池"
               valueRender={() => <AddressTag value={snap?.vault} full />}
             />
           </Col>
@@ -348,7 +348,7 @@ export default function WithdrawAssets() {
             <div className="withdraw-inline-value">
               <AddressTag value={sourceAddress} full />
               <Tag color={source === "token" ? "gold" : "blue"} className="tag-mini">
-                {source === "token" ? "Token" : "Vault"}
+                {source === "token" ? "Token" : "回购销毁资金池"}
               </Tag>
             </div>
           </Col>
@@ -432,7 +432,7 @@ function buildWithdrawCalldata(
     return tokenIface.encodeFunctionData("operatorCall", [assetAddress, 0n, transferData]);
   }
 
-  if (!snap.vault || snap.vault === ZERO) throw new Error("尚未读取到 Vault 地址");
+  if (!snap.vault || snap.vault === ZERO) throw new Error("尚未读取到回购销毁资金池地址");
   if (asset === "bnb") {
     const vaultData = vaultIface.encodeFunctionData("execute", [receiver, amount, "0x"]);
     return tokenIface.encodeFunctionData("operatorCall", [snap.vault, 0n, vaultData]);

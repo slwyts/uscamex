@@ -4,7 +4,6 @@ import { Routes, Route, Link, useLocation, Navigate } from "react-router-dom";
 import {
   DashboardOutlined,
   BranchesOutlined,
-  UserOutlined,
   TeamOutlined,
   NodeIndexOutlined,
   HistoryOutlined,
@@ -21,7 +20,6 @@ import { useWallet } from "./hooks/useWallet";
 import { hasAdminAuth } from "./utils/api";
 import QueryOverview from "./pages/QueryOverview";
 import QueryTeam from "./pages/QueryTeam";
-import QueryUser from "./pages/QueryUser";
 import QueryUsers from "./pages/QueryUsers";
 import QueryNodes from "./pages/QueryNodes";
 import QueryPositions from "./pages/QueryPositions";
@@ -39,7 +37,6 @@ const { Sider, Content, Header } = Layout;
 const QUERY_ITEMS = [
   { key: "/query/overview", icon: <DashboardOutlined />, label: <Link to="/query/overview">运营总览</Link> },
   { key: "/query/team", icon: <BranchesOutlined />, label: <Link to="/query/team">推荐团队</Link> },
-  { key: "/query/user", icon: <UserOutlined />, label: <Link to="/query/user">用户档案</Link> },
   { key: "/query/users", icon: <TeamOutlined />, label: <Link to="/query/users">用户列表</Link> },
   { key: "/query/nodes", icon: <NodeIndexOutlined />, label: <Link to="/query/nodes">节点收益</Link> },
   { key: "/query/positions", icon: <GoldOutlined />, label: <Link to="/query/positions">持仓明细</Link> },
@@ -154,7 +151,7 @@ export default function App() {
             <Route path="/query" element={<Navigate to="/query/overview" replace />} />
             <Route path="/query/overview" element={<QueryOverview />} />
             <Route path="/query/team" element={<QueryTeam />} />
-            <Route path="/query/user" element={<QueryUser />} />
+            <Route path="/query/user" element={<Navigate to="/query/users" replace />} />
             <Route path="/query/users" element={<QueryUsers />} />
             <Route path="/query/nodes" element={<QueryNodes />} />
             <Route path="/query/positions" element={<QueryPositions />} />

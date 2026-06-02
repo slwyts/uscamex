@@ -172,7 +172,7 @@ export default function ConfigLp() {
                   <AddressTag value={snap.pair} full />
                 )}
               </Descriptions.Item>
-              <Descriptions.Item label="金库合约">
+              <Descriptions.Item label="回购销毁资金池地址">
                 <AddressTag value={snap.vault} full />
               </Descriptions.Item>
             </Descriptions>

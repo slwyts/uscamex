@@ -200,7 +200,7 @@ function StatsCard() {
           <Metric
             title="今日通缩已使用比例"
             value={`${bpsToPercentText(data.deflation_used_bps)}%`}
-            tip="今日已从 LP 池抽走的代币占「每日上限」的比例。达到 100% 后当日不再自动抽取，过零点后重置。"
+            tip="今日已累计从 LP 池抽走的代币比例。达到「每日通缩上限」后当日不再自动抽取，过零点后重置。"
           />
         </Row>
       </Card>
@@ -229,9 +229,9 @@ function StatsCard() {
             tip="直推奖与 10 代团队奖累计发放金额（BNB 计价）。与静态产出一起计入「退场倍数」。"
           />
           <Metric
-            title="回购金库余额 (BNB)"
+            title="回购销毁资金池余额 (BNB)"
             value={formatBnb(data.vault_bnb, 4)}
-            tip="BuybackVault 子合约余额。资金来自买入税、卖出税以及入金分配，按设置每分钟从市场买回代币并送黑洞。"
+            tip="回购销毁资金池是 Token 合约创建的链上子合约，持有用于回购的 BNB。资金来自买入税、卖出税以及入金分配，按设置每分钟从市场买回代币并送黑洞。"
           />
           <Metric
             title="管理员地址 BNB"
@@ -256,7 +256,7 @@ function StatsCard() {
           <Metric
             title="销毁价值 (BNB)"
             value={formatBnb(data.tax_burned_token_value_bnb, 4)}
-            tip="上面销毁代币按当前 LP 价格折算为 BNB 的价值，可用于估算销毁付压力。"
+            tip="上面销毁代币按当前 LP 价格折算为 BNB 的价值，可用于估算累计销毁规模。"
           />
           <Metric
             title="LP 池代币储备"
@@ -328,7 +328,7 @@ function StatsCard() {
               推荐根：<AddressTag value={data.root} />
             </Tag>
             <Tag icon={<FireOutlined />} color="orange">
-              今日通缩已用 {bpsToPercentText(data.deflation_used_bps)}%
+              今日已通缩 {bpsToPercentText(data.deflation_used_bps)}%
             </Tag>
             <Tag icon={<SettingOutlined />} color={data.protocol_config_initialized ? "green" : "red"}>
               协议参数 {data.protocol_config_initialized ? "已初始化" : "尚未初始化"}

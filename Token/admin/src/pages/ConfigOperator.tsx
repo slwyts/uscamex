@@ -20,6 +20,7 @@ import { useWallet } from "../hooks/useWallet";
 import { ethCall, sendTokenTransaction } from "../utils/chain";
 import { isTokenConfigured, loadSettings } from "../utils/settings";
 import { formatBnb } from "../utils/bnb";
+import { percentNumberToBps } from "../utils/bps";
 import AddressTag from "../components/AddressTag";
 
 const ABI = [
@@ -152,8 +153,9 @@ function PullPairCard({
 }) {
   const { message, modal } = App.useApp();
   const wallet = useWallet();
-  const [bps, setBps] = useState<number | null>(50);
+  const [percent, setPercent] = useState<number | null>(0.5);
   const [submitting, setSubmitting] = useState(false);
+  const bps = percentNumberToBps(percent);
 
   const preview =
     bps && bps > 0 && pairBalance > 0n
@@ -162,11 +164,11 @@ function PullPairCard({
 
   const submit = () => {
     if (!bps || bps <= 0 || bps > 10_000) {
-      message.error("请输入 1–10000 之间的 bps");
+      message.error("请输入 0.01%–100% 之间的抽取比例");
       return;
     }
     modal.confirm({
-      title: `从 LP 池中抽取 ${(bps / 100).toFixed(2)}% 的 USCAME`,
+      title: `从 LP 池中抽取 ${formatPercent(percent ?? 0)}% 的 USCAME`,
       content: `预计抽取 ${preview} USCAME 返回合约（LP 池中代币减少、BNB 不变，市场价格将随之上涨）。请根据市场状况选择合适的比例。`,
       okText: "签名并上链",
       onOk: async () => {
@@ -193,7 +195,7 @@ function PullPairCard({
     <Card
       title={
         <Space>
-          <SwapOutlined /> 从 LP 池抽取代币到合约自身
+          <SwapOutlined /> LP 底池单边通缩
         </Space>
       }
     >
@@ -202,17 +204,19 @@ function PullPairCard({
         showIcon
         style={{ marginBottom: 16 }}
         message="执行后会推高代币价格（通缩逻辑）"
-        description="该操作按输入的比例（bps）从 LP 池中抽走 USCAME 并返回合约本身。池中代币减少、BNB 保持不变，根据恒积公式 x·y=k，单位代币价格将上涨；收回的代币留存在合约作为「LP 建设者分红池」。每小时自动执行一次的底池通缩使用的也是同一逻辑。"
+        description="该操作按输入的百分比从 LP 池中抽走 USCAME 并返回合约本身。池中代币减少、BNB 保持不变，根据恒积公式 x·y=k，单位代币价格将上涨；收回的代币留存在合约作为「LP 建设者分红池」。每小时自动执行一次的底池通缩使用的也是同一逻辑。"
       />
       <Space size="large" align="end">
         <Form layout="vertical">
-          <Form.Item label="抽取比例（bps，1 = 0.01%）">
+          <Form.Item label="抽取比例">
             <InputNumber
-              min={1}
-              max={10_000}
-              step={10}
-              value={bps}
-              onChange={(value) => setBps(typeof value === "number" ? value : null)}
+              min={0.01}
+              max={100}
+              precision={2}
+              step={0.01}
+              addonAfter="%"
+              value={percent}
+              onChange={(value) => setPercent(typeof value === "number" ? value : null)}
               style={{ width: 180 }}
             />
           </Form.Item>
@@ -229,6 +233,10 @@ function PullPairCard({
       </Space>
     </Card>
   );
+}
+
+function formatPercent(value: number): string {
+  return value.toFixed(2).replace(/\.?0+$/, "");
 }
 
 function OperatorCallCard() {

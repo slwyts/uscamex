@@ -6,6 +6,18 @@ export function bpsToPercentText(bps: number | bigint): string {
   return frac ? `${whole}.${frac}` : whole.toString();
 }
 
+export function bpsToPercentNumber(bps: number | bigint | null | undefined): number | null {
+  if (bps === null || bps === undefined) return null;
+  return Number(bps) / 100;
+}
+
+export function percentNumberToBps(percent: number | string | null | undefined): number | undefined {
+  if (percent === null || percent === undefined || percent === "") return undefined;
+  const value = typeof percent === "number" ? percent : Number(percent);
+  if (!Number.isFinite(value)) return undefined;
+  return Math.round(value * 100);
+}
+
 export function percentTextToBps(text: string): number {
   const value = text.trim();
   if (!/^\d+(\.\d{1,2})?$/.test(value)) {

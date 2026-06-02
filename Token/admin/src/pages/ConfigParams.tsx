@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import {
   Card,
   Form,
@@ -22,6 +22,7 @@ import { useWallet } from "../hooks/useWallet";
 import { ethCall, sendTokenTransaction } from "../utils/chain";
 import { loadSettings, isTokenConfigured } from "../utils/settings";
 import { formatBnb, parseBnb } from "../utils/bnb";
+import { bpsToPercentNumber, bpsToPercentText, percentNumberToBps } from "../utils/bps";
 
 const ABI = [
   "function getProtocolConfig() view returns (tuple(address operator,uint16 buyTaxBps,uint16 sellTaxBps,uint128 minDeposit,uint128 maxDeposit,bool buyEnabled,uint16 lpBuildBps,uint16 nodeBps,uint16 builderBuyBps,uint16 vaultBps,uint16 directPoolBps,uint16 directRewardBps,uint16 dailyStaticBps,uint8 settlementPeriodsPerDay,uint32 exitMultipleBps,uint16[10] teamRewardBps,bool deflationEnabled,uint16 deflationHourlyBps,uint16 deflationDailyCapBps,bool buybackEnabled,uint128 buybackPerMinute,uint16 buyTaxBuilderBps,uint16 buyTaxVaultBps,uint16 sellTaxBuilderBps,uint16 sellTaxOwnerBps,uint16 sellTaxVaultBps))",
@@ -203,7 +204,7 @@ export default function ConfigParams() {
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="物财业务参数按「基点 (bps)」填写：1% = 100 bps，例如10% = 1000；BNB 金额可填入小数。修改后需点击「提交上链」并由管理员钱包签名才会生效。"
+        message="比例按正常百分比填写：3 表示 3%，0.1 表示 0.1%。提交上链时会自动换算成链上基点值；BNB 金额可填入小数。"
       />
       <Form<FormShape>
         form={form}
@@ -217,7 +218,7 @@ export default function ConfigParams() {
         <Row gutter={16}>
           <Col xs={24} md={12}>
             <Form.Item
-              label="运营托管账户（operator，可调用高级接口）"
+              label="运营执行账户（operator）"
               name="operator"
               rules={[{ required: true, pattern: /^0x[0-9a-fA-F]{40}$/, message: "地址格式不正确" }]}
             >
@@ -230,7 +231,7 @@ export default function ConfigParams() {
             </Form.Item>
           </Col>
           <Col xs={12} md={6}>
-            <Form.Item label="启用按小时通缩" name="deflationEnabled" valuePropName="checked">
+            <Form.Item label="启用底池通缩" name="deflationEnabled" valuePropName="checked">
               <Switch />
             </Form.Item>
           </Col>
@@ -250,38 +251,38 @@ export default function ConfigParams() {
           </Col>
         </Row>
 
-        <Divider orientation="left">买卖总税率（bps）</Divider>
+        <Divider orientation="left">买卖总税率</Divider>
         <Row gutter={16}>
-          <Col xs={12} md={6}><BpsField label="买入总税率" name="buyTaxBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="卖出总税率" name="sellTaxBps" /></Col>
+          <Col xs={12} md={6}><PercentField label="买入总税率" name="buyTaxBps" /></Col>
+          <Col xs={12} md={6}><PercentField label="卖出总税率" name="sellTaxBps" /></Col>
         </Row>
 
-        <Divider orientation="left">买入税收分配（bps）</Divider>
+        <Divider orientation="left">买入税收分配</Divider>
         <Row gutter={16}>
-          <Col xs={12} md={6}><BpsField label="划入 Builder 购买池" name="buyTaxBuilderBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="划入金库" name="buyTaxVaultBps" /></Col>
+          <Col xs={12} md={6}><PercentField label="LP 建设者分红池" name="buyTaxBuilderBps" /></Col>
+          <Col xs={12} md={6}><PercentField label="回购销毁资金池" name="buyTaxVaultBps" /></Col>
         </Row>
 
-        <Divider orientation="left">卖出税收分配（bps）</Divider>
+        <Divider orientation="left">卖出税收分配</Divider>
         <Row gutter={16}>
-          <Col xs={12} md={6}><BpsField label="划入 Builder" name="sellTaxBuilderBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="划入管理员" name="sellTaxOwnerBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="划入金库" name="sellTaxVaultBps" /></Col>
+          <Col xs={12} md={6}><PercentField label="LP 建设者分红池" name="sellTaxBuilderBps" /></Col>
+          <Col xs={12} md={6}><PercentField label="生态建设基金" name="sellTaxOwnerBps" /></Col>
+          <Col xs={12} md={6}><PercentField label="回购销毁资金池" name="sellTaxVaultBps" /></Col>
         </Row>
 
-        <Divider orientation="left">入金资金分配（bps）</Divider>
+        <Divider orientation="left">入金资金分配</Divider>
         <Row gutter={16}>
-          <Col xs={12} md={6}><BpsField label="LP 建仓" name="lpBuildBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="节点奖励池" name="nodeBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="Builder 购买" name="builderBuyBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="金库" name="vaultBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="直推奖池" name="directPoolBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="直推即时奖" name="directRewardBps" /></Col>
+          <Col xs={12} md={6}><PercentField label="组建 LP" name="lpBuildBps" /></Col>
+          <Col xs={12} md={6}><PercentField label="节点分红" name="nodeBps" /></Col>
+          <Col xs={12} md={6}><PercentField label="LP 建设者分红池买入" name="builderBuyBps" /></Col>
+          <Col xs={12} md={6}><PercentField label="回购销毁资金池" name="vaultBps" /></Col>
+          <Col xs={12} md={6}><PercentField label="直推奖励池" name="directPoolBps" /></Col>
+          <Col xs={12} md={6}><PercentField label="直接发给推荐人" name="directRewardBps" /></Col>
         </Row>
 
-        <Divider orientation="left">静态产出与退场</Divider>
+        <Divider orientation="left">静态收益与出局</Divider>
         <Row gutter={16}>
-          <Col xs={12} md={6}><BpsField label="每日静态产出（bps）" name="dailyStaticBps" /></Col>
+          <Col xs={12} md={6}><PercentField label="每日静态收益率" name="dailyStaticBps" /></Col>
           <Col xs={12} md={6}>
             <Form.Item
               label={<Tooltip title="一天内进行几次静态结算，例如24 表示每小时一次">每日结算次数</Tooltip>}
@@ -292,37 +293,32 @@ export default function ConfigParams() {
             </Form.Item>
           </Col>
           <Col xs={12} md={6}>
-            <Form.Item
-              label={<Tooltip title="退场以本金为基础乘以一个倍数。以 bps 表示，例如30000 = 3 倍本金。">退场倍数（bps）</Tooltip>}
+            <PercentField
+              label={<Tooltip title="以本金为基准的累计收益上限。300% 表示累计静态收益 + 动态收益达到本金 3 倍后出局。">出局收益上限</Tooltip>}
               name="exitMultipleBps"
-              rules={[{ required: true }]}
-            >
-              <InputNumber min={0} style={{ width: "100%" }} />
-            </Form.Item>
+              maxBps={1_000_000}
+            />
           </Col>
         </Row>
 
-        <Divider orientation="left">团队 10 代动态奖励（bps）</Divider>
+        <Divider orientation="left">团队 10 代动态奖励</Divider>
         <Row gutter={16}>
           {Array.from({ length: 10 }).map((_, index) => (
             <Col xs={12} md={6} lg={4} key={index}>
-              <Form.Item
+              <PercentField
                 label={`第 ${index + 1} 代`}
                 name={["teamRewardBps", index]}
-                rules={[{ required: true }]}
-              >
-                <InputNumber min={0} max={10000} style={{ width: "100%" }} />
-              </Form.Item>
+              />
             </Col>
           ))}
         </Row>
 
-        <Divider orientation="left">通缩与回购</Divider>
+        <Divider orientation="left">底池通缩与回购销毁</Divider>
         <Row gutter={16}>
-          <Col xs={12} md={6}><BpsField label="每小时通缩比例（bps）" name="deflationHourlyBps" /></Col>
-          <Col xs={12} md={6}><BpsField label="每日通缩上限（bps）" name="deflationDailyCapBps" /></Col>
+          <Col xs={12} md={6}><PercentField label="每小时底池通缩" name="deflationHourlyBps" /></Col>
+          <Col xs={12} md={6}><PercentField label="每日通缩上限" name="deflationDailyCapBps" /></Col>
           <Col xs={12} md={6}>
-            <Form.Item label="启用自动回购" name="buybackEnabled" valuePropName="checked">
+            <Form.Item label="启动回购销毁程序" name="buybackEnabled" valuePropName="checked">
               <Switch />
             </Form.Item>
           </Col>
@@ -352,10 +348,44 @@ export default function ConfigParams() {
   );
 }
 
-function BpsField({ label, name }: { label: string; name: string }) {
+function PercentField({
+  label,
+  name,
+  maxBps = 10_000,
+}: {
+  label: ReactNode;
+  name: string | (string | number)[];
+  maxBps?: number;
+}) {
+  const maxPercent = bpsToPercentNumber(maxBps) ?? undefined;
   return (
-    <Form.Item label={label} name={name} rules={[{ required: true }]}>
-      <InputNumber min={0} max={10000} style={{ width: "100%" }} />
+    <Form.Item
+      label={label}
+      name={name}
+      rules={[
+        { required: true, message: "请输入百分比" },
+        {
+          validator: async (_, value) => {
+            if (typeof value !== "number" || !Number.isFinite(value)) {
+              throw new Error("请输入有效百分比");
+            }
+            if (value < 0 || value > maxBps) {
+              throw new Error(`请输入 0-${bpsToPercentText(maxBps)}% 之间的数值`);
+            }
+          },
+        },
+      ]}
+      getValueProps={(value) => ({ value: bpsToPercentNumber(value) })}
+      normalize={(value) => percentNumberToBps(value)}
+    >
+      <InputNumber
+        min={0}
+        max={maxPercent}
+        precision={2}
+        step={0.01}
+        addonAfter="%"
+        style={{ width: "100%" }}
+      />
     </Form.Item>
   );
 }
