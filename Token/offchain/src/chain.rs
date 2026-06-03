@@ -170,29 +170,16 @@ impl BscTransactionClient {
         bnb_amount: u128,
         token_value_bnb: u128,
     ) -> Result<String, BscTransactionError> {
-        let reserves = self.pair_reserves()?;
-        if token_value_bnb == 0 {
+        if bnb_amount == 0 || token_value_bnb == 0 {
             return Err(BscTransactionError::InvalidAmount);
         }
-        let token_amount = quote_synced_pull_token_amount(bnb_amount, &reserves)?;
+        let (buy_hashes, token_amount) = self.submit_platform_token_buy(token_value_bnb)?;
         let bnb_min = apply_slippage(bnb_amount, self.context.slippage_bps)?;
         let router = self.context.router_address.clone();
         let token = self.context.token_address.clone();
 
-        // `pullPairTokensExact` syncs the Pair after removing tokens, so the
-        // amount to pull must be solved against the post-pull reserve. For
-        // BNB amount x and reserves T/B, pull p = x*T/(B+x); after sync the
-        // router's optimal token side for x BNB is p again.
-        let pull =
-            encode_function_calldata("pullPairTokensExact(uint256)", &[u256_word(token_amount)])?;
-        let pull_hash = self.submit_evm_call(EvmCall {
-            target: token.clone(),
-            value: 0,
-            data: format!("0x{}", hex_encode(&pull)),
-        })?;
-
-        let post_pull_reserves = self.pair_reserves()?;
-        let router_token_amount = quote_token_amount(bnb_amount, &post_pull_reserves)?;
+        let post_buy_reserves = self.pair_reserves()?;
+        let router_token_amount = quote_token_amount(bnb_amount, &post_buy_reserves)?;
         let token_min = apply_slippage(
             router_token_amount.min(token_amount),
             self.context.slippage_bps,
@@ -218,10 +205,21 @@ impl BscTransactionClient {
             ],
         )?;
         let liquidity_hash = self.submit_operator_call(&router, bnb_amount, &add_liquidity)?;
-        Ok(format!("{pull_hash},{approve_hash},{liquidity_hash}"))
+        Ok(format!("{buy_hashes},{approve_hash},{liquidity_hash}"))
     }
 
     fn submit_builder_buy(&mut self, bnb_amount: u128) -> Result<String, BscTransactionError> {
+        let (hashes, _) = self.submit_platform_token_buy(bnb_amount)?;
+        Ok(hashes)
+    }
+
+    fn submit_platform_token_buy(
+        &mut self,
+        bnb_amount: u128,
+    ) -> Result<(String, u128), BscTransactionError> {
+        if bnb_amount == 0 {
+            return Err(BscTransactionError::InvalidAmount);
+        }
         let reserves = self.pair_reserves()?;
         let token_out = v2_amount_out(bnb_amount, reserves.bnb_reserve, reserves.token_reserve)?;
         let amount_out_min = apply_slippage(token_out, self.context.slippage_bps)?;
@@ -261,7 +259,7 @@ impl BscTransactionClient {
             value: 0,
             data: format!("0x{}", hex_encode(&transfer)),
         })?;
-        Ok(format!("{swap_hash},{transfer_hash}"))
+        Ok((format!("{swap_hash},{transfer_hash}"), received))
     }
 
     fn submit_buyback(&mut self, bnb_amount: u128) -> Result<String, BscTransactionError> {
@@ -1074,18 +1072,6 @@ fn quote_token_amount(
     )
 }
 
-fn quote_synced_pull_token_amount(
-    bnb_value: u128,
-    reserves: &PairReserves,
-) -> Result<u128, BscTransactionError> {
-    if bnb_value == 0 || reserves.bnb_reserve == 0 || reserves.token_reserve == 0 {
-        return Err(BscTransactionError::InvalidAmount);
-    }
-    let numerator = U256::from(bnb_value) * U256::from(reserves.token_reserve);
-    let denominator = U256::from(reserves.bnb_reserve) + U256::from(bnb_value);
-    u256_to_u128((numerator + denominator - U256::from(1u8)) / denominator)
-}
-
 fn v2_amount_out(
     amount_in: u128,
     reserve_in: u128,
@@ -1285,10 +1271,6 @@ mod tests {
             bnb_reserve: 100,
         };
         assert_eq!(quote_token_amount(1, &reserves).unwrap(), 10_000);
-        assert_eq!(
-            quote_synced_pull_token_amount(10, &reserves).unwrap(),
-            90_910
-        );
         assert_eq!(apply_slippage(10_000, 500).unwrap(), 9_500);
         assert_eq!(v2_amount_out(1, 100, 1_000_000).unwrap(), 9_876);
     }

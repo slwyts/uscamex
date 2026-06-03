@@ -172,7 +172,12 @@ impl Engine {
         }
         let direct_remainder = direct_pool.saturating_sub(direct_bnb);
 
-        state.pair.bnb_reserve = state.pair.bnb_reserve.saturating_add(lp_bnb);
+        state.pair.bnb_reserve = state
+            .pair
+            .bnb_reserve
+            .saturating_add(lp_bnb)
+            .saturating_add(lp_token_value_bnb)
+            .saturating_add(builder_bnb);
         state.balances.builder_token_value_bnb = state
             .balances
             .builder_token_value_bnb
@@ -645,6 +650,8 @@ mod tests {
         assert_eq!(allocation.direct_bnb, BNB / 10);
         assert_eq!(state.balances.node_paid_bnb["node-a"], BNB / 20);
         assert_eq!(state.balances.direct_paid_bnb["root"], BNB / 10);
+        assert_eq!(state.pair.bnb_reserve, 7 * BNB / 10);
+        assert_eq!(state.user("alice").unwrap().lp_bnb_principal, 3 * BNB / 10);
     }
 
     #[test]
