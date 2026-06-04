@@ -6,8 +6,12 @@ import zhCN from "antd/locale/zh_CN";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import { WalletProvider } from "./hooks/useWallet";
+import { initBypassFromUrl } from "./utils/bypass";
 import "antd/dist/reset.css";
 import "./theme.css";
+
+// Resolve ?force from the launch URL before anything renders.
+initBypassFromUrl();
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -33,7 +37,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <AntApp>
         <QueryClientProvider client={queryClient}>
           <WalletProvider>
-            <BrowserRouter basename="/admin">
+            <BrowserRouter>
               <App />
             </BrowserRouter>
           </WalletProvider>

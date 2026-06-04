@@ -55,6 +55,37 @@ a {
   font-weight: 700;
 }
 
+.metric-card {
+  height: 100%;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+}
+
+.metric-card .ant-statistic-content-value {
+  overflow-wrap: anywhere;
+}
+
+.metric-good .ant-statistic-content {
+  color: #73d13d;
+}
+
+.metric-warn .ant-statistic-content {
+  color: #ff7875;
+}
+
+.overview-identity {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 24px;
+  align-items: center;
+}
+
+.overview-identity .label {
+  color: rgba(255, 255, 255, 0.55);
+  margin-right: 6px;
+}
+
 .section-card .ant-card-head-title {
   font-weight: 600;
 }

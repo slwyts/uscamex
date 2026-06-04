@@ -20,6 +20,73 @@ const STATUS_COLOR: Record<string, string> = {
   failed: "red",
 };
 
+// 业务类型（journal kind）中文映射。命名沿用 origin.md 规格术语。
+const KIND_LABEL: Record<string, { text: string; tip: string }> = {
+  "add-liquidity": {
+    text: "组建 LP",
+    tip: "入金 60% 用于组建流动性：先用一半 BNB 买入项目代币，再与剩余 BNB 一同注入 LP 底池。",
+  },
+  node: {
+    text: "节点分红",
+    tip: "入金 10% 按权重平均分配给所有节点地址（BNB）。",
+  },
+  "direct-referral": {
+    text: "直推奖励",
+    tip: "入金 10% 直接发放给直接推荐人（BNB 实时到账）。",
+  },
+  "builder-buy": {
+    text: "联合建设者分红池买入",
+    tip: "入金 10% 用于从 LP 底池买入项目代币，所得代币留存于合约自身（联合建设者分红池）。",
+  },
+  "credit-vault": {
+    text: "回购销毁仓库注资",
+    tip: "入金 10% 的 BNB 直接转入回购销毁仓库子合约，作为后续回购资金。",
+  },
+  "pull-pair-tokens": {
+    text: "LP 底池通缩",
+    tip: "每小时从 LP 底池单边抽取项目代币（默认 0.1%/次，每日上限 2%），转入联合建设者分红池，推动价格上行。",
+  },
+  buyback: {
+    text: "回购销毁",
+    tip: "回购销毁仓库每分钟用其持有的 BNB 从 DEX 买入项目代币并销毁至黑洞。",
+  },
+  "pay-reward-token": {
+    text: "收益发放",
+    tip: "向用户发放静态收益与团队代数奖励（按当时代币价格折算等值代币，每 6 小时一次）。",
+  },
+  "redeem-user-lp": {
+    text: "撤出 LP 退款",
+    tip: "用户撤出 / 出局时，销毁其 LP 项目代币份额，仅退回对应的 BNB 份额。",
+  },
+  "sweep-tax-to-bnb": {
+    text: "税费清算",
+    tip: "将买/卖税累积在合约的项目代币按规则处理：部分留存分红池、部分兑换 BNB 转入生态基金与回购仓库、剩余销毁。",
+  },
+  "exit-burn": {
+    text: "出局销毁",
+    tip: "出局时销毁用户持有的项目代币份额至黑洞地址。",
+  },
+  "exit-refund": {
+    text: "出局退款",
+    tip: "出局时将对应的 BNB 份额退回用户。",
+  },
+  "exit-position": {
+    text: "出局处理（遗留）",
+    tip: "旧版合并出局指令，现已拆分为出局销毁与出局退款，不再使用。",
+  },
+};
+
+function kindLabel(kind: string): { text: string; tip: string } {
+  return KIND_LABEL[kind] ?? { text: kind, tip: kind };
+}
+
+const STATUS_TEXT: Record<string, string> = {
+  pending: "待执行",
+  submitted: "已提交",
+  confirmed: "已确认",
+  failed: "失败",
+};
+
 export default function QueryJournal() {
   return (
     <OwnerGate>
@@ -109,12 +176,26 @@ function JournalPanel() {
                 </Tooltip>
               ),
             },
-            { title: "业务类型", dataIndex: "kind", width: 160 },
+            {
+              title: "业务类型",
+              dataIndex: "kind",
+              width: 180,
+              render: (v: string) => {
+                const { text, tip } = kindLabel(v);
+                return (
+                  <Tooltip title={`${tip}（原始标识：${v}）`}>
+                    <span style={{ cursor: "help" }}>{text}</span>
+                  </Tooltip>
+                );
+              },
+            },
             {
               title: "状态",
               dataIndex: "status",
               width: 110,
-              render: (v: string) => <Tag color={STATUS_COLOR[v] ?? "default"}>{v}</Tag>,
+              render: (v: string) => (
+                <Tag color={STATUS_COLOR[v] ?? "default"}>{STATUS_TEXT[v] ?? v}</Tag>
+              ),
             },
             { title: "尝试次数", dataIndex: "attempts", width: 90, align: "right" },
             {

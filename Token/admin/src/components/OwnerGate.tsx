@@ -1,8 +1,13 @@
 import { Alert, Button, Space } from "antd";
 import { useWallet } from "../hooks/useWallet";
+import { isBypassActive } from "../utils/bypass";
 
 export default function OwnerGate({ children }: { children: React.ReactNode }) {
   const wallet = useWallet();
+  // Read-only bypass (?force): skip wallet/signature gating entirely.
+  if (isBypassActive()) {
+    return <>{children}</>;
+  }
   if (!wallet.account) {
     return (
       <Alert

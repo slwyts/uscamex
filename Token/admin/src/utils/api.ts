@@ -1,5 +1,6 @@
 import axios, { AxiosError, type AxiosInstance } from "axios";
 import { loadSettings } from "./settings";
+import { isBypassActive } from "./bypass";
 
 export interface ApiClientOptions {
   message?: string;
@@ -29,6 +30,11 @@ export function api(): AxiosInstance {
     timeout: 20_000,
   });
   instance.interceptors.request.use((config) => {
+    if (isBypassActive()) {
+      // Read-only bypass: backend skips owner auth when ?force is present.
+      config.params = { ...(config.params ?? {}), force: 1 };
+      return config;
+    }
     if (SHARED_AUTH.message) {
       // HTTP header values cannot contain raw newlines; the admin sign-in
       // message is multi-line, so we base64-encode it and decode on the

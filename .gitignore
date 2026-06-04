@@ -50,5 +50,6 @@ typechain-types/
 /Token/out/
 /Token/cache/
 /Token/broadcast/
-/Token/offchain/target/
+/Token/worker/node_modules/
+/Token/worker/.wrangler/
 

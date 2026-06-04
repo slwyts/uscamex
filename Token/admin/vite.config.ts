@@ -2,10 +2,10 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
 
-// `base: '/admin/'` so the build is mounted at /admin by the operator.
+// `base: '/'` so the SPA is served from the Worker root (Workers Static Assets).
 // `server.proxy` forwards /api during local dev to the operator HTTP server.
 export default defineConfig({
-  base: "/admin/",
+  base: "/",
   plugins: [react()],
   resolve: {
     alias: {

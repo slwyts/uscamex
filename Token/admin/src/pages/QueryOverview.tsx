@@ -3,11 +3,9 @@ import { InfoCircleOutlined } from "@ant-design/icons";
 import {
   ClusterOutlined,
   CrownOutlined,
-  FireOutlined,
   GlobalOutlined,
   ReloadOutlined,
-  SafetyOutlined,
-  SettingOutlined,
+  TeamOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { useQuery } from "@tanstack/react-query";
@@ -56,57 +54,37 @@ function PublicHealthCard() {
       {error && <Empty description={apiErrorMessage(error)} />}
       {data && (
         <Row gutter={[16, 16]}>
-          <Col xs={12} md={6}>
-            <Statistic
-              title={
-                <HelpLabel
-                  text="链 ID"
-                  tip="当前节点连接的区块链网络编号。56 = BSC 主网；97 = BSC 测试网。请确认与钱包侧的网络一致。"
-                />
-              }
-              value={data.chain_id}
-            />
-          </Col>
-          <Col xs={12} md={6}>
-            <Statistic
-              title={
-                <HelpLabel
-                  text="最新区块"
-                  tip="RPC 当前返回的链上最新区块高度，反映节点与全网的同步进度。"
-                />
-              }
-              value={data.chain_head ?? "-"}
-            />
-          </Col>
-          <Col xs={12} md={6}>
-            <Statistic
-              title={
-                <HelpLabel
-                  text="索引起始区块"
-                  tip="后台从该区块开始扫描事件。通常是合约部署的区块；调小会重新拉取历史，调大会跳过更早的事件。"
-                />
-              }
-              value={data.indexer_start_block}
-            />
-          </Col>
-          <Col xs={12} md={6}>
-            <Statistic
-              title={
-                <HelpLabel
-                  text="区块确认数"
-                  tip="后台等待多少个区块确认后才认为事件最终生效，用于抵御短暂回滚。BSC 一般 3~12。"
-                />
-              }
-              value={data.confirmations}
-            />
-          </Col>
-          <Col xs={24} md={12}>
-            <span style={{ color: "rgba(255,255,255,0.55)" }}>代币合约：</span>
-            <AddressTag value={data.token_address} full />
-          </Col>
-          <Col xs={24} md={12}>
-            <span style={{ color: "rgba(255,255,255,0.55)" }}>PancakeSwap 路由：</span>
-            <AddressTag value={data.pancake_v2_router} full />
+          <Metric
+            title="链 ID"
+            value={data.chain_id}
+            tip="当前节点连接的区块链网络编号。56 = BSC 主网；97 = BSC 测试网。请确认与钱包侧的网络一致。"
+          />
+          <Metric
+            title="最新区块"
+            value={data.chain_head ?? "-"}
+            tip="RPC 当前返回的链上最新区块高度，反映节点与全网的同步进度。"
+          />
+          <Metric
+            title="索引起始区块"
+            value={data.indexer_start_block}
+            tip="后台从该区块开始扫描事件。通常是合约部署的区块；调小会重新拉取历史，调大会跳过更早的事件。"
+          />
+          <Metric
+            title="区块确认数"
+            value={data.confirmations}
+            tip="后台等待多少个区块确认后才认为事件最终生效，用于抵御短暂回滚。BSC 一般 3~12。"
+          />
+          <Col span={24}>
+            <div className="overview-identity">
+              <span>
+                <span className="label">代币合约：</span>
+                <AddressTag value={data.token_address} full />
+              </span>
+              <span>
+                <span className="label">PancakeSwap 路由：</span>
+                <AddressTag value={data.pancake_v2_router} full />
+              </span>
+            </div>
           </Col>
         </Row>
       )}
@@ -145,7 +123,7 @@ function StatsCard() {
         className="section-card"
         title={
           <Space>
-            <CrownOutlined /> 核心运营指标
+            <CrownOutlined /> 协议状态
           </Space>
         }
         extra={
@@ -157,6 +135,35 @@ function StatsCard() {
           >
             刷新
           </Button>
+        }
+      >
+        <div className="overview-identity">
+          <span>
+            <span className="label">推荐根：</span>
+            <AddressTag value={data.root} />
+          </span>
+          <span>
+            <span className="label">协议参数：</span>
+            <Tag color={data.protocol_config_initialized ? "green" : "red"}>
+              {data.protocol_config_initialized ? "已初始化" : "尚未初始化"}
+            </Tag>
+          </span>
+          <span>
+            <span className="label">当前业务日：</span>第 {data.current_day} 日
+          </span>
+          <span>
+            <span className="label">今日通缩：</span>
+            {bpsToPercentText(data.deflation_used_bps)}%
+          </span>
+        </div>
+      </Card>
+
+      <Card
+        className="section-card"
+        title={
+          <Space>
+            <TeamOutlined /> 用户规模
+          </Space>
         }
       >
         <Row gutter={[16, 16]}>
@@ -173,42 +180,28 @@ function StatsCard() {
           <Metric
             title="运行中账户"
             value={data.active_users}
-            tip="已完成入金、仓位仍在产出静态/动态收益的账户数。退场或主动撤出 LP 后不计在内。"
+            tone="good"
+            tip="已完成入金、仓位仍在产出静态/动态收益的账户数。出局或主动撤出 LP 后不计在内。"
           />
           <Metric
-            title="已退场账户"
+            title="已出局账户"
             value={data.exited_users}
-            valueStyle={{ color: "#ff7875" }}
-            tip="累计收益达到本金 N 倍后被自动退场，或主动撤出 LP 后不再产出收益的账户数。重新入金后会重新计入“运行中账户”。"
+            tone="warn"
+            tip="静态+动态收益累计达到入金本金 N 倍（默认 3 倍）后自动出局，或主动撤出 LP 后停止产出的账户数。重新入金后会重新计入「运行中账户」。"
           />
           <Metric
             title="节点数量"
             value={data.nodes_count}
-            tip="在「节点配置」中登记且权重 > 0 的地址数量。节点参与入金中 10% 节点分红的按权重平均分配。"
-          />
-          <Metric
-            title="协议参数状态"
-            value={data.protocol_config_initialized ? "已初始化" : "尚未初始化"}
-            valueStyle={{ color: data.protocol_config_initialized ? "#73d13d" : "#ff7875" }}
-            tip="是否已通过「协议参数」页面向合约提交过完整参数。未初始化时，链下运营会使用默认值，不会参与业务计算。"
-          />
-          <Metric
-            title="当前业务日序号"
-            value={data.current_day}
-            tip="以合约的「业务日」为单位计数（1 个业务日 = 24 小时）。序号用于静态产出、团队奖励、通缩上限等按日周期结算的业务。"
-          />
-          <Metric
-            title="今日通缩已使用比例"
-            value={`${bpsToPercentText(data.deflation_used_bps)}%`}
-            tip="今日已累计从 LP 池抽走的代币比例。达到「每日通缩上限」后当日不再自动抽取，过零点后重置。"
+            tip="在「节点配置」中登记且权重 > 0 的地址数量。入金 10% 的节点分红按权重平均分配给所有节点。"
           />
         </Row>
       </Card>
+
       <Card
         className="section-card"
         title={
           <Space>
-            <ThunderboltOutlined /> 资金位
+            <ThunderboltOutlined /> 资金水位
           </Space>
         }
       >
@@ -216,60 +209,61 @@ function StatsCard() {
           <Metric
             title="用户累计入金 (BNB)"
             value={formatBnb(data.total_principal_bnb, 4)}
-            tip="全体用户向合约转入 BNB 作为 LP 本金的累计总额，不含退场后退还部分。"
+            tip="全体用户向合约发送 BNB 作为 LP 入金本金的累计总额（不含出局/撤出后退回部分）。"
           />
           <Metric
             title="累计静态产出 (BNB)"
             value={formatBnb(data.total_static_paid_bnb, 4)}
-            tip="按每日静态收益率（默认 0.8%）发放给用户的代币折算为 BNB 后的累计金额。反映项目的总付付压力。"
+            tip="按每日静态收益率（默认 0.8%，每 6 小时发放一次）折算为 BNB 的累计发放金额，反映项目的总兑付压力。"
           />
           <Metric
             title="累计动态产出 (BNB)"
             value={formatBnb(data.total_dynamic_paid_bnb, 4)}
-            tip="直推奖与 10 代团队奖累计发放金额（BNB 计价）。与静态产出一起计入「退场倍数」。"
+            tip="直推奖励（默认 10%）与 10 代团队奖励的累计发放金额（BNB 金本位）。与静态产出一起计入出局倍数。"
           />
           <Metric
-            title="回购销毁资金池余额 (BNB)"
+            title="回购销毁仓库余额 (BNB)"
             value={formatBnb(data.vault_bnb, 4)}
-            tip="回购销毁资金池是 Token 合约创建的链上子合约，持有用于回购的 BNB。资金来自买入税、卖出税以及入金分配，按设置每分钟从市场买回代币并送黑洞。"
+            tip="回购销毁仓库是 Token 合约部署的子合约，持有用于回购的 BNB。资金来自买入税、卖出税与入金 10% 划转，启动后每分钟从市场买回代币并销毁至黑洞。"
           />
           <Metric
-            title="管理员地址 BNB"
+            title="生态建设基金 BNB"
             value={formatBnb(data.owner_bnb, 4)}
-            tip="合约 owner() 账户在链上的 BNB 余额。卖出税中划入「生态建设基金」的 BNB 会直接进入该账户。"
+            tip="生态建设基金即合约 owner() 地址。卖出税中归属生态基金的 BNB（默认 3%）会直接转入该地址。"
           />
           <Metric
-            title="LP 建设者分红池价值 (BNB)"
+            title="联合建设者分红池价值 (BNB)"
             value={formatBnb(data.builder_token_value_bnb, 4)}
-            tip="合约自身地址所持 USCAME 按当前 LP 价格折算出的 BNB 价值。这些代币来自买入税、卖出税与每小时通缩抽取。"
+            tip="联合建设者分红池即合约自身地址所持的项目代币，按当前 LP 价格折算的 BNB 价值。代币来自买入税、卖出税与每小时 LP 通缩抽取。"
           />
           <Metric
-            title="LP 建设者分红池代币数量"
+            title="联合建设者分红池代币数量"
             value={formatBnb(data.builder_token_amount, 4)}
-            tip="合约自身地址所持 USCAME 代币数量（未折算价格）。可在「资产提取」中划转。"
+            tip="联合建设者分红池（合约自身地址）所持项目代币数量（未折算价格），可在「资产提取」中划转。"
           />
           <Metric
             title="累计销毁代币数量"
             value={formatBnb(data.burned_tokens, 4)}
-            tip="转入黑洞地址（0xdead）的 USCAME 总量。来源包括卖出税销毁、退场销毁、回购销毁以及撤出 LP 销毁。"
+            tip="转入黑洞地址（0xdead）的项目代币总量。来源包括卖出税销毁、出局销毁、回购销毁以及撤出 LP 销毁。"
           />
           <Metric
             title="销毁价值 (BNB)"
             value={formatBnb(data.tax_burned_token_value_bnb, 4)}
-            tip="上面销毁代币按当前 LP 价格折算为 BNB 的价值，可用于估算累计销毁规模。"
+            tip="上述销毁代币按当前 LP 价格折算为 BNB 的价值，可用于估算累计销毁规模。"
           />
           <Metric
             title="LP 池代币储备"
             value={formatBnb(data.pair_token_reserve, 4)}
-            tip="PancakeSwap 交易对中 USCAME 一边的存量。代币减少 → 价格上涨。"
+            tip="PancakeSwap 交易对中项目代币一侧的存量。代币减少 → 价格上涨（通缩机制依此驱动）。"
           />
           <Metric
             title="LP 池 BNB 储备"
             value={formatBnb(data.pair_bnb_reserve, 4)}
-            tip="PancakeSwap 交易对中 BNB 一边的存量。入金会使 BNB 储备增加。"
+            tip="PancakeSwap 交易对中 BNB 一侧的存量。入金组建 LP 会使 BNB 储备增加。"
           />
         </Row>
       </Card>
+
       <Card
         className="section-card"
         title={
@@ -312,29 +306,16 @@ function StatsCard() {
           <Metric
             title="已确认交易"
             value={data.confirmed_commands}
-            valueStyle={{ color: "#73d13d" }}
+            tone="good"
             tip="已被区块成功确认的交易总数。该数字随业务进行持续增长。"
           />
           <Metric
             title="失败交易"
             value={data.failed_commands}
-            valueStyle={{ color: "#ff7875" }}
+            tone="warn"
             tip="上链后被还原或超时以致失败的交易数。可在「链下执行流水」中查看详细错误原因。"
           />
         </Row>
-        <div style={{ marginTop: 16 }}>
-          <Space wrap>
-            <Tag icon={<SafetyOutlined />} color="purple">
-              推荐根：<AddressTag value={data.root} />
-            </Tag>
-            <Tag icon={<FireOutlined />} color="orange">
-              今日已通缩 {bpsToPercentText(data.deflation_used_bps)}%
-            </Tag>
-            <Tag icon={<SettingOutlined />} color={data.protocol_config_initialized ? "green" : "red"}>
-              协议参数 {data.protocol_config_initialized ? "已初始化" : "尚未初始化"}
-            </Tag>
-          </Space>
-        </div>
       </Card>
     </Space>
   );
@@ -343,19 +324,20 @@ function StatsCard() {
 function Metric({
   title,
   value,
-  valueStyle,
+  tone,
   tip,
 }: {
   title: string;
   value: string | number;
-  valueStyle?: React.CSSProperties;
+  tone?: "good" | "warn";
   tip?: string;
 }) {
   const titleNode = tip ? <HelpLabel text={title} tip={tip} /> : title;
+  const toneClass = tone === "good" ? " metric-good" : tone === "warn" ? " metric-warn" : "";
   return (
-    <Col xs={12} sm={8} md={6} xl={4}>
-      <Card className="metric-card" size="small" bordered={false} style={{ background: "#171a23" }}>
-        <Statistic title={titleNode} value={value} valueStyle={valueStyle} />
+    <Col xs={12} sm={12} md={8} lg={6}>
+      <Card className={`metric-card${toneClass}`} size="small" bordered={false}>
+        <Statistic title={titleNode} value={value} />
       </Card>
     </Col>
   );

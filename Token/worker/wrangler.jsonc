@@ -1,0 +1,61 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "uscamex-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-09-23",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "directory": "../admin/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "OPERATOR",
+        "class_name": "OperatorDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["OperatorDO"]
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "uscamex_operator",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
+  },
+  "vars": {
+    "BSC_CHAIN_ID": "137",
+    "TOKEN_ADDRESS": "0x0000000000000000000000000000000000000000",
+    "PANCAKE_V2_ROUTER": "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff",
+    "BURN_ADDRESS": "0x000000000000000000000000000000000000dEaD",
+    "CONFIRMATIONS": "6",
+    "INDEXER_START_BLOCK": "0",
+    "EXECUTOR_SLIPPAGE_BPS": "500",
+    "TRANSACTION_DEADLINE_SECONDS": "600",
+    "RPC_MAX_BLOCKS_PER_SCAN": "1000",
+    "RPC_CONFIG_TTL_SECS": "300",
+    "RPC_NODES_TTL_SECS": "60",
+    "RPC_RESERVES_TTL_SECS": "30",
+    "RPC_VAULT_BALANCE_TTL_SECS": "30",
+    // AMM swap fee numerator. BSC PancakeSwap = 9975 (0.25%); Polygon QuickSwap/Sushi = 9970 (0.30%).
+    // Defaults by chain id when unset; the operator also tries to auto-detect from the pair.
+    "AMM_FEE_BPS": "9970"
+  }
+}

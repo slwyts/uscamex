@@ -1,0 +1,26 @@
+{
+  "name": "uscamex-worker",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "USCAMEX operator on Cloudflare Workers: BSC indexer, deterministic engine, on-chain executor, owner-authed admin API. Port of Token/offchain (Rust).",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build:admin": "pnpm --dir ../admin install && pnpm --dir ../admin build",
+    "predeploy": "pnpm build:admin",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "migrate:local": "wrangler d1 migrations apply uscamex_operator --local",
+    "migrate:remote": "wrangler d1 migrations apply uscamex_operator --remote"
+  },
+  "dependencies": {
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240924.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.0",
+    "wrangler": "^4.0.0"
+  }
+}

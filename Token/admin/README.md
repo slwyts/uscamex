@@ -40,18 +40,28 @@ pnpm dev      # http://127.0.0.1:5179/admin/   ; /api 自动转发到 127.0.0.1:
 
 需要 operator 在 `127.0.0.1:8787` 监听（可由 `OPERATOR_ADMIN_BIND` 配置）。
 
-## 生产构建
+## 生产构建与部署
+
+管理面板由 Cloudflare Worker（`Token/worker`）通过 Workers Static Assets 直接托管，**无需单独部署**。
+
+```bash
+cd Token/worker
+pnpm deploy    # 自动先构建 Token/admin/dist，再连同后端一起部署
+```
+
+部署后访问 Worker 根地址即可打开面板：
+
+```
+https://<worker>/            -> SPA 入口（静态资源，边缘 CDN）
+https://<worker>/api/...     -> JSON API（仅 /api/* 进入 Worker 代码）
+https://<worker>/?force      -> 跳过 owner 签名（只读后门）
+```
+
+也可单独构建（base 为 `/`，产物在 `Token/admin/dist/`）：
 
 ```bash
 cd Token/admin
-pnpm build    # 产物：Token/admin/dist/
-```
-
-operator 启动时会自动检测 `USCAMEX_ADMIN_DIR`（默认 `../admin/dist`），如目录存在则将其挂在 `/admin` 路径下：
-
-```
-http://<operator>/admin/          -> SPA 入口
-http://<operator>/api/admin/...   -> JSON API
+pnpm build
 ```
 
 ## 鉴权流程
