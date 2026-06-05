@@ -40,6 +40,8 @@ export function chainIdHex(chainId: number): string {
 export function chainDisplayName(chainId: number): string {
   if (chainId === 56) return "BSC 主网";
   if (chainId === 97) return "BSC 测试网";
+  if (chainId === 137) return "Polygon 主网";
+  if (chainId === 80002) return "Polygon Amoy 测试网";
   return `链 ${chainId}`;
 }
 
@@ -62,10 +64,28 @@ function addChainParams(settings: OperatorSettings): AddEthereumChainParams {
       blockExplorerUrls: ["https://testnet.bscscan.com"],
     };
   }
+  if (settings.chainId === 137) {
+    return {
+      chainId: chainIdHex(137),
+      chainName: "Polygon Mainnet",
+      nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
+      rpcUrls: [settings.rpcUrl || "https://polygon.publicnode.com"],
+      blockExplorerUrls: ["https://polygonscan.com"],
+    };
+  }
+  if (settings.chainId === 80002) {
+    return {
+      chainId: chainIdHex(80002),
+      chainName: "Polygon Amoy Testnet",
+      nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
+      rpcUrls: [settings.rpcUrl || "https://rpc-amoy.polygon.technology"],
+      blockExplorerUrls: ["https://amoy.polygonscan.com"],
+    };
+  }
   return {
     chainId: chainIdHex(settings.chainId),
     chainName: chainDisplayName(settings.chainId),
-    nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
+    nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
     rpcUrls: [settings.rpcUrl],
   };
 }

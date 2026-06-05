@@ -31,7 +31,7 @@
     {
       "binding": "DB",
       "database_name": "uscamex_operator",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "database_id": "a150762d-03d0-4dcb-8a35-c9720c1d8357",
       "migrations_dir": "migrations"
     }
   ],
@@ -42,7 +42,7 @@
   },
   "vars": {
     "BSC_CHAIN_ID": "137",
-    "TOKEN_ADDRESS": "0x0000000000000000000000000000000000000000",
+    "TOKEN_ADDRESS": "0xD69acd0A2b8D374836d0830D40DB27eb91b3A7E4",
     "PANCAKE_V2_ROUTER": "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff",
     "BURN_ADDRESS": "0x000000000000000000000000000000000000dEaD",
     "CONFIRMATIONS": "6",
