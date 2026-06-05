@@ -15,6 +15,11 @@ import AddressTag from "../components/AddressTag";
 import { formatBnb } from "../utils/bnb";
 import { bpsToPercentText } from "../utils/bps";
 
+function dayToDate(day: number): string {
+  const d = new Date(day * 86_400_000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
 export default function QueryOverview() {
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
@@ -149,7 +154,7 @@ function StatsCard() {
             </Tag>
           </span>
           <span>
-            <span className="label">当前业务日：</span>第 {data.current_day} 日
+            <span className="label">当前业务日：</span>{data.current_day ? dayToDate(data.current_day) : "-"}
           </span>
           <span>
             <span className="label">今日通缩：</span>

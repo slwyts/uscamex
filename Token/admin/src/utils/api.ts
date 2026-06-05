@@ -2,21 +2,51 @@ import axios, { AxiosError, type AxiosInstance } from "axios";
 import { loadSettings } from "./settings";
 import { isBypassActive } from "./bypass";
 
-export interface ApiClientOptions {
-  message?: string;
-  signature?: string;
+const AUTH_KEY = "uscamex-admin-auth";
+
+interface StoredAuth {
+  message: string;
+  signature: string;
+  token: string;
+  chainId: number;
 }
 
 const SHARED_AUTH: { message: string; signature: string } = { message: "", signature: "" };
 
+function loadStoredAuth(): StoredAuth | null {
+  try {
+    const raw = sessionStorage.getItem(AUTH_KEY);
+    return raw ? (JSON.parse(raw) as StoredAuth) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredAuth(value: StoredAuth) {
+  try { sessionStorage.setItem(AUTH_KEY, JSON.stringify(value)); } catch { /* ignore */ }
+}
+
+export function restoreAdminAuth(): boolean {
+  const stored = loadStoredAuth();
+  if (!stored?.message || !stored?.signature) return false;
+  const settings = loadSettings();
+  if (stored.token !== settings.tokenAddress || stored.chainId !== settings.chainConfig.id) return false;
+  SHARED_AUTH.message = stored.message;
+  SHARED_AUTH.signature = stored.signature;
+  return true;
+}
+
 export function setAdminAuth(message: string, signature: string) {
   SHARED_AUTH.message = message;
   SHARED_AUTH.signature = signature;
+  const settings = loadSettings();
+  saveStoredAuth({ message, signature, token: settings.tokenAddress, chainId: settings.chainConfig.id });
 }
 
 export function clearAdminAuth() {
   SHARED_AUTH.message = "";
   SHARED_AUTH.signature = "";
+  try { sessionStorage.removeItem(AUTH_KEY); } catch { /* ignore */ }
 }
 
 export function hasAdminAuth() {

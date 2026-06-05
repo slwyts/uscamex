@@ -34,8 +34,9 @@ export class OperatorService {
     public engine: Engine,
     public state: ProtocolState,
     public journal: ExecutionJournal,
-    public database: ServiceDatabase,
+    public eventCache: EventCache,
     public chain: ChainClient,
+    private onPersist?: () => Promise<void>,
   ) {}
 
   /** service.rs:62 */
@@ -132,16 +133,24 @@ export class OperatorService {
 
   /** service.rs:220 — drain pending; on error stop. Returns tx hashes. */
   async submitPending(): Promise<string[]> {
+    this.journal.retryFailed();
     const txHashes: string[] = [];
     for (const [id, command] of this.journal.pendingCommands()) {
       try {
         const txHash = await this.chain.submit(command);
         this.journal.markSubmitted(id, txHash);
         this.journal.markConfirmed(id);
+        await this.onPersist?.();
         txHashes.push(txHash);
       } catch (e) {
-        this.journal.markFailed(id, String((e as Error).message ?? e));
-        throw e;
+        const err = String((e as Error).message ?? e);
+        console.error(`submitPending: ${id} failed: ${err}`);
+        if (this.journal.canRetry(id)) {
+          this.journal.markFailed(id, err);
+          this.journal.resetToPending(id);
+        } else {
+          this.journal.markFailed(id, err);
+        }
       }
     }
     return txHashes;

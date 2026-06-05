@@ -14,8 +14,8 @@ export const PANCAKE_V2_FEE_BPS = 9_975n; // BSC PancakeSwap default
 export const QUICKSWAP_V2_FEE_BPS = 9_970n; // Polygon QuickSwap/Sushi default
 export const MAX_BUY_TAX_BPS = 2_500;
 export const GAS_LIMIT = 600_000n;
-const RECEIPT_POLL_INTERVAL_MS = 3_000;
-const RECEIPT_POLL_LIMIT = 120;
+const RECEIPT_POLL_INTERVAL_MS = 2_000;
+const RECEIPT_POLL_LIMIT = 60;
 const U128_MAX = (1n << 128n) - 1n;
 
 export interface ChainExecutionContext {
@@ -269,7 +269,7 @@ export class BscTransactionClient {
       data: call.data,
       nonce: Number(BigInt(nonceHex)),
       gas: GAS_LIMIT,
-      gasPrice: BigInt(gasPriceHex),
+      gasPrice: BigInt(gasPriceHex) + (BigInt(gasPriceHex) / 10n),
     });
     const txHash = await this.rpc<string>("eth_sendRawTransaction", [signed]);
     await this.waitForConfirmedReceipt(txHash, BigInt(Math.max(1, this.confirmations)));

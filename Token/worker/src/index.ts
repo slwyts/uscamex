@@ -60,7 +60,7 @@ export default {
     // @ts-expect-error DO RPC
     await stub.ensureRunning();
 
-    const rpc = new BscRpcClient(settings.bscRpcUrl, settings.tokenAddress);
+    const rpc = new BscRpcClient(settings.rpcUrl, settings.tokenAddress);
     let owner = "0x0000000000000000000000000000000000000000";
     let chainHead: number | null = null;
     try {

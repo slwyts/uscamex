@@ -2,7 +2,7 @@
  * Worker bindings + settings validation.
  * Port of Token/offchain/src/settings.rs (OperatorSettings).
  *
- * Secrets (set via `wrangler secret put`): BSC_RPC_URL, OPERATOR_PRIVATE_KEY.
+ * Secrets (set via `wrangler secret put`): RPC_URL, OPERATOR_PRIVATE_KEY.
  * Everything else comes from wrangler.jsonc `vars`.
  */
 
@@ -13,11 +13,11 @@ export interface Env {
   ASSETS: Fetcher;
 
   // Secrets
-  BSC_RPC_URL: string;
+  RPC_URL: string;
   OPERATOR_PRIVATE_KEY: string;
 
   // Vars (strings from wrangler; parse before use)
-  BSC_CHAIN_ID: string;
+  CHAIN_ID: string;
   TOKEN_ADDRESS: string;
   PANCAKE_V2_ROUTER: string;
   BURN_ADDRESS: string;
@@ -35,10 +35,17 @@ export interface Env {
   // PancakeSwap V2 = 9975 (0.25%); QuickSwap/SushiSwap V2 = 9970 (0.30%).
   // Optional; the operator also tries to auto-detect from the pair when possible.
   AMM_FEE_BPS?: string;
+
+  // --- Chain metadata for admin frontend ---
+  CHAIN_NAME?: string;
+  EXPLORER_URL?: string;
+  NATIVE_CURRENCY_NAME?: string;
+  NATIVE_CURRENCY_SYMBOL?: string;
+  NATIVE_CURRENCY_DECIMALS?: string;
 }
 
 export interface OperatorSettings {
-  bscRpcUrl: string;
+  rpcUrl: string;
   operatorPrivateKey: `0x${string}`;
   chainId: number;
   tokenAddress: `0x${string}`;
@@ -55,6 +62,12 @@ export interface OperatorSettings {
   rpcVaultBalanceTtlSecs: number;
   /** AMM fee numerator (kept-after-fee bps). Default 9970 (0.30%, QuickSwap/Sushi). */
   ammFeeBps: number;
+
+  // Chain metadata for admin frontend
+  chainName: string;
+  publicRpcUrl: string;
+  explorerUrl: string;
+  nativeCurrency: { name: string; symbol: string; decimals: number };
 }
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -79,7 +92,7 @@ export class SettingsError extends Error {}
 
 /** Parse + validate env into settings. Mirrors settings.rs validate(). */
 export function loadSettings(env: Env): OperatorSettings {
-  if (!env.BSC_RPC_URL) throw new SettingsError("BSC_RPC_URL is required");
+  if (!env.RPC_URL) throw new SettingsError("RPC_URL is required");
 
   let key = env.OPERATOR_PRIVATE_KEY ?? "";
   if (!key.startsWith("0x")) key = `0x${key}`;
@@ -87,12 +100,12 @@ export function loadSettings(env: Env): OperatorSettings {
     throw new SettingsError("OPERATOR_PRIVATE_KEY must be 0x + 64 hex");
   }
 
-  const chainId = requirePosInt("BSC_CHAIN_ID", env.BSC_CHAIN_ID);
+  const chainId = requirePosInt("CHAIN_ID", env.CHAIN_ID);
   // Supported EVM chains: BSC (56/97) and Polygon (137 / Amoy 80002).
   const SUPPORTED_CHAINS = [56, 97, 137, 80002];
   if (!SUPPORTED_CHAINS.includes(chainId)) {
     throw new SettingsError(
-      `BSC_CHAIN_ID must be one of ${SUPPORTED_CHAINS.join(", ")} (BSC/Polygon), got: ${chainId}`,
+      `CHAIN_ID must be one of ${SUPPORTED_CHAINS.join(", ")} (BSC/Polygon), got: ${chainId}`,
     );
   }
 
@@ -113,7 +126,7 @@ export function loadSettings(env: Env): OperatorSettings {
   }
 
   return {
-    bscRpcUrl: env.BSC_RPC_URL,
+    rpcUrl: env.RPC_URL,
     operatorPrivateKey: key as `0x${string}`,
     chainId,
     tokenAddress: requireAddress("TOKEN_ADDRESS", env.TOKEN_ADDRESS),
@@ -137,5 +150,13 @@ export function loadSettings(env: Env): OperatorSettings {
       env.RPC_VAULT_BALANCE_TTL_SECS,
     ),
     ammFeeBps,
+    chainName: env.CHAIN_NAME || "Unknown Chain",
+    publicRpcUrl: env.RPC_URL, // same as operator RPC; served to admin frontend
+    explorerUrl: env.EXPLORER_URL || "https://polygonscan.com",
+    nativeCurrency: {
+      name: env.NATIVE_CURRENCY_NAME || "Native Token",
+      symbol: env.NATIVE_CURRENCY_SYMBOL || "ETH",
+      decimals: requirePosInt("NATIVE_CURRENCY_DECIMALS", env.NATIVE_CURRENCY_DECIMALS || "18"),
+    },
   };
 }

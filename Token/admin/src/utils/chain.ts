@@ -14,7 +14,7 @@ export function getInjectedProvider(): BrowserProvider {
 
 export function getReadProvider(): JsonRpcProvider {
   const settings = loadSettings();
-  return new JsonRpcProvider(settings.rpcUrl, settings.chainId);
+  return new JsonRpcProvider(settings.chainConfig.rpcUrl, settings.chainConfig.id);
 }
 
 interface AddEthereumChainParams {
@@ -37,56 +37,14 @@ export function chainIdHex(chainId: number): string {
   return `0x${chainId.toString(16)}`;
 }
 
-export function chainDisplayName(chainId: number): string {
-  if (chainId === 56) return "BSC 主网";
-  if (chainId === 97) return "BSC 测试网";
-  if (chainId === 137) return "Polygon 主网";
-  if (chainId === 80002) return "Polygon Amoy 测试网";
-  return `链 ${chainId}`;
-}
-
 function addChainParams(settings: OperatorSettings): AddEthereumChainParams {
-  if (settings.chainId === 56) {
-    return {
-      chainId: chainIdHex(56),
-      chainName: "BNB Smart Chain",
-      nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
-      rpcUrls: [settings.rpcUrl || "https://bsc-dataseed.binance.org"],
-      blockExplorerUrls: ["https://bscscan.com"],
-    };
-  }
-  if (settings.chainId === 97) {
-    return {
-      chainId: chainIdHex(97),
-      chainName: "BNB Smart Chain Testnet",
-      nativeCurrency: { name: "tBNB", symbol: "tBNB", decimals: 18 },
-      rpcUrls: [settings.rpcUrl || "https://bsc-testnet-rpc.publicnode.com"],
-      blockExplorerUrls: ["https://testnet.bscscan.com"],
-    };
-  }
-  if (settings.chainId === 137) {
-    return {
-      chainId: chainIdHex(137),
-      chainName: "Polygon Mainnet",
-      nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
-      rpcUrls: [settings.rpcUrl || "https://polygon.publicnode.com"],
-      blockExplorerUrls: ["https://polygonscan.com"],
-    };
-  }
-  if (settings.chainId === 80002) {
-    return {
-      chainId: chainIdHex(80002),
-      chainName: "Polygon Amoy Testnet",
-      nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
-      rpcUrls: [settings.rpcUrl || "https://rpc-amoy.polygon.technology"],
-      blockExplorerUrls: ["https://amoy.polygonscan.com"],
-    };
-  }
+  const cfg = settings.chainConfig;
   return {
-    chainId: chainIdHex(settings.chainId),
-    chainName: chainDisplayName(settings.chainId),
-    nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
-    rpcUrls: [settings.rpcUrl],
+    chainId: chainIdHex(cfg.id),
+    chainName: cfg.name,
+    nativeCurrency: cfg.nativeCurrency,
+    rpcUrls: [cfg.rpcUrl],
+    blockExplorerUrls: cfg.explorerUrl ? [cfg.explorerUrl] : undefined,
   };
 }
 
@@ -96,7 +54,8 @@ function isUnknownChainError(error: unknown): boolean {
 }
 
 function switchRejectedMessage(settings: OperatorSettings): string {
-  return `请在钱包中切换到${chainDisplayName(settings.chainId)}（chainId ${settings.chainId}）后再继续`;
+  const cfg = settings.chainConfig;
+  return `请在钱包中切换到${cfg.name}（chainId ${cfg.id}）后再继续`;
 }
 
 export async function getWalletChainId(): Promise<number> {
@@ -111,13 +70,13 @@ export async function ensureWalletChain(settings?: OperatorSettings): Promise<vo
     await bootstrapSettingsFromBackend().catch(() => undefined);
     settings = loadSettings();
   }
-  if (!Number.isInteger(settings.chainId) || settings.chainId <= 0) {
+  if (!Number.isInteger(settings.chainConfig.id) || settings.chainConfig.id <= 0) {
     throw new Error("链 ID 配置不正确，请先在【连接设置】中填写正确的链 ID");
   }
   const provider = getInjectedProvider();
-  const expected = chainIdHex(settings.chainId);
+  const expected = chainIdHex(settings.chainConfig.id);
   const current = await getWalletChainId();
-  if (current === settings.chainId) return;
+  if (current === settings.chainConfig.id) return;
 
   try {
     await provider.send("wallet_switchEthereumChain", [{ chainId: expected }]);
@@ -134,7 +93,7 @@ export async function ensureWalletChain(settings?: OperatorSettings): Promise<vo
   }
 
   const next = await getWalletChainId();
-  if (next !== settings.chainId) {
+  if (next !== settings.chainConfig.id) {
     throw new Error(switchRejectedMessage(settings));
   }
 }
@@ -176,13 +135,10 @@ export async function signOwnerMessage(account: string): Promise<{ message: stri
     "USCAMEX Admin",
     `address=${account.toLowerCase()}`,
     `token=${settings.tokenAddress.toLowerCase()}`,
-    `chainId=${settings.chainId}`,
+    `chainId=${settings.chainConfig.id}`,
     `timestamp=${Math.floor(Date.now() / 1000)}`,
   ].join("\n");
   const signature = await signer.signMessage(message);
-  // Some wallets (especially mobile in-DApp browsers) sign with the *currently
-  // active* account in the wallet, ignoring the address we requested. Verify
-  // locally so we fail fast instead of producing a 403 after the fact.
   const recovered = verifyMessage(message, signature).toLowerCase();
   if (recovered !== account.toLowerCase()) {
     throw new Error(

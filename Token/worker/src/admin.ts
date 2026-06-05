@@ -102,7 +102,14 @@ export async function handleAdmin(req: Request, ctx: AdminContext): Promise<Resp
   if (path === "/api/health") {
     return json({
       ok: true,
-      chain_id: ctx.settings.chainId,
+      chain_id: ctx.settings.chainId, // backward compat
+      chain: {
+        id: ctx.settings.chainId,
+        name: ctx.settings.chainName,
+        native_currency: ctx.settings.nativeCurrency,
+        rpc_url: ctx.settings.publicRpcUrl,
+        explorer_url: ctx.settings.explorerUrl,
+      },
       chain_head: ctx.chainHead,
       token_address: ctx.settings.tokenAddress,
       pancake_v2_router: ctx.settings.pancakeV2Router,
@@ -166,7 +173,7 @@ export async function handleAdmin(req: Request, ctx: AdminContext): Promise<Resp
     case "/api/admin/journal-list": {
       const limit = intParam(url, "limit", 50, 500);
       const offset = intParam(url, "offset", 0, Number.MAX_SAFE_INTEGER);
-      const status = url.searchParams.get("status") ?? "all";
+      const status = url.searchParams.get("status") || "all";
       // @ts-expect-error DO RPC
       return json({ signer, ...(await stub.queryJournalList(limit, offset, status)) });
     }

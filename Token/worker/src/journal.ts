@@ -5,6 +5,8 @@
  */
 import { commandKind, type OperatorCommand } from "./executor";
 
+const MAX_ATTEMPTS = 3;
+
 export type CommandStatus =
   | { state: "Pending" }
   | { state: "Submitted"; txHash: string }
@@ -72,7 +74,32 @@ export class ExecutionJournal {
     const record = this.records.get(id);
     if (!record) throw new JournalError("MissingCommand");
     if (record.status.state === "Confirmed") throw new JournalError("AlreadyConfirmed");
+    record.attempts += 1;
     record.status = { state: "Failed", error };
+  }
+
+  canRetry(id: string): boolean {
+    const record = this.records.get(id);
+    if (!record) return false;
+    return record.attempts < MAX_ATTEMPTS;
+  }
+
+  resetToPending(id: string): void {
+    const record = this.records.get(id);
+    if (!record) throw new JournalError("MissingCommand");
+    record.status = { state: "Pending" };
+  }
+
+  /** Retry all Failed commands that haven't exceeded MAX_ATTEMPTS. */
+  retryFailed(): number {
+    let count = 0;
+    for (const r of this.records.values()) {
+      if (r.status.state === "Failed" && r.attempts < MAX_ATTEMPTS) {
+        r.status = { state: "Pending" };
+        count += 1;
+      }
+    }
+    return count;
   }
 
   confirmedCount(): number {

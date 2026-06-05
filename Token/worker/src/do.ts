@@ -106,7 +106,7 @@ export class OperatorDO extends DurableObject<Env> {
   }
 
   private newService(cache: EventCache): OperatorService {
-    return new OperatorService(this.engine, this.state, this.journal, cache, this.newChain());
+    return new OperatorService(this.engine, this.state, this.journal, cache, this.newChain(), () => this.persist());
   }
 
   private newChain(): ChainClient {
@@ -120,7 +120,7 @@ export class OperatorDO extends DurableObject<Env> {
       deadlineSeconds: this.settings.transactionDeadlineSeconds,
     };
     return new BscTransactionClient(
-      this.settings.bscRpcUrl,
+      this.settings.rpcUrl,
       this.settings.chainId,
       this.settings.operatorPrivateKey,
       ctx,
@@ -192,7 +192,7 @@ export class OperatorDO extends DurableObject<Env> {
 
   // ---- scan implementation ----
   private async scanOnce(): Promise<void> {
-    const rpc = new BscRpcClient(this.settings.bscRpcUrl, this.settings.tokenAddress);
+    const rpc = new BscRpcClient(this.settings.rpcUrl, this.settings.tokenAddress);
     const storage = new D1Storage(this.env.DB);
 
     await this.ensureRoot(rpc);

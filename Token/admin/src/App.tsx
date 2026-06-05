@@ -17,7 +17,7 @@ import {
 import TopBar from "./components/TopBar";
 import { bootstrapSettingsFromBackend } from "./utils/settings";
 import { useWallet } from "./hooks/useWallet";
-import { hasAdminAuth } from "./utils/api";
+import { hasAdminAuth, restoreAdminAuth } from "./utils/api";
 import QueryOverview from "./pages/QueryOverview";
 import QueryTeam from "./pages/QueryTeam";
 import QueryUsers from "./pages/QueryUsers";
@@ -73,6 +73,7 @@ export default function App() {
       // Sync chainId/tokenAddress from backend so the next signature matches
       // the chain the operator is wired to (97 testnet vs 56 mainnet).
       await bootstrapSettingsFromBackend().catch(() => undefined);
+      restoreAdminAuth();
       if (cancelled) return;
       // Auto wallet connect; if the wallet has previously authorized this
       // origin, MetaMask returns the account silently. Otherwise users see

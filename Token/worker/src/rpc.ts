@@ -1,6 +1,6 @@
 /**
  * BSC JSON-RPC read client. Port of Token/offchain/src/rpc.rs.
- * Uses fetch() to BSC_RPC_URL. ABI word parsing is manual (matching rpc.rs word_at/parse_* helpers)
+ * Uses fetch() to the operator RPC URL. ABI word parsing is manual (matching rpc.rs word_at/parse_* helpers)
  * to preserve exact decoding semantics, including the getProtocolConfig() word index map.
  */
 import { keccak256, toHex } from "viem";

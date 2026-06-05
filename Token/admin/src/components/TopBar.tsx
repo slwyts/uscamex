@@ -1,4 +1,4 @@
-import { Space, Button, Tag, Drawer, Form, Input, InputNumber, App } from "antd";
+import { Space, Button, Tag, Drawer, Form, Input, App } from "antd";
 import { useEffect, useState } from "react";
 import { SettingOutlined, LinkOutlined, SafetyOutlined } from "@ant-design/icons";
 import { useWallet } from "../hooks/useWallet";
@@ -42,10 +42,11 @@ export default function TopBar() {
     }
   };
 
-  const onSave = (values: OperatorSettings) => {
-    saveSettings(values);
-    setSettings(values);
-    message.success("已保存连接信息，请重新连接钱包并完成签名");
+  const onSave = (values: Pick<OperatorSettings, "apiBase">) => {
+    const merged: OperatorSettings = { ...settings, apiBase: values.apiBase ?? "" };
+    saveSettings(merged);
+    setSettings(merged);
+    message.success("已保存");
     wallet.disconnect();
     setOpen(false);
   };
@@ -61,7 +62,7 @@ export default function TopBar() {
         <Tag color={settings.tokenAddress ? "gold" : "default"} icon={<LinkOutlined />}>
           {settings.tokenAddress ? `合约 ${shortAddress(settings.tokenAddress)}` : "未配置合约地址"}
         </Tag>
-        <Tag color="blue">链 {settings.chainId}</Tag>
+        <Tag color="blue">{settings.chainConfig.name}</Tag>
         {wallet.owner && (
           <Tag color="purple">合约管理员 {shortAddress(wallet.owner)}</Tag>
         )}
@@ -117,32 +118,14 @@ export default function TopBar() {
           <Form.Item label="后端 API 地址（留空则使用当前站点 /api）" name="apiBase">
             <Input placeholder="例：http://127.0.0.1:8787，留空表示同站点" />
           </Form.Item>
-          <Form.Item
-            label="链上只读 RPC 地址"
-            name="rpcUrl"
-            rules={[{ required: true, message: "请输入 RPC 地址" }]}
-          >
-            <Input placeholder="例：https://bsc-dataseed.binance.org" />
-          </Form.Item>
-          <Form.Item
-            label="链 ID（BSC 主网 56，测试网 97）"
-            name="chainId"
-            rules={[{ required: true, message: "请输入链 ID" }]}
-          >
-            <InputNumber min={1} style={{ width: "100%" }} />
-          </Form.Item>
-          <Form.Item
-            label="USCAME 代币合约地址"
-            name="tokenAddress"
-            rules={[
-              { required: true, message: "请输入合约地址" },
-              { pattern: /^0x[0-9a-fA-F]{40}$/, message: "地址格式不正确" },
-            ]}
-          >
-            <Input placeholder="0x..." />
-          </Form.Item>
+          <div style={{ marginBottom: 16, padding: "8px 12px", background: "#fafafa", borderRadius: 4, fontSize: 13 }}>
+            <div>链：{settings.chainConfig.name}（ID {settings.chainConfig.id}）</div>
+            <div>RPC：{settings.chainConfig.rpcUrl}</div>
+            <div>代币：{settings.tokenAddress ? shortAddress(settings.tokenAddress) : "未配置"}</div>
+            <div style={{ marginTop: 4, color: "#888" }}>以上信息从后端 /api/health 自动同步</div>
+          </div>
           <Button type="primary" htmlType="submit" block>
-            保存连接信息
+            保存
           </Button>
         </Form>
       </Drawer>
