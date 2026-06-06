@@ -25,8 +25,8 @@ import { formatBnb, parseBnb } from "../utils/bnb";
 import { bpsToPercentNumber, bpsToPercentText, percentNumberToBps } from "../utils/bps";
 
 const ABI = [
-  "function getProtocolConfig() view returns (tuple(address operator,uint16 buyTaxBps,uint16 sellTaxBps,uint128 minDeposit,uint128 maxDeposit,bool buyEnabled,uint16 lpBuildBps,uint16 nodeBps,uint16 builderBuyBps,uint16 vaultBps,uint16 directPoolBps,uint16 directRewardBps,uint16 dailyStaticBps,uint8 settlementPeriodsPerDay,uint32 exitMultipleBps,uint16[10] teamRewardBps,bool deflationEnabled,uint16 deflationHourlyBps,uint16 deflationDailyCapBps,bool buybackEnabled,uint128 buybackPerMinute,uint16 buyTaxBuilderBps,uint16 buyTaxVaultBps,uint16 sellTaxBuilderBps,uint16 sellTaxOwnerBps,uint16 sellTaxVaultBps))",
-  "function setProtocolConfig(tuple(address operator,uint16 buyTaxBps,uint16 sellTaxBps,uint128 minDeposit,uint128 maxDeposit,bool buyEnabled,uint16 lpBuildBps,uint16 nodeBps,uint16 builderBuyBps,uint16 vaultBps,uint16 directPoolBps,uint16 directRewardBps,uint16 dailyStaticBps,uint8 settlementPeriodsPerDay,uint32 exitMultipleBps,uint16[10] teamRewardBps,bool deflationEnabled,uint16 deflationHourlyBps,uint16 deflationDailyCapBps,bool buybackEnabled,uint128 buybackPerMinute,uint16 buyTaxBuilderBps,uint16 buyTaxVaultBps,uint16 sellTaxBuilderBps,uint16 sellTaxOwnerBps,uint16 sellTaxVaultBps) next)",
+  "function getProtocolConfig() view returns (tuple(address operator,uint16 buyTaxBps,uint16 sellTaxBps,uint128 minDeposit,uint128 maxDeposit,bool buyEnabled,uint16 lpBuildBps,uint16 nodeBps,uint16 builderBuyBps,uint16 vaultBps,uint16 directPoolBps,uint16 directRewardBps,uint16 dailyStaticBps,uint8 settlementPeriodsPerDay,uint32 exitMultipleBps,uint16[10] teamRewardBps,bool deflationEnabled,uint16 deflationHourlyBps,uint16 deflationDailyCapBps,bool buybackEnabled,uint128 buybackPerMinute,uint16 buyTaxBuilderBps,uint16 buyTaxVaultBps,uint16 sellTaxBuilderBps,uint16 sellTaxOwnerBps,uint16 sellTaxVaultBps,uint128 bindCost))",
+  "function setProtocolConfig(tuple(address operator,uint16 buyTaxBps,uint16 sellTaxBps,uint128 minDeposit,uint128 maxDeposit,bool buyEnabled,uint16 lpBuildBps,uint16 nodeBps,uint16 builderBuyBps,uint16 vaultBps,uint16 directPoolBps,uint16 directRewardBps,uint16 dailyStaticBps,uint8 settlementPeriodsPerDay,uint32 exitMultipleBps,uint16[10] teamRewardBps,bool deflationEnabled,uint16 deflationHourlyBps,uint16 deflationDailyCapBps,bool buybackEnabled,uint128 buybackPerMinute,uint16 buyTaxBuilderBps,uint16 buyTaxVaultBps,uint16 sellTaxBuilderBps,uint16 sellTaxOwnerBps,uint16 sellTaxVaultBps,uint128 bindCost) next)",
 ];
 const iface = new Interface(ABI);
 
@@ -57,6 +57,7 @@ interface FormShape {
   sellTaxBuilderBps: number;
   sellTaxOwnerBps: number;
   sellTaxVaultBps: number;
+  bindCostTokens: string;
 }
 
 export default function ConfigParams() {
@@ -107,6 +108,7 @@ export default function ConfigParams() {
         sellTaxBuilderBps: Number(c.sellTaxBuilderBps),
         sellTaxOwnerBps: Number(c.sellTaxOwnerBps),
         sellTaxVaultBps: Number(c.sellTaxVaultBps),
+        bindCostTokens: formatBnb(c.bindCost as bigint, 18),
       };
       form.setFieldsValue(value);
       setLoaded(true);
@@ -156,6 +158,7 @@ export default function ConfigParams() {
         sellTaxBuilderBps: values.sellTaxBuilderBps,
         sellTaxOwnerBps: values.sellTaxOwnerBps,
         sellTaxVaultBps: values.sellTaxVaultBps,
+        bindCost: parseBnb(values.bindCostTokens),
       };
     } catch (error) {
       message.error((error as Error).message);
@@ -247,6 +250,20 @@ export default function ConfigParams() {
           <Col xs={12}>
             <Form.Item label="最高入金金额（BNB）" name="maxDepositBnb" rules={[{ required: true }]}>
               <Input placeholder="例：5" />
+            </Form.Item>
+          </Col>
+        </Row>
+
+        <Divider orientation="left">绑定上级费用</Divider>
+        <Row gutter={16}>
+          <Col xs={24} md={12}>
+            <Form.Item
+              label="绑定上级所需代币数量（枚）"
+              name="bindCostTokens"
+              rules={[{ required: true }]}
+              extra="用户向上级地址转账恰好该数量的项目代币以完成上级绑定；代币实际转入上级地址。默认 11 枚。"
+            >
+              <Input placeholder="例：11" />
             </Form.Item>
           </Col>
         </Row>

@@ -135,7 +135,7 @@ export class ExecutionJournal {
   }
 }
 
-// bigint fields must round-trip as strings
+// bigint fields must round-trip as strings (matched at any nesting depth)
 const BIGINT_FIELDS = new Set([
   "bnbAmount",
   "tokenValueBnb",
@@ -146,12 +146,39 @@ const BIGINT_FIELDS = new Set([
   "taxTokenAmount",
   "builderTokenAmount",
   "burnTokenAmount",
+  // DepositBatch fields (incl. nested nodePayouts[].amount)
+  "lpBnb",
+  "lpTokenValueBnb",
+  "builderBnb",
+  "vaultBnb",
+  "directBnb",
 ]);
+
+function serializeValue(value: unknown): unknown {
+  if (typeof value === "bigint") return value.toString();
+  if (Array.isArray(value)) return value.map(serializeValue);
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = serializeValue(v);
+    return out;
+  }
+  return value;
+}
+
+function deserializeValue(key: string, value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((v) => deserializeValue(key, v));
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = deserializeValue(k, v);
+    return out;
+  }
+  return BIGINT_FIELDS.has(key) && typeof value === "string" ? BigInt(value) : value;
+}
 
 function serializeCommand(command: OperatorCommand): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(command)) {
-    out[k] = typeof v === "bigint" ? v.toString() : v;
+    out[k] = serializeValue(v);
   }
   return out;
 }
@@ -160,7 +187,7 @@ function deserializeCommand(raw: unknown): OperatorCommand {
   const obj = raw as Record<string, unknown>;
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(obj)) {
-    out[k] = BIGINT_FIELDS.has(k) && typeof v === "string" ? BigInt(v) : v;
+    out[k] = deserializeValue(k, v);
   }
   return out as unknown as OperatorCommand;
 }

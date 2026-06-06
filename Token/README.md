@@ -8,8 +8,8 @@ This folder contains the token-side implementation for the USCAMEX protocol. The
 - Solidity: minimal trusted execution surface in `src/USCAME.sol`.
 - Offchain: a Cloudflare Worker operator (`worker/`, TypeScript) owns the complex protocol accounting and timed execution. It runs the BSC indexer, deterministic engine, on-chain executor, and owner-authed admin API on Workers + Durable Objects + D1 + Cron Triggers.
 - Database: Cloudflare D1 (SQLite) persists events, indexed blocks, protocol config snapshots, and node history. The engine `ProtocolState` and command journal live in the `OperatorDO` Durable Object storage.
-- Binding: users bind an upline by calling `transfer(referrer, 0)`.
-- LP seed: 100% of the 1 billion token supply is minted to the token contract and injected during `initializeLP()`.
+- Binding: users bind an upline by transferring exactly `bindCost` tokens (default 11) to the upline via `transfer(referrer, bindCost)`. The tokens are delivered to the upline; a zero-value transfer no longer binds.
+- LP seed: the 1 billion token supply is minted to the token contract. By default `initializeLP()` injects the token contract's full remaining balance; if the owner withdraws an admin reserve first, the pair receives `totalSupply - adminReserve`.
 
 The Solidity contract intentionally exposes a strong `operatorCall` primitive so the offchain operator can execute Router, Vault, and distribution calls without expanding on-chain code size. Production operator ownership should be a multisig, and a timelock or whitelist should be considered before mainnet launch.
 

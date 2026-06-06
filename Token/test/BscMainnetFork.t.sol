@@ -50,10 +50,12 @@ contract BscMainnetForkFlow {
     address internal constant OPERATOR = address(0x0A11CE);
     address internal constant USER = address(0x0B0B);
     address internal constant REFERRER = address(0x0C0C);
+    address internal constant GENESIS_NODE = address(0x0111);
     address internal constant ATTACKER = address(0xBAD);
     address internal constant BURN = 0x000000000000000000000000000000000000dEaD;
 
     uint256 internal constant INITIAL_LP_BNB = 10 ether;
+    uint256 internal constant ADMIN_RESERVE_TOKENS = 10_000_000 ether;
 
     receive() external payable { }
 
@@ -70,8 +72,7 @@ contract BscMainnetForkFlow {
         require(bnbReserve == INITIAL_LP_BNB, "lp-bnb-reserve");
 
         vm.deal(USER, 2 ether);
-        vm.prank(USER);
-        require(token.transfer(address(this), 0), "bind");
+        bind(token, USER, address(this));
         vm.prank(USER);
         (bool ok,) = payable(address(token)).call{ value: 1 ether }("");
         require(ok, "deposit");
@@ -96,15 +97,14 @@ contract BscMainnetForkFlow {
         require(fresh.root() == address(this), "root");
         require(fresh.referrer(address(this)) == address(this), "root-bound");
 
+        giveTokens(fresh, USER, fresh.bindCost());
         vm.prank(USER);
-        (ok,) =
-            address(fresh).call(abi.encodeWithSignature("transfer(address,uint256)", REFERRER, 0));
+        (ok,) = address(fresh)
+            .call(abi.encodeWithSignature("transfer(address,uint256)", REFERRER, fresh.bindCost()));
         require(!ok, "unbound-referrer");
 
-        vm.prank(REFERRER);
-        require(fresh.transfer(address(this), 0), "bind-referrer");
-        vm.prank(USER);
-        require(fresh.transfer(REFERRER, 0), "bind-user");
+        bind(fresh, REFERRER, address(this));
+        bind(fresh, USER, REFERRER);
         require(fresh.referrer(USER) == REFERRER, "referrer-set");
 
         vm.prank(USER);
@@ -218,8 +218,7 @@ contract BscMainnetForkFlow {
         USCAME token = deployInitializedToken();
         configureToken(token, OPERATOR, 300, 1000, uint128(0.1 ether), uint128(5 ether), true);
         vm.deal(USER, 2 ether);
-        vm.prank(USER);
-        require(token.transfer(address(this), 0), "bind");
+        bind(token, USER, address(this));
         vm.prank(USER);
         (bool ok,) = payable(address(token)).call{ value: 1 ether }("");
         require(ok, "deposit");
@@ -257,6 +256,86 @@ contract BscMainnetForkFlow {
         require(token.balanceOf(BURN) > burnBefore, "buyback-burn-token");
     }
 
+    function testBscMainnetForkLaunchLifecycleDefaultConfigAndDepositBatch() public {
+        if (!forkBsc()) return;
+
+        USCAME token = new USCAME(PANCAKE_V2_ROUTER, address(this), OPERATOR);
+        token.operatorCall(
+            address(token),
+            0,
+            abi.encodeWithSignature(
+                "transfer(address,uint256)", address(this), ADMIN_RESERVE_TOKENS
+            )
+        );
+        require(token.balanceOf(address(this)) == ADMIN_RESERVE_TOKENS, "admin-reserve");
+        tokenSeedAndInitialize(token);
+
+        (uint256 tokenReserve, uint256 bnbReserve) = pairReserves(token);
+        require(tokenReserve == token.totalSupply() - ADMIN_RESERVE_TOKENS, "reserve-token");
+        require(bnbReserve == INITIAL_LP_BNB, "reserve-bnb");
+
+        USCAME.ProtocolConfigInput memory config = token.getProtocolConfig();
+        require(!config.buyEnabled, "buy-default-off");
+        require(config.lpBuildBps == 6000, "lp-bps");
+        require(config.nodeBps == 1000, "node-bps");
+        require(config.builderBuyBps == 1000, "builder-bps");
+        require(config.vaultBps == 1000, "vault-bps");
+        require(config.directPoolBps == 1000, "direct-pool-bps");
+        require(config.directRewardBps == 1000, "direct-reward-bps");
+        require(config.dailyStaticBps == 80, "static-bps");
+        require(config.settlementPeriodsPerDay == 4, "periods");
+        require(config.deflationHourlyBps == 10, "deflation-hourly");
+        require(config.deflationDailyCapBps == 200, "deflation-cap");
+        require(config.bindCost == 11 ether, "bind-cost");
+
+        token.setNode(GENESIS_NODE, 1);
+        require(token.nodeCount() == 1, "node-count");
+        (address node, uint32 weight) = token.nodeAt(0);
+        require(node == GENESIS_NODE && weight == 1, "node-weight");
+
+        uint256 bindCost = token.bindCost();
+        require(token.transfer(USER, bindCost), "fund-user-bind");
+        vm.prank(USER);
+        require(token.transfer(address(this), bindCost), "bind-user-root");
+        require(token.referrer(USER) == address(this), "user-referrer");
+
+        vm.deal(USER, 2 ether);
+        vm.prank(USER);
+        (bool ok,) = payable(address(token)).call{ value: 1 ether }("");
+        require(ok, "user-deposit");
+
+        (uint256 tokenReserveBeforeBatch, uint256 bnbReserveBeforeBatch) = pairReserves(token);
+        uint256 vaultBefore = token.vault().balance;
+        uint256 nodeBefore = GENESIS_NODE.balance;
+        uint256 rootBefore = address(this).balance;
+
+        USCAME.NodePayout[] memory payouts = new USCAME.NodePayout[](1);
+        payouts[0] = USCAME.NodePayout({ to: GENESIS_NODE, amount: uint128(0.1 ether) });
+        USCAME.DepositBatchParams memory params = USCAME.DepositBatchParams({
+            lpBnb: uint128(0.3 ether),
+            lpTokenValueBnb: uint128(0.3 ether),
+            minLpTokenOut: 1,
+            builderBnb: uint128(0.1 ether),
+            minBuilderTokenOut: 1,
+            vaultBnb: uint128(0.1 ether),
+            directReferrer: address(this),
+            directBnb: uint128(0.1 ether),
+            nodePayouts: payouts
+        });
+
+        vm.prank(OPERATOR);
+        token.depositBatch(params);
+
+        (uint256 tokenReserveAfterBatch, uint256 bnbReserveAfterBatch) = pairReserves(token);
+        require(bnbReserveAfterBatch == bnbReserveBeforeBatch + 0.7 ether, "batch-bnb-reserve");
+        require(tokenReserveAfterBatch < tokenReserveBeforeBatch, "batch-token-reserve");
+        require(token.balanceOf(address(token)) > 0, "builder-token-self");
+        require(token.vault().balance == vaultBefore + 0.1 ether, "batch-vault");
+        require(GENESIS_NODE.balance == nodeBefore + 0.1 ether, "batch-node");
+        require(address(this).balance == rootBefore + 0.1 ether, "batch-direct");
+        require(address(token).balance == 0, "batch-spent-all");
+    }
+
     function forkBsc() internal returns (bool) {
         string memory rpc = vm.envOr("BSC_RPC_URL", string(""));
         if (bytes(rpc).length == 0) return false;
@@ -274,6 +353,20 @@ contract BscMainnetForkFlow {
         (bool ok,) = payable(address(token)).call{ value: INITIAL_LP_BNB }("");
         require(ok, "seed-bnb");
         token.initializeLP();
+    }
+
+    function giveTokens(USCAME token, address to, uint256 amount) internal {
+        token.pullPairTokensExact(amount);
+        token.operatorCall(
+            address(token), 0, abi.encodeWithSignature("transfer(address,uint256)", to, amount)
+        );
+    }
+
+    function bind(USCAME token, address user, address upline) internal {
+        uint256 cost = token.bindCost();
+        if (token.balanceOf(user) < cost) giveTokens(token, user, cost - token.balanceOf(user));
+        vm.prank(user);
+        require(token.transfer(upline, cost), "bind-cost-transfer");
     }
 
     function configureToken(

@@ -274,3 +274,18 @@ export interface PublicHealth {
   indexer_start_block: number;
   confirmations: number;
 }
+
+export interface RetryFailedResponse {
+  signer: string;
+  retried: number;
+  tx_hashes: string[];
+}
+
+/**
+ * 手动重试失败的链下命令：将其尝试次数清零并重新入队立即提交。
+ * 不传 ids 则重试全部失败命令。需 owner 签名（不支持只读旁路）。
+ */
+export async function retryFailedCommands(ids?: string[]): Promise<RetryFailedResponse> {
+  const res = await api().post<RetryFailedResponse>("/api/admin/retry-failed", ids ? { ids } : {});
+  return res.data;
+}

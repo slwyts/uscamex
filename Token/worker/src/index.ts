@@ -9,7 +9,10 @@ import { BscRpcClient } from "./rpc";
 export { OperatorDO } from "./do";
 
 function operatorStub(env: Env): DurableObjectStub {
-  return env.OPERATOR.get(env.OPERATOR.idFromName("operator"));
+  // DO instance is keyed by the token address so deploying a fresh contract
+  // starts from clean DO state (state/journal/slots) instead of inheriting the
+  // previous contract's accounting.
+  return env.OPERATOR.get(env.OPERATOR.idFromName(`operator:${env.TOKEN_ADDRESS.toLowerCase()}`));
 }
 
 // owner() + chain head caches (admin_api.rs: owner 300s, head 10s)

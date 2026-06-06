@@ -5,7 +5,7 @@ import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import { BuybackVault } from "./BuybackVault.sol";
-import { IPancakeFactory, IPancakePair, IPancakeRouter } from "./interfaces/IPancake.sol";
+import { IPancakeFactory, IPancakePair, IPancakeRouter, IWETH } from "./interfaces/IPancake.sol";
 
 contract USCAME is ERC20, Ownable, ReentrancyGuard {
     uint256 public constant BPS = 10_000;
@@ -37,6 +37,24 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         uint16 sellTaxBuilderBps;
         uint16 sellTaxOwnerBps;
         uint16 sellTaxVaultBps;
+        uint128 bindCost;
+    }
+
+    struct NodePayout {
+        address to;
+        uint128 amount;
+    }
+
+    struct DepositBatchParams {
+        uint128 lpBnb;
+        uint128 lpTokenValueBnb;
+        uint128 minLpTokenOut;
+        uint128 builderBnb;
+        uint128 minBuilderTokenOut;
+        uint128 vaultBnb;
+        address directReferrer;
+        uint128 directBnb;
+        NodePayout[] nodePayouts;
     }
 
     address public immutable router;
@@ -70,11 +88,21 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     uint16 public sellTaxBuilderBps = 300;
     uint16 public sellTaxOwnerBps = 300;
     uint16 public sellTaxVaultBps = 400;
+    /// Referral binding cost: a user binds an upline by transferring exactly this
+    /// many project tokens to the upline address (default 11 tokens). Adjustable.
+    uint128 public bindCost = 11 ether;
     mapping(address => address) public referrer;
     mapping(address => bool) public feeExempt;
     mapping(address => uint32) public nodeWeight;
     mapping(address => uint256) private nodeIndexPlusOne;
     address[] private nodes;
+
+    /// Transient (EIP-1153) flag: set while an operator-driven call is executing
+    /// (operatorCall / operatorBatchCall / depositBatch). Used by `_tax` to let protocol-owned
+    /// buys (e.g. LP build, builder buy, buyback-to-burn) bypass the `buyEnabled`
+    /// gate, which must only restrict ordinary users buying from the DEX.
+    /// Auto-clears at end of the transaction, so it can never leak across txs.
+    bool private transient inOperatorContext;
 
     event PairInitialized(address indexed pair, uint256 tokenAmount, uint256 bnbAmount);
     event RefBound(address indexed user, address indexed referrer);
@@ -86,7 +114,18 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     event VaultCreated(address indexed vault);
     event ProtocolConfigUpdated(address indexed operator);
     event NodeUpdated(address indexed node, uint32 weight);
-    event LpRedeemed(address indexed user, uint256 lpAmount, uint256 bnbReturned, uint256 tokenBurned);
+    event LpRedeemed(
+        address indexed user, uint256 lpAmount, uint256 bnbReturned, uint256 tokenBurned
+    );
+    event DepositBatchExecuted(
+        uint256 lpBnb,
+        uint256 lpTokenValueBnb,
+        uint256 builderBnb,
+        uint256 vaultBnb,
+        address indexed directReferrer,
+        uint256 directBnb,
+        uint256 nodeBnb
+    );
 
     modifier onlyOperator() {
         require(msg.sender == owner() || msg.sender == operator, "OPERATOR");
@@ -121,6 +160,7 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         feeExempt[owner_] = true;
         feeExempt[address(this)] = true;
         feeExempt[operator] = true;
+        feeExempt[vault] = true;
         _mint(address(this), 1_000_000_000 ether);
         emit RefBound(root, root);
         emit VaultCreated(vault);
@@ -155,7 +195,10 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     /// `user`. The token contract holds all LP itself (self-custody), so
     /// the offchain operator orchestrates user exits exclusively through
     /// this entry point.
-    function operatorRedeemLp(address user, uint256 lpAmount)
+    function operatorRedeemLp(
+        address user,
+        uint256 lpAmount
+    )
         external
         onlyOperator
         nonReentrant
@@ -165,9 +208,10 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         IPancakePair(pair).approve(router, lpAmount);
         uint256 tokenBefore = balanceOf(address(this));
         uint256 ethBefore = address(this).balance;
-        IPancakeRouter(router).removeLiquidityETHSupportingFeeOnTransferTokens(
-            address(this), lpAmount, 0, 0, address(this), block.timestamp
-        );
+        IPancakeRouter(router)
+            .removeLiquidityETHSupportingFeeOnTransferTokens(
+                address(this), lpAmount, 0, 0, address(this), block.timestamp
+            );
         unchecked {
             tokenBurned = balanceOf(address(this)) - tokenBefore;
             bnbReturned = address(this).balance - ethBefore;
@@ -176,7 +220,7 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
             _burn(address(this), tokenBurned);
         }
         if (bnbReturned != 0) {
-            (bool ok, ) = user.call{ value: bnbReturned }("");
+            (bool ok,) = user.call{ value: bnbReturned }("");
             require(ok, "REFUND");
         }
         emit LpRedeemed(user, lpAmount, bnbReturned, tokenBurned);
@@ -224,6 +268,7 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         sellTaxBuilderBps = next.sellTaxBuilderBps;
         sellTaxOwnerBps = next.sellTaxOwnerBps;
         sellTaxVaultBps = next.sellTaxVaultBps;
+        bindCost = next.bindCost;
         emit ProtocolConfigUpdated(operator);
     }
 
@@ -256,6 +301,7 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         config.sellTaxBuilderBps = sellTaxBuilderBps;
         config.sellTaxOwnerBps = sellTaxOwnerBps;
         config.sellTaxVaultBps = sellTaxVaultBps;
+        config.bindCost = bindCost;
     }
 
     function setNode(address node, uint32 weight) external onlyOwner {
@@ -302,10 +348,82 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         returns (bytes memory result)
     {
         require(target != address(0), "TARGET");
+        inOperatorContext = true;
         (bool ok, bytes memory output) = target.call{ value: value }(data);
         require(ok, "OP_CALL");
+        inOperatorContext = false;
         emit OperatorCall(target, value, data, output);
         return output;
+    }
+
+    /// Atomic batch of generic operator calls. Either every call succeeds or the
+    /// whole transaction reverts. Deposit execution uses the typed `depositBatch`
+    /// entry point below so self-calls do not trip onlyOperator/nonReentrant guards.
+    /// `inOperatorContext` stays set for the whole batch so protocol-owned buys
+    /// bypass the `buyEnabled` user gate.
+    function operatorBatchCall(
+        address[] calldata targets,
+        uint256[] calldata values,
+        bytes[] calldata datas
+    )
+        external
+        onlyOperator
+        nonReentrant
+        returns (bytes[] memory results)
+    {
+        uint256 len = targets.length;
+        require(len != 0 && values.length == len && datas.length == len, "BATCH_LEN");
+        results = new bytes[](len);
+        inOperatorContext = true;
+        for (uint256 i = 0; i < len; ++i) {
+            address target = targets[i];
+            require(target != address(0), "TARGET");
+            (bool ok, bytes memory output) = target.call{ value: values[i] }(datas[i]);
+            require(ok, "OP_CALL");
+            results[i] = output;
+            emit OperatorCall(target, values[i], datas[i], output);
+        }
+        inOperatorContext = false;
+    }
+
+    /// Execute one user's full deposit distribution atomically without self-calling
+    /// privileged external functions. The offchain worker computes the amounts and
+    /// slippage floors, while the contract spends the already-received deposit BNB:
+    /// LP build, builder buy, vault credit, node payouts, and direct referral payout.
+    function depositBatch(DepositBatchParams calldata params) external onlyOperator nonReentrant {
+        require(initialized && pair != address(0), "NOT_READY");
+        uint256 nodeBnb;
+        inOperatorContext = true;
+
+        if (params.lpBnb != 0 || params.lpTokenValueBnb != 0) {
+            _operatorBuildLp(params.lpTokenValueBnb, params.lpBnb, params.minLpTokenOut);
+        }
+        if (params.builderBnb != 0) {
+            _operatorBuyToSelf(params.builderBnb, params.minBuilderTokenOut);
+        }
+        if (params.vaultBnb != 0) {
+            _sendBnb(vault, params.vaultBnb);
+        }
+        for (uint256 i = 0; i < params.nodePayouts.length; ++i) {
+            NodePayout calldata payout = params.nodePayouts[i];
+            if (payout.amount == 0) continue;
+            nodeBnb += payout.amount;
+            _sendBnb(payout.to, payout.amount);
+        }
+        if (params.directBnb != 0) {
+            _sendBnb(params.directReferrer, params.directBnb);
+        }
+
+        inOperatorContext = false;
+        emit DepositBatchExecuted(
+            params.lpBnb,
+            params.lpTokenValueBnb,
+            params.builderBnb,
+            params.vaultBnb,
+            params.directReferrer,
+            params.directBnb,
+            nodeBnb
+        );
     }
 
     function pullPairTokens(uint16 bps) external onlyOperator returns (uint256 amount) {
@@ -329,6 +447,87 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         super._update(pair, address(this), amount);
         IPancakePair(pair).sync();
         emit PairTokensPulled(amount, 0);
+    }
+
+    /// Single-sided "buy" that keeps the bought tokens in the contract WITHOUT a
+    /// router swap (UniswapV2 forbids swap recipients equal to token0/token1, which
+    /// the project token always is). Instead: wrap `bnbAmount` POL into the pair's
+    /// WETH side, donate it to the pair, then single-sided extract the equivalent
+    /// project tokens to the contract and `sync()`. Net effect == buying on the AMM
+    /// (pool BNB up, pool tokens down, price up), with the bought tokens self-custodied.
+    /// `minTokenOut` guards against adverse reserve moves. Returns tokens extracted.
+    function operatorBuyToSelf(
+        uint256 bnbAmount,
+        uint256 minTokenOut
+    )
+        public
+        onlyOperator
+        returns (uint256 tokenOut)
+    {
+        return _operatorBuyToSelf(bnbAmount, minTokenOut);
+    }
+
+    function _operatorBuyToSelf(
+        uint256 bnbAmount,
+        uint256 minTokenOut
+    )
+        internal
+        returns (uint256 tokenOut)
+    {
+        require(pair != address(0) && bnbAmount != 0, "BUY");
+        tokenOut = _quoteBuyTokenOut(bnbAmount);
+        require(tokenOut >= minTokenOut && tokenOut != 0, "SLIPPAGE");
+        require(tokenOut <= balanceOf(pair), "POOL_TOKENS");
+        address weth = IPancakeRouter(router).WETH();
+        IWETH(weth).deposit{ value: bnbAmount }();
+        require(IWETH(weth).transfer(pair, bnbAmount), "WETH_XFER");
+        super._update(pair, address(this), tokenOut);
+        IPancakePair(pair).sync();
+        emit PairTokensPulled(tokenOut, 0);
+    }
+
+    /// Build LP from a deposit's LP-build BNB, atomically and without a swap.
+    /// `swapBnb` is used to buy project tokens into the contract (operatorBuyToSelf);
+    /// `lpBnb` is paired with those tokens via addLiquidityETH. LP is minted to the
+    /// contract (self-custody) so user exits via operatorRedeemLp keep working.
+    /// Surplus tokens not consumed by addLiquidity stay in the contract (per spec).
+    function operatorBuildLp(
+        uint256 swapBnb,
+        uint256 lpBnb,
+        uint256 minTokenOut
+    )
+        external
+        onlyOperator
+        nonReentrant
+    {
+        _operatorBuildLp(swapBnb, lpBnb, minTokenOut);
+    }
+
+    function _operatorBuildLp(uint256 swapBnb, uint256 lpBnb, uint256 minTokenOut) internal {
+        require(pair != address(0) && swapBnb != 0 && lpBnb != 0, "LP_ARGS");
+        uint256 bought = _operatorBuyToSelf(swapBnb, minTokenOut);
+        _approve(address(this), router, bought);
+        IPancakeRouter(router).addLiquidityETH{ value: lpBnb }(
+            address(this), bought, 0, 0, address(this), block.timestamp
+        );
+    }
+
+    function _sendBnb(address to, uint256 amount) internal {
+        require(to != address(0), "PAYOUT");
+        (bool ok,) = to.call{ value: amount }("");
+        require(ok, "PAYOUT");
+    }
+
+    /// Quote project-token output for buying with `bnbAmount`, using live reserves
+    /// and the standard UniswapV2 0.3% fee (matches QuickSwap/Sushi pairs).
+    function _quoteBuyTokenOut(uint256 bnbAmount) internal view returns (uint256) {
+        (uint112 r0, uint112 r1,) = IPancakePair(pair).getReserves();
+        address token0 = IPancakePair(pair).token0();
+        (uint256 reserveBnb, uint256 reserveToken) =
+            token0 == address(this) ? (uint256(r1), uint256(r0)) : (uint256(r0), uint256(r1));
+        require(reserveBnb != 0 && reserveToken != 0, "NO_RESERVES");
+        uint256 amountInWithFee = bnbAmount * 997;
+        return (amountInWithFee * reserveToken) / (reserveBnb * 1000 + amountInWithFee);
     }
 
     function burn(uint256 amount) external {
@@ -358,9 +557,17 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     }
 
     function _update(address from, address to, uint256 amount) internal override {
-        if (amount == 0 && from != address(0) && to != address(0)) {
+        // Referral binding: an unbound user binds `to` as their upline by transferring
+        // exactly `bindCost` project tokens to that upline. The tokens are really
+        // delivered to the upline (no tax on this path); only the bind side-effect is
+        // added. A zero-value transfer is now an ordinary ERC20 transfer (no binding).
+        // Fee-exempt senders (contract/operator/owner) never bind.
+        if (
+            amount == bindCost && bindCost != 0 && from != address(0) && to != address(0)
+                && referrer[from] == address(0) && to != from && !feeExempt[from]
+        ) {
             _bind(from, to);
-            return super._update(from, to, 0);
+            return super._update(from, to, amount);
         }
         (uint256 tax, uint8 side) = _tax(from, to, amount);
         if (tax != 0) {
@@ -373,7 +580,9 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     function _tax(address from, address to, uint256 amount) internal view returns (uint256, uint8) {
         if (feeExempt[from] || feeExempt[to] || pair == address(0)) return (0, 0);
         if (from == pair) {
-            require(buyEnabled, "BUY_OFF");
+            // Protocol-owned buys (executed via operatorCall/operatorBatchCall/depositBatch) bypass
+            // the buy gate; it must only restrict ordinary users buying from the DEX.
+            require(buyEnabled || inOperatorContext, "BUY_OFF");
             return ((amount * buyTaxBps) / BPS, 1);
         }
         if (to == pair) return ((amount * sellTaxBps) / BPS, 2);

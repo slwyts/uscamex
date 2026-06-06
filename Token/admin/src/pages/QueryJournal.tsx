@@ -1,8 +1,14 @@
 import { useState } from "react";
-import { Card, Table, Tag, Space, Select, Statistic, Row, Col, Button, Tooltip, App } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Space, Select, Statistic, Row, Col, Button, Tooltip, App, Popconfirm } from "antd";
+import { ReloadOutlined, RedoOutlined } from "@ant-design/icons";
 import { useQuery } from "@tanstack/react-query";
-import { api, apiErrorMessage, type JournalListResponse, type JournalEntry } from "../utils/api";
+import {
+  api,
+  apiErrorMessage,
+  retryFailedCommands,
+  type JournalListResponse,
+  type JournalEntry,
+} from "../utils/api";
 import OwnerGate from "../components/OwnerGate";
 
 const STATUS_OPTIONS = [
@@ -22,6 +28,10 @@ const STATUS_COLOR: Record<string, string> = {
 
 // 业务类型（journal kind）中文映射。命名沿用 origin.md 规格术语。
 const KIND_LABEL: Record<string, { text: string; tip: string }> = {
+  "deposit-batch": {
+    text: "入金分配（原子）",
+    tip: "一笔入金的完整分配（组建 LP + 联合建设者买入 + 回购仓库注资 + 节点分红 + 直推奖励）在单笔原子交易中执行，要么全部成功要么整体回滚，杜绝部分执行与重复打款。",
+  },
   "add-liquidity": {
     text: "组建 LP",
     tip: "入金 60% 用于组建流动性：先用一半 BNB 买入项目代币，再与剩余 BNB 一同注入 LP 底池。",
@@ -100,6 +110,7 @@ function JournalPanel() {
   const [status, setStatus] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  const [retrying, setRetrying] = useState(false);
   const query = useQuery({
     queryKey: ["journal-list", status, page, pageSize],
     queryFn: async () =>
@@ -111,6 +122,25 @@ function JournalPanel() {
     refetchInterval: 15_000,
   });
   if (query.error) message.error(apiErrorMessage(query.error));
+
+  const failedCount = query.data?.counts.failed ?? 0;
+  const handleRetry = async () => {
+    setRetrying(true);
+    try {
+      const res = await retryFailedCommands();
+      if (res.retried === 0) {
+        message.info("没有需要重试的失败命令");
+      } else {
+        message.success(`已重新入队 ${res.retried} 条命令，本次提交成功 ${res.tx_hashes.length} 笔`);
+      }
+      await query.refetch();
+    } catch (err) {
+      message.error(apiErrorMessage(err));
+    } finally {
+      setRetrying(false);
+    }
+  };
+
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       {query.data && (
@@ -134,9 +164,29 @@ function JournalPanel() {
       <Card
         title="链下执行流水"
         extra={
-          <Button size="small" icon={<ReloadOutlined />} loading={query.isFetching} onClick={() => query.refetch()}>
-            刷新
-          </Button>
+          <Space>
+            <Popconfirm
+              title="重试全部失败命令"
+              description={`将把 ${failedCount} 条失败命令的尝试次数清零并立即重新提交。请确认链上前置条件（如买入开放）已满足。`}
+              okText="确认重试"
+              cancelText="取消"
+              disabled={failedCount === 0}
+              onConfirm={handleRetry}
+            >
+              <Button
+                size="small"
+                danger
+                icon={<RedoOutlined />}
+                loading={retrying}
+                disabled={failedCount === 0}
+              >
+                重试失败命令{failedCount > 0 ? `（${failedCount}）` : ""}
+              </Button>
+            </Popconfirm>
+            <Button size="small" icon={<ReloadOutlined />} loading={query.isFetching} onClick={() => query.refetch()}>
+              刷新
+            </Button>
+          </Space>
         }
       >
         <Space style={{ marginBottom: 12 }}>

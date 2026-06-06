@@ -98,6 +98,10 @@ const ABI = {
   owner: parseAbiItem("function owner() view returns (address)"),
 } as const;
 
+const ABI_DEPOSIT_BATCH = parseAbiItem(
+  "function depositBatch((uint128 lpBnb,uint128 lpTokenValueBnb,uint128 minLpTokenOut,uint128 builderBnb,uint128 minBuilderTokenOut,uint128 vaultBnb,address directReferrer,uint128 directBnb,(address to,uint128 amount)[] nodePayouts) params)",
+);
+
 const SELECTORS = {
   pair: toFunctionSelector("function pair() view returns (address)"),
   token0: toFunctionSelector("function token0() view returns (address)"),
@@ -358,6 +362,90 @@ export class BscTransactionClient {
     return `${buyHashes},${approveHash},${liquidityHash}`;
   }
 
+  private async submitDepositBatch(b: {
+    lpBnb: bigint;
+    lpTokenValueBnb: bigint;
+    builderBnb: bigint;
+    vaultBnb: bigint;
+    directReferrer: string | null;
+    directBnb: bigint;
+    nodePayouts: { to: string; amount: bigint }[];
+  }): Promise<string> {
+    await this.detectFee();
+    const reserves = await this.pairReserves();
+    let projectedReserves = reserves;
+    let minLpTokenOut = 0n;
+    if (this.lpAmountsValid(b.lpBnb, b.lpTokenValueBnb)) {
+      const buyOut = v2AmountOut(b.lpTokenValueBnb, reserves.bnbReserve, reserves.tokenReserve, this.feeBps);
+      minLpTokenOut = applySlippage(buyOut, this.ctx.slippageBps);
+      if (minLpTokenOut === 0n) throw new ChainError("InvalidAmount");
+
+      const postBuy = {
+        bnbReserve: reserves.bnbReserve + b.lpTokenValueBnb,
+        tokenReserve: reserves.tokenReserve - buyOut,
+      };
+      const tokenForLp = quoteTokenAmount(b.lpBnb, postBuy);
+      const tokenConsumed = tokenForLp < buyOut ? tokenForLp : buyOut;
+      projectedReserves = {
+        bnbReserve: postBuy.bnbReserve + b.lpBnb,
+        tokenReserve: postBuy.tokenReserve + tokenConsumed,
+      };
+    }
+
+    let minBuilderTokenOut = 0n;
+    if (b.builderBnb !== 0n) {
+      const builderOut = v2AmountOut(
+        b.builderBnb,
+        projectedReserves.bnbReserve,
+        projectedReserves.tokenReserve,
+        this.feeBps,
+      );
+      minBuilderTokenOut = applySlippage(builderOut, this.ctx.slippageBps);
+      if (minBuilderTokenOut === 0n) throw new ChainError("InvalidAmount");
+    }
+
+    const nodePayouts = b.nodePayouts
+      .filter((payout) => payout.amount !== 0n)
+      .map((payout) => ({ to: normalizeAddress(payout.to), amount: u256ToU128(payout.amount) }));
+    const directReferrer =
+      b.directReferrer != null && b.directBnb !== 0n
+        ? normalizeAddress(b.directReferrer)
+        : "0x0000000000000000000000000000000000000000";
+    const hasWork =
+      b.lpBnb !== 0n ||
+      b.lpTokenValueBnb !== 0n ||
+      b.builderBnb !== 0n ||
+      b.vaultBnb !== 0n ||
+      b.directBnb !== 0n ||
+      nodePayouts.length !== 0;
+    if (!hasWork) throw new ChainError("InvalidAmount");
+
+    const data = encodeFunctionData({
+      abi: [ABI_DEPOSIT_BATCH],
+      functionName: "depositBatch",
+      args: [
+        {
+          lpBnb: u256ToU128(b.lpBnb),
+          lpTokenValueBnb: u256ToU128(b.lpTokenValueBnb),
+          minLpTokenOut,
+          builderBnb: u256ToU128(b.builderBnb),
+          minBuilderTokenOut,
+          vaultBnb: u256ToU128(b.vaultBnb),
+          directReferrer,
+          directBnb: u256ToU128(b.directBnb),
+          nodePayouts,
+        },
+      ],
+    });
+    return this.submitEvmCall({ target: this.token, value: 0n, data });
+  }
+
+  private lpAmountsValid(lpBnb: bigint, lpTokenValueBnb: bigint): boolean {
+    if (lpBnb === 0n && lpTokenValueBnb === 0n) return false;
+    if (lpBnb === 0n || lpTokenValueBnb === 0n) throw new ChainError("InvalidAmount");
+    return true;
+  }
+
   private async submitBuyback(bnbAmount: bigint): Promise<string> {
     await this.detectFee();
     const reserves = await this.pairReserves();
@@ -535,6 +623,16 @@ export class BscTransactionClient {
       case "CreditVault":
       case "PullPairTokens":
         return this.submitEvmCall(this.encodeCommandCall(command));
+      case "DepositBatch":
+        return this.submitDepositBatch({
+          lpBnb: command.lpBnb,
+          lpTokenValueBnb: command.lpTokenValueBnb,
+          builderBnb: command.builderBnb,
+          vaultBnb: command.vaultBnb,
+          directReferrer: command.directReferrer,
+          directBnb: command.directBnb,
+          nodePayouts: command.nodePayouts,
+        });
     }
   }
 }

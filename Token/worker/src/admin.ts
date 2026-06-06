@@ -18,7 +18,8 @@ export interface AdminContext {
 }
 
 function operatorStub(env: Env): DurableObjectStub {
-  return env.OPERATOR.get(env.OPERATOR.idFromName("operator"));
+  // Keyed by token address (see index.ts) so a fresh contract gets a fresh DO.
+  return env.OPERATOR.get(env.OPERATOR.idFromName(`operator:${env.TOKEN_ADDRESS.toLowerCase()}`));
 }
 
 function json(data: unknown, status = 200): Response {
@@ -92,7 +93,7 @@ export async function handleAdmin(req: Request, ctx: AdminContext): Promise<Resp
     return new Response(null, {
       headers: {
         "access-control-allow-origin": "*",
-        "access-control-allow-methods": "GET,OPTIONS",
+        "access-control-allow-methods": "GET,POST,OPTIONS",
         "access-control-allow-headers": "*",
       },
     });
@@ -176,6 +177,19 @@ export async function handleAdmin(req: Request, ctx: AdminContext): Promise<Resp
       const status = url.searchParams.get("status") || "all";
       // @ts-expect-error DO RPC
       return json({ signer, ...(await stub.queryJournalList(limit, offset, status)) });
+    }
+    case "/api/admin/retry-failed": {
+      if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+      if (signer === "bypass") return json({ error: "owner signature required" }, 403);
+      let ids: string[] | undefined;
+      try {
+        const body = (await req.json().catch(() => ({}))) as { ids?: unknown };
+        if (Array.isArray(body.ids)) ids = body.ids.filter((x): x is string => typeof x === "string");
+      } catch {
+        // empty/invalid body => retry all failed commands
+      }
+      // @ts-expect-error DO RPC
+      return json({ signer, ...(await stub.retryFailedCommands(ids)) });
     }
     case "/api/admin/config-history": {
       const limit = intParam(url, "limit", 50, 200);

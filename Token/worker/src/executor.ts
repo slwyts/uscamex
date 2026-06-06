@@ -15,6 +15,17 @@ export type OperatorCommand =
   | { kind: "ExitPosition"; user: string; refundBnb: bigint }
   | { kind: "RedeemUserLp"; user: string; lpBnbShare: bigint; totalActivePrincipal: bigint }
   | {
+      kind: "DepositBatch";
+      user: string;
+      lpBnb: bigint;
+      lpTokenValueBnb: bigint;
+      builderBnb: bigint;
+      vaultBnb: bigint;
+      directReferrer: string | null;
+      directBnb: bigint;
+      nodePayouts: { to: string; amount: bigint }[];
+    }
+  | {
       kind: "SweepTaxToBnb";
       taxTokenAmount: bigint;
       builderTokenAmount: bigint;
@@ -48,22 +59,33 @@ export function commandKind(c: OperatorCommand): string {
       return "redeem-user-lp";
     case "SweepTaxToBnb":
       return "sweep-tax-to-bnb";
+    case "DepositBatch":
+      return "deposit-batch";
   }
 }
 
 /** executor.rs:89 */
 export function commandsForDeposit(a: DepositAllocation): OperatorCommand[] {
+  // The full deposit distribution (LP build + builder buy + vault credit + node
+  // payouts + direct referral) is executed as ONE typed on-chain depositBatch.
+  // All-or-nothing: a partial failure reverts the whole tx, so native assets are
+  // never half-spent and retries stay idempotent.
   const commands: OperatorCommand[] = [
-    { kind: "AddLiquidity", bnbAmount: a.lpBnb, tokenValueBnb: a.lpTokenValueBnb },
-    { kind: "BuilderBuy", bnbAmount: a.builderBnb },
-    { kind: "CreditVault", amount: a.vaultBnb },
+    {
+      kind: "DepositBatch",
+      user: a.user,
+      lpBnb: a.lpBnb,
+      lpTokenValueBnb: a.lpTokenValueBnb,
+      builderBnb: a.builderBnb,
+      vaultBnb: a.vaultBnb,
+      directReferrer: a.directReferrer != null && a.directBnb !== 0n ? a.directReferrer : null,
+      directBnb: a.directReferrer != null && a.directBnb !== 0n ? a.directBnb : 0n,
+      nodePayouts: a.nodePayouts.map((p) => ({ to: p.to, amount: p.amount })),
+    },
   ];
-  for (const payout of a.nodePayouts) {
-    commands.push({ kind: "TransferBnb", to: payout.to, amount: payout.amount, reason: payout.reason });
-  }
-  if (a.directReferrer != null && a.directBnb !== 0n) {
-    commands.push({ kind: "TransferBnb", to: a.directReferrer, amount: a.directBnb, reason: "direct-referral" });
-  }
+  // LP redemptions triggered by this deposit (referrer cap exits) stay as separate
+  // commands: they are independent of the deposit's BNB allocation and operate on
+  // existing LP custody, so they don't need to be inside the deposit batch.
   for (const redeem of a.lpRedeems) {
     commands.push({
       kind: "RedeemUserLp",

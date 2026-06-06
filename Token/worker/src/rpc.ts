@@ -190,6 +190,7 @@ export class BscRpcClient {
       sellTaxBuilderBps: parseNumWord(out, 32, U16),
       sellTaxOwnerBps: parseNumWord(out, 33, U16),
       sellTaxVaultBps: parseNumWord(out, 34, U16),
+      bindCost: parseU128Word(out, 35),
     };
     try {
       validateConfig(config);

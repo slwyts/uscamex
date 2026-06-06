@@ -38,6 +38,8 @@ export interface ProtocolConfig {
   sellTaxBuilderBps: number;
   sellTaxOwnerBps: number;
   sellTaxVaultBps: number;
+
+  bindCost: bigint; // referral binding cost in project tokens (wei)
 }
 
 export function defaultProtocolConfig(): ProtocolConfig {
@@ -66,6 +68,7 @@ export function defaultProtocolConfig(): ProtocolConfig {
     sellTaxBuilderBps: 300,
     sellTaxOwnerBps: 300,
     sellTaxVaultBps: 400,
+    bindCost: 11n * BNB,
   };
 }
 

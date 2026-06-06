@@ -405,6 +405,7 @@ export class OperatorDO extends DurableObject<Env> {
       totalDynamic += u.dynamicPaidBnb;
     }
     const counts = this.statusCounts();
+    const lastBlock = await new D1Storage(this.env.DB).lastIndexedBlock();
     return {
       chain_id: this.settings.chainId,
       token_address: this.settings.tokenAddress,
@@ -427,7 +428,7 @@ export class OperatorDO extends DurableObject<Env> {
       builder_token_amount: this.state.balances.builderTokenAmount.toString(),
       pair_token_reserve: this.state.pair.tokenReserve.toString(),
       pair_bnb_reserve: this.state.pair.bnbReserve.toString(),
-      last_indexed_block: null,
+      last_indexed_block: lastBlock ? Number(lastBlock.number) : null,
       processed_events: this.state.processedEvents.size,
       processed_settlements: this.state.processedSettlements.size,
       pending_commands: counts.pending,
@@ -611,6 +612,38 @@ export class OperatorDO extends DurableObject<Env> {
       payload: serializeCommandForApi(r.command),
     }));
     return { total, limit, offset, items, counts };
+  }
+
+  /**
+   * Manually re-arm Failed commands and submit them immediately.
+   * Unlike the automatic retryFailed (which is capped at MAX_ATTEMPTS), this resets the
+   * attempt counter to 0 so commands that exhausted their retries (e.g. while buying was
+   * disabled on-chain) can be driven again once the underlying condition is fixed.
+   * Pass specific ids to retry a subset; omit to retry every Failed command.
+   */
+  async retryFailedCommands(ids?: string[]): Promise<{ retried: number; tx_hashes: string[] }> {
+    const want = ids && ids.length > 0 ? new Set(ids) : null;
+    let retried = 0;
+    for (const r of this.journal.records.values()) {
+      if (r.status.state !== "Failed") continue;
+      if (want && !want.has(r.id)) continue;
+      r.attempts = 0;
+      r.status = { state: "Pending" };
+      retried += 1;
+    }
+    if (retried === 0) return { retried: 0, tx_hashes: [] };
+
+    await this.persist();
+    const cache = new EventCache(this.state.processedEvents);
+    const service = this.newService(cache);
+    let txHashes: string[] = [];
+    try {
+      txHashes = await service.submitPending();
+    } catch (err) {
+      console.error("retryFailedCommands submit failed:", err);
+    }
+    await this.persist();
+    return { retried, tx_hashes: txHashes };
   }
 }
 

@@ -34,7 +34,7 @@ export class OperatorService {
     public engine: Engine,
     public state: ProtocolState,
     public journal: ExecutionJournal,
-    public eventCache: EventCache,
+    public eventCache: ServiceDatabase,
     public chain: ChainClient,
     private onPersist?: () => Promise<void>,
   ) {}
@@ -42,7 +42,7 @@ export class OperatorService {
   /** service.rs:62 */
   processEvent(indexed: IndexedEvent): EventOutcome {
     const eventId = indexed.event.id;
-    if (this.database.containsEvent(eventId) || this.state.processedEvents.has(eventId)) {
+    if (this.eventCache.containsEvent(eventId) || this.state.processedEvents.has(eventId)) {
       return { kind: "Duplicate" };
     }
 
@@ -76,7 +76,7 @@ export class OperatorService {
     }
 
     this.state.processedEvents.add(eventId);
-    this.database.insertEvent(indexed);
+    this.eventCache.insertEvent(indexed);
     return { kind: "Applied", plannedCommands };
   }
 

@@ -46,4 +46,36 @@ describe("journal idempotency", () => {
       expect(typeof add.bnbAmount).toBe("bigint");
     }
   });
+
+  it("round-trips DepositBatch with nested bigint payouts", () => {
+    const journal = new ExecutionJournal();
+    journal.planBatch("deposit:tx10:0", [
+      {
+        kind: "DepositBatch",
+        user: "0xuser",
+        lpBnb: 3n * 10n ** 17n,
+        lpTokenValueBnb: 3n * 10n ** 17n,
+        builderBnb: 10n ** 17n,
+        vaultBnb: 10n ** 17n,
+        directReferrer: "0xref",
+        directBnb: 10n ** 17n,
+        nodePayouts: [
+          { to: "0xnode1", amount: 5n * 10n ** 16n },
+          { to: "0xnode2", amount: 5n * 10n ** 16n },
+        ],
+      },
+    ]);
+    const restored = ExecutionJournal.fromJSON(journal.toJSON() as never);
+    const [, cmd] = restored.pendingCommands()[0];
+    expect(cmd.kind).toBe("DepositBatch");
+    if (cmd.kind === "DepositBatch") {
+      expect(cmd.lpBnb).toBe(3n * 10n ** 17n);
+      expect(typeof cmd.lpBnb).toBe("bigint");
+      expect(cmd.directReferrer).toBe("0xref");
+      expect(cmd.nodePayouts.length).toBe(2);
+      expect(cmd.nodePayouts[0].amount).toBe(5n * 10n ** 16n);
+      expect(typeof cmd.nodePayouts[0].amount).toBe("bigint");
+      expect(cmd.nodePayouts[1].to).toBe("0xnode2");
+    }
+  });
 });
