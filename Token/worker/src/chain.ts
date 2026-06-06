@@ -5,7 +5,7 @@
  * Invariant from the Rust original: every tx is sent with tx.value = 0. BNB movement is always
  * an argument to operatorCall(...)/execute(...), forwarded internally by the token/vault contract.
  */
-import { encodeFunctionData, parseAbiItem, toFunctionSelector, type Hex } from "viem";
+import { encodeFunctionData, keccak256, parseAbiItem, toFunctionSelector, toHex, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import type { OperatorCommand } from "./executor";
 
@@ -17,6 +17,10 @@ export const GAS_LIMIT = 600_000n;
 const RECEIPT_POLL_INTERVAL_MS = 2_000;
 const RECEIPT_POLL_LIMIT = 60;
 const U128_MAX = (1n << 128n) - 1n;
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
+const DEPOSIT_BATCH_EXECUTED_TOPIC = keccak256(
+  toHex("DepositBatchExecuted(uint256,uint256,uint256,uint256,address,uint256,uint256)"),
+);
 
 export interface ChainExecutionContext {
   tokenAddress: string;
@@ -77,9 +81,22 @@ interface EvmCall {
   data: Hex;
 }
 
+interface RpcReceiptJson {
+  status: string;
+  blockNumber: string;
+}
+
+interface RpcLogJson {
+  transactionHash: string;
+  topics: string[];
+  data: string;
+  removed?: boolean;
+}
+
 // ABI item definitions for encodeFunctionData
 const ABI = {
   operatorCall: parseAbiItem("function operatorCall(address target, uint256 value, bytes data)"),
+  operatorBatchCall: parseAbiItem("function operatorBatchCall(address[] targets, uint256[] values, bytes[] datas)"),
   approve: parseAbiItem("function approve(address spender, uint256 amount)"),
   transfer: parseAbiItem("function transfer(address to, uint256 amount)"),
   burn: parseAbiItem("function burn(uint256 amount)"),
@@ -209,6 +226,11 @@ export class BscTransactionClient {
     return normalizeAddress(`0x${hex.slice(24, 64)}`);
   }
 
+  private parseTopicAddress(topic: string): Hex {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(topic)) throw new ChainError("InvalidHex");
+    return normalizeAddress(`0x${topic.slice(26)}`);
+  }
+
   private async pairAddress(): Promise<Hex> {
     const pair = this.parseAddressWord(await this.ethCall(this.token, SELECTORS.pair));
     if (pair === "0x0000000000000000000000000000000000000000") {
@@ -255,6 +277,17 @@ export class BscTransactionClient {
       abi: [ABI.operatorCall],
       functionName: "operatorCall",
       args: [normalizeAddress(target), value, data],
+    });
+  }
+
+  private encodeOperatorBatchCall(targets: string[], values: bigint[], datas: Hex[]): Hex {
+    if (targets.length === 0 || targets.length !== values.length || targets.length !== datas.length) {
+      throw new ChainError("InvalidBatch");
+    }
+    return encodeFunctionData({
+      abi: [ABI.operatorBatchCall],
+      functionName: "operatorBatchCall",
+      args: [targets.map(normalizeAddress), values, datas],
     });
   }
 
@@ -440,6 +473,66 @@ export class BscTransactionClient {
     return this.submitEvmCall({ target: this.token, value: 0n, data });
   }
 
+  async findConfirmedCommand(id: string, command: OperatorCommand): Promise<string | null> {
+    if (command.kind !== "DepositBatch") return null;
+    return this.findConfirmedDepositBatch(id, command);
+  }
+
+  private async findConfirmedDepositBatch(
+    id: string,
+    command: Extract<OperatorCommand, { kind: "DepositBatch" }>,
+  ): Promise<string | null> {
+    const depositTxHash = this.depositTxHashFromJournalId(id);
+    if (!depositTxHash) return null;
+    const depositReceipt = await this.rpc<RpcReceiptJson | null>("eth_getTransactionReceipt", [depositTxHash])
+      .catch(() => null);
+    if (!depositReceipt || depositReceipt.status !== "0x1") return null;
+
+    const logs = await this.rpc<RpcLogJson[]>("eth_getLogs", [
+      {
+        address: this.token,
+        fromBlock: depositReceipt.blockNumber,
+        toBlock: "latest",
+        topics: [DEPOSIT_BATCH_EXECUTED_TOPIC],
+      },
+    ]);
+    for (const log of logs) {
+      if (log.removed || !this.depositBatchLogMatches(log, command)) continue;
+      return log.transactionHash.toLowerCase();
+    }
+    return null;
+  }
+
+  private depositTxHashFromJournalId(id: string): Hex | null {
+    const match = /^deposit:(0x[0-9a-fA-F]{64}):\d+:\d+:deposit-batch$/.exec(id);
+    return match ? (match[1].toLowerCase() as Hex) : null;
+  }
+
+  private depositBatchLogMatches(
+    log: RpcLogJson,
+    command: Extract<OperatorCommand, { kind: "DepositBatch" }>,
+  ): boolean {
+    if (log.topics[0]?.toLowerCase() !== DEPOSIT_BATCH_EXECUTED_TOPIC) return false;
+    const directReferrer =
+      command.directReferrer != null && command.directBnb !== 0n
+        ? normalizeAddress(command.directReferrer)
+        : ZERO_ADDRESS;
+    const nodeBnb = command.nodePayouts.reduce((sum, payout) => sum + payout.amount, 0n);
+    try {
+      return (
+        this.parseTopicAddress(log.topics[1]) === directReferrer &&
+        this.parseU128Word(log.data, 0) === command.lpBnb &&
+        this.parseU128Word(log.data, 1) === command.lpTokenValueBnb &&
+        this.parseU128Word(log.data, 2) === command.builderBnb &&
+        this.parseU128Word(log.data, 3) === command.vaultBnb &&
+        this.parseU128Word(log.data, 4) === command.directBnb &&
+        this.parseU128Word(log.data, 5) === nodeBnb
+      );
+    } catch {
+      return false;
+    }
+  }
+
   private lpAmountsValid(lpBnb: bigint, lpTokenValueBnb: bigint): boolean {
     if (lpBnb === 0n && lpTokenValueBnb === 0n) return false;
     if (lpBnb === 0n || lpTokenValueBnb === 0n) throw new ChainError("InvalidAmount");
@@ -499,11 +592,15 @@ export class BscTransactionClient {
       throw new ChainError("InvalidAmount");
     }
     const sellAmount = taxTokenAmount - builderTokenAmount - burnTokenAmount;
-    const hashes: string[] = [];
+    const targets: string[] = [];
+    const values: bigint[] = [];
+    const datas: Hex[] = [];
 
     if (burnTokenAmount !== 0n) {
       const burn = encodeFunctionData({ abi: [ABI.burn], functionName: "burn", args: [burnTokenAmount] });
-      hashes.push(await this.submitOperatorCall(this.token, 0n, burn));
+      targets.push(this.token);
+      values.push(0n);
+      datas.push(burn);
     }
 
     if (sellAmount !== 0n) {
@@ -512,31 +609,45 @@ export class BscTransactionClient {
         functionName: "approve",
         args: [this.router, sellAmount],
       });
-      hashes.push(await this.submitOperatorCall(this.token, 0n, approve));
+      targets.push(this.token);
+      values.push(0n);
+      datas.push(approve);
 
       const reserves = await this.pairReserves();
       const bnbOut = v2AmountOut(sellAmount, reserves.tokenReserve, reserves.bnbReserve, this.feeBps);
       const amountOutMin = applySlippage(bnbOut, this.ctx.slippageBps);
       const weth = await this.wethAddress();
+      const vaultOnly = ownerBnbBpsOfSold === 0 && vaultBnbBpsOfSold === 10_000;
+      const swapRecipient = vaultOnly ? this.vault : this.token;
       const swap = encodeFunctionData({
         abi: [ABI.swapExactTokensForETH],
         functionName: "swapExactTokensForETHSupportingFeeOnTransferTokens",
-        args: [sellAmount, amountOutMin, [this.token, weth], this.token, this.deadline()],
+        args: [sellAmount, amountOutMin, [this.token, weth], swapRecipient, this.deadline()],
       });
-      hashes.push(await this.submitOperatorCall(this.router, 0n, swap));
+      targets.push(this.router);
+      values.push(0n);
+      datas.push(swap);
 
-      const ownerAmt = (bnbOut * BigInt(ownerBnbBpsOfSold)) / BPS_DENOMINATOR;
-      const vaultAmt = (bnbOut * BigInt(vaultBnbBpsOfSold)) / BPS_DENOMINATOR;
-      if (ownerAmt !== 0n) {
-        const fwd = this.encodeOperatorCall(this.ctx.ownerAddress, ownerAmt, "0x");
-        hashes.push(await this.submitOperatorCall(this.token, 0n, fwd));
-      }
-      if (vaultAmt !== 0n) {
-        const fwd = this.encodeOperatorCall(this.vault, vaultAmt, "0x");
-        hashes.push(await this.submitOperatorCall(this.token, 0n, fwd));
+      if (!vaultOnly) {
+        const ownerAmt = (amountOutMin * BigInt(ownerBnbBpsOfSold)) / BPS_DENOMINATOR;
+        const vaultAmt = (amountOutMin * BigInt(vaultBnbBpsOfSold)) / BPS_DENOMINATOR;
+        if (ownerAmt !== 0n) {
+          targets.push(this.ctx.ownerAddress);
+          values.push(ownerAmt);
+          datas.push("0x");
+        }
+        if (vaultAmt !== 0n) {
+          targets.push(this.vault);
+          values.push(vaultAmt);
+          datas.push("0x");
+        }
       }
     }
-    return hashes.join(",");
+    return this.submitEvmCall({
+      target: this.token,
+      value: 0n,
+      data: this.encodeOperatorBatchCall(targets, values, datas),
+    });
   }
 
   private async submitRedeemUserLp(

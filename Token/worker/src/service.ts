@@ -27,6 +27,7 @@ export interface ServiceDatabase {
 /** Chain client interface (BscTransactionClient or a test recorder). */
 export interface ChainClient {
   submit(command: OperatorCommand): Promise<string>;
+  findConfirmedCommand?(id: string, command: OperatorCommand): Promise<string | null>;
 }
 
 export class OperatorService {
@@ -133,10 +134,17 @@ export class OperatorService {
 
   /** service.rs:220 — drain pending; on error stop. Returns tx hashes. */
   async submitPending(): Promise<string[]> {
+    const txHashes = await this.reconcileAlreadyConfirmed();
     this.journal.retryFailed();
-    const txHashes: string[] = [];
     for (const [id, command] of this.journal.pendingCommands()) {
       try {
+        const existingTxHash = await this.chain.findConfirmedCommand?.(id, command);
+        if (existingTxHash) {
+          this.journal.markConfirmed(id, existingTxHash);
+          await this.onPersist?.();
+          txHashes.push(existingTxHash);
+          continue;
+        }
         const txHash = await this.chain.submit(command);
         this.journal.markSubmitted(id, txHash);
         this.journal.markConfirmed(id);
@@ -151,6 +159,25 @@ export class OperatorService {
         } else {
           this.journal.markFailed(id, err);
         }
+      }
+    }
+    return txHashes;
+  }
+
+  private async reconcileAlreadyConfirmed(): Promise<string[]> {
+    if (!this.chain.findConfirmedCommand) return [];
+    const txHashes: string[] = [];
+    for (const [id, record] of this.journal.records.entries()) {
+      if (record.status.state === "Confirmed") continue;
+      if (record.command.kind !== "DepositBatch") continue;
+      try {
+        const txHash = await this.chain.findConfirmedCommand(id, record.command);
+        if (!txHash) continue;
+        this.journal.markConfirmed(id, txHash);
+        await this.onPersist?.();
+        txHashes.push(txHash);
+      } catch (err) {
+        console.error(`reconcileAlreadyConfirmed: ${id} failed: ${err}`);
       }
     }
     return txHashes;

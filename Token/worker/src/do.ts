@@ -257,7 +257,6 @@ export class OperatorDO extends DurableObject<Env> {
   private async syncProtocolConfig(rpc: BscRpcClient): Promise<void> {
     const chainConfig = await rpc.protocolConfig();
     this.engine.config = chainConfig.config;
-    if (!chainConfig.buyEnabled) this.engine.config.buybackEnabled = false;
   }
 
   /**
@@ -317,7 +316,6 @@ export class OperatorDO extends DurableObject<Env> {
           changed += 1;
         }
         this.engine.config = chainConfig.config;
-        if (!chainConfig.buyEnabled) this.engine.config.buybackEnabled = false;
       } else {
         const updatedBy = `chain-event:${event.txHash}`;
         if (

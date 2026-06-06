@@ -60,13 +60,13 @@ export class ExecutionJournal {
     record.status = { state: "Submitted", txHash };
   }
 
-  markConfirmed(id: string): void {
+  markConfirmed(id: string, txHashOverride?: string): void {
     const record = this.records.get(id);
     if (!record) throw new JournalError("MissingCommand");
-    const txHash =
-      record.status.state === "Submitted" || record.status.state === "Confirmed"
-        ? record.status.txHash
-        : "";
+    let txHash = txHashOverride ?? "";
+    if (!txHash && (record.status.state === "Submitted" || record.status.state === "Confirmed")) {
+      txHash = record.status.txHash;
+    }
     record.status = { state: "Confirmed", txHash };
   }
 

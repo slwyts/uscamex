@@ -167,7 +167,7 @@ function JournalPanel() {
           <Space>
             <Popconfirm
               title="重试全部失败命令"
-              description={`将把 ${failedCount} 条失败命令的尝试次数清零并立即重新提交。请确认链上前置条件（如买入开放）已满足。`}
+              description={`将把 ${failedCount} 条失败命令的尝试次数清零并立即重新提交。请确认链上前置条件（如余额、池子流动性）已满足。`}
               okText="确认重试"
               cancelText="取消"
               disabled={failedCount === 0}
