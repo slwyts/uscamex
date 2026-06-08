@@ -71,6 +71,9 @@ function UserExplorer() {
             <Descriptions.Item label="动态产出 BNB">
               {formatBnb(data.summary.dynamic_paid_bnb, 6)}
             </Descriptions.Item>
+            <Descriptions.Item label="平台代持用户LP额">
+              {formatBnb(data.summary.lp_token_principal ?? "0", 6)}
+            </Descriptions.Item>
             <Descriptions.Item label="节点身份">
               {data.summary.is_node ? (
                 <Tag color="gold">节点 · 权重 {data.summary.node_weight}</Tag>

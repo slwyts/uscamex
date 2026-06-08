@@ -19,7 +19,7 @@ const RECEIPT_POLL_LIMIT = 60;
 const U128_MAX = (1n << 128n) - 1n;
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 const DEPOSIT_BATCH_EXECUTED_TOPIC = keccak256(
-  toHex("DepositBatchExecuted(uint256,uint256,uint256,uint256,address,uint256,uint256)"),
+  toHex("DepositBatchExecuted(address,uint256,uint256,uint256,uint256,uint256,address,uint256,uint256)"),
 );
 
 export interface ChainExecutionContext {
@@ -116,7 +116,7 @@ const ABI = {
 } as const;
 
 const ABI_DEPOSIT_BATCH = parseAbiItem(
-  "function depositBatch((uint128 lpBnb,uint128 lpTokenValueBnb,uint128 minLpTokenOut,uint128 builderBnb,uint128 minBuilderTokenOut,uint128 vaultBnb,address directReferrer,uint128 directBnb,(address to,uint128 amount)[] nodePayouts) params)",
+  "function depositBatch((address user,uint128 lpBnb,uint128 lpTokenValueBnb,uint128 minLpTokenOut,uint128 builderBnb,uint128 minBuilderTokenOut,uint128 vaultBnb,address directReferrer,uint128 directBnb,(address to,uint128 amount)[] nodePayouts) params)",
 );
 
 const SELECTORS = {
@@ -126,7 +126,6 @@ const SELECTORS = {
     "function getReserves() view returns (uint112,uint112,uint32)",
   ),
   balanceOf: "function balanceOf(address) view returns (uint256)",
-  totalSupply: toFunctionSelector("function totalSupply() view returns (uint256)"),
   weth: toFunctionSelector("function WETH() view returns (address)"),
 } as const;
 
@@ -257,10 +256,6 @@ export class BscTransactionClient {
       args: [normalizeAddress(account)],
     });
     return this.parseU128Word(await this.ethCall(token, data), 0);
-  }
-
-  private async pairTotalSupply(pair: string): Promise<bigint> {
-    return this.parseU128Word(await this.ethCall(pair, SELECTORS.totalSupply), 0);
   }
 
   private async wethAddress(): Promise<Hex> {
@@ -396,6 +391,7 @@ export class BscTransactionClient {
   }
 
   private async submitDepositBatch(b: {
+    user: string;
     lpBnb: bigint;
     lpTokenValueBnb: bigint;
     builderBnb: bigint;
@@ -458,6 +454,7 @@ export class BscTransactionClient {
       functionName: "depositBatch",
       args: [
         {
+          user: normalizeAddress(b.user),
           lpBnb: u256ToU128(b.lpBnb),
           lpTokenValueBnb: u256ToU128(b.lpTokenValueBnb),
           minLpTokenOut,
@@ -513,6 +510,7 @@ export class BscTransactionClient {
     command: Extract<OperatorCommand, { kind: "DepositBatch" }>,
   ): boolean {
     if (log.topics[0]?.toLowerCase() !== DEPOSIT_BATCH_EXECUTED_TOPIC) return false;
+    if (this.parseTopicAddress(log.topics[1]) !== normalizeAddress(command.user)) return false;
     const directReferrer =
       command.directReferrer != null && command.directBnb !== 0n
         ? normalizeAddress(command.directReferrer)
@@ -520,17 +518,38 @@ export class BscTransactionClient {
     const nodeBnb = command.nodePayouts.reduce((sum, payout) => sum + payout.amount, 0n);
     try {
       return (
-        this.parseTopicAddress(log.topics[1]) === directReferrer &&
+        this.parseTopicAddress(log.topics[2]) === directReferrer &&
         this.parseU128Word(log.data, 0) === command.lpBnb &&
         this.parseU128Word(log.data, 1) === command.lpTokenValueBnb &&
-        this.parseU128Word(log.data, 2) === command.builderBnb &&
-        this.parseU128Word(log.data, 3) === command.vaultBnb &&
-        this.parseU128Word(log.data, 4) === command.directBnb &&
-        this.parseU128Word(log.data, 5) === nodeBnb
+        this.parseU128Word(log.data, 3) === command.builderBnb &&
+        this.parseU128Word(log.data, 4) === command.vaultBnb &&
+        this.parseU128Word(log.data, 5) === command.directBnb &&
+        this.parseU128Word(log.data, 6) === nodeBnb
       );
     } catch {
       return false;
     }
+  }
+
+  async depositBatchLpMinted(
+    txHash: string,
+    command: Extract<OperatorCommand, { kind: "DepositBatch" }>,
+  ): Promise<bigint> {
+    const receipt = await this.rpc<RpcReceiptJson | null>("eth_getTransactionReceipt", [txHash]).catch(() => null);
+    if (!receipt || receipt.status !== "0x1") return 0n;
+    const logs = await this.rpc<RpcLogJson[]>("eth_getLogs", [
+      {
+        address: this.token,
+        fromBlock: receipt.blockNumber,
+        toBlock: receipt.blockNumber,
+        topics: [DEPOSIT_BATCH_EXECUTED_TOPIC],
+      },
+    ]);
+    for (const log of logs) {
+      if (log.removed || !this.depositBatchLogMatches(log, command)) continue;
+      return this.parseU128Word(log.data, 2);
+    }
+    return 0n;
   }
 
   private lpAmountsValid(lpBnb: bigint, lpTokenValueBnb: bigint): boolean {
@@ -650,36 +669,15 @@ export class BscTransactionClient {
     });
   }
 
-  private async submitRedeemUserLp(
-    user: string,
-    lpBnbShare: bigint,
-    totalActivePrincipal: bigint,
-  ): Promise<string> {
-    if (lpBnbShare === 0n || totalActivePrincipal === 0n) throw new ChainError("InvalidAmount");
-    if (lpBnbShare > totalActivePrincipal) {
-      throw new ChainError("lp share exceeds active principal denominator");
-    }
+  private async submitRedeemUserLp(user: string, lpTokenAmount: bigint): Promise<string> {
+    if (lpTokenAmount === 0n) throw new ChainError("InvalidAmount");
     const pair = await this.pairAddress();
-    const pairBalance = await this.erc20BalanceOf(pair, this.token);
-    if (pairBalance === 0n) throw new ChainError("token contract has no LP custody");
-    const pairTotalSupply = await this.pairTotalSupply(pair);
-    const reserves = await this.pairReserves();
-    if (pairTotalSupply === 0n || reserves.bnbReserve === 0n) throw new ChainError("InvalidAmount");
-
-    let lpToRemove = u256ToU128((pairBalance * lpBnbShare) / totalActivePrincipal);
-    if (lpToRemove > pairBalance) lpToRemove = pairBalance;
-    if (lpToRemove === 0n) throw new ChainError("InvalidAmount");
-
-    const expectedBnbOut = u256ToU128((lpToRemove * reserves.bnbReserve) / pairTotalSupply);
-    if (expectedBnbOut === 0n) throw new ChainError("pair BNB reserve would return zero refund");
-    const floor = lpBnbShare / 2n;
-    if (expectedBnbOut < floor) {
-      throw new ChainError(`LP_RESERVE_INSUFFICIENT: expected_bnb_out=${expectedBnbOut} < floor=${floor}`);
-    }
+    const lpCustody = await this.erc20BalanceOf(pair, this.token);
+    if (lpTokenAmount > lpCustody) throw new ChainError("token contract has insufficient LP custody");
     const redeem = encodeFunctionData({
       abi: [ABI.operatorRedeemLp],
       functionName: "operatorRedeemLp",
-      args: [normalizeAddress(user), lpToRemove],
+      args: [normalizeAddress(user), u256ToU128(lpTokenAmount)],
     });
     return this.submitEvmCall({ target: this.token, value: 0n, data: redeem });
   }
@@ -719,7 +717,7 @@ export class BscTransactionClient {
       case "BurnTokenByBnbValue":
         return this.submitBurnTokenByBnbValue(command.amount);
       case "RedeemUserLp":
-        return this.submitRedeemUserLp(command.user, command.lpBnbShare, command.totalActivePrincipal);
+        return this.submitRedeemUserLp(command.user, command.lpTokenAmount);
       case "SweepTaxToBnb":
         return this.submitSweepTaxToBnb(
           command.taxTokenAmount,
@@ -737,6 +735,7 @@ export class BscTransactionClient {
       case "DepositBatch":
         return this.submitDepositBatch({
           lpBnb: command.lpBnb,
+          user: command.user,
           lpTokenValueBnb: command.lpTokenValueBnb,
           builderBnb: command.builderBnb,
           vaultBnb: command.vaultBnb,

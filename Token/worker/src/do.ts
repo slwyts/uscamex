@@ -106,7 +106,8 @@ export class OperatorDO extends DurableObject<Env> {
   }
 
   private newService(cache: EventCache): OperatorService {
-    return new OperatorService(this.engine, this.state, this.journal, cache, this.newChain(), () => this.persist());
+    const chain = this.newChain();
+    return new OperatorService(this.engine, this.state, this.journal, cache, chain, () => this.persist());
   }
 
   private newChain(): ChainClient {
@@ -119,7 +120,7 @@ export class OperatorDO extends DurableObject<Env> {
       slippageBps: this.settings.executorSlippageBps,
       deadlineSeconds: this.settings.transactionDeadlineSeconds,
     };
-    return new BscTransactionClient(
+    const client = new BscTransactionClient(
       this.settings.rpcUrl,
       this.settings.chainId,
       this.settings.operatorPrivateKey,
@@ -127,6 +128,20 @@ export class OperatorDO extends DurableObject<Env> {
       this.settings.confirmations,
       this.settings.ammFeeBps,
     );
+    return {
+      submit: (command) => client.submit(command),
+      findConfirmedCommand: (id, command) => client.findConfirmedCommand(id, command),
+      afterConfirmed: async (id, command, txHash) => {
+        if (command.kind !== "DepositBatch") return;
+        const appliedKey = `lp-minted:${id}`;
+        if (await this.ctx.storage.get(appliedKey)) return;
+        const lpMinted = await client.depositBatchLpMinted(txHash, command);
+        if (command.lpBnb !== 0n && lpMinted === 0n) throw new Error("deposit batch LP mint event missing");
+        if (lpMinted === 0n) return;
+        this.state.ensureUserMut(command.user).lpTokenPrincipal += lpMinted;
+        await this.ctx.storage.put(appliedKey, lpMinted.toString());
+      },
+    };
   }
 
   // ---- public RPC (called from Worker) ----
@@ -378,6 +393,7 @@ export class OperatorDO extends DurableObject<Env> {
       principal_bnb: (u?.principalBnb ?? 0n).toString(),
       static_paid_bnb: (u?.staticPaidBnb ?? 0n).toString(),
       dynamic_paid_bnb: (u?.dynamicPaidBnb ?? 0n).toString(),
+      lp_token_principal: (u?.lpTokenPrincipal ?? 0n).toString(),
       active: u?.active ?? false,
       exited: u?.exited ?? false,
       is_node: weight != null,
@@ -584,6 +600,7 @@ export class OperatorDO extends DurableObject<Env> {
       principal_bnb: u.principalBnb.toString(),
       static_paid_bnb: u.staticPaidBnb.toString(),
       dynamic_paid_bnb: u.dynamicPaidBnb.toString(),
+      lp_token_principal: u.lpTokenPrincipal.toString(),
       active: u.active,
       exited: u.exited,
     }));

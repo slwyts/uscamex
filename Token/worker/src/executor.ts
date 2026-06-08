@@ -13,7 +13,7 @@ export type OperatorCommand =
   | { kind: "PayRewardTokenByBnbValue"; to: string; amount: bigint }
   | { kind: "BurnTokenByBnbValue"; amount: bigint; reason: string }
   | { kind: "ExitPosition"; user: string; refundBnb: bigint }
-  | { kind: "RedeemUserLp"; user: string; lpBnbShare: bigint; totalActivePrincipal: bigint }
+  | { kind: "RedeemUserLp"; user: string; lpTokenAmount: bigint }
   | {
       kind: "DepositBatch";
       user: string;
@@ -90,8 +90,7 @@ export function commandsForDeposit(a: DepositAllocation): OperatorCommand[] {
     commands.push({
       kind: "RedeemUserLp",
       user: redeem.user,
-      lpBnbShare: redeem.lpBnbShare,
-      totalActivePrincipal: redeem.totalActivePrincipal,
+      lpTokenAmount: redeem.lpTokenAmount,
     });
   }
   return commands;
@@ -108,8 +107,7 @@ export function commandsForSettlement(s: StaticSettlement): OperatorCommand[] {
     commands.push({
       kind: "RedeemUserLp",
       user: redeem.user,
-      lpBnbShare: redeem.lpBnbShare,
-      totalActivePrincipal: redeem.totalActivePrincipal,
+      lpTokenAmount: redeem.lpTokenAmount,
     });
   }
   return commands;

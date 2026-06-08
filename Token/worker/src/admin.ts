@@ -58,6 +58,12 @@ async function requireOwner(req: Request, ctx: AdminContext): Promise<{ signer: 
   if (!message.includes(`chainId=${ctx.settings.chainId}`)) {
     return json({ error: "message chainId mismatch" }, 400);
   }
+  const timestamp = signedTimestamp(message);
+  if (timestamp == null) return json({ error: "missing message timestamp" }, 400);
+  const maxAgeSecs = 7 * 24 * 60 * 60;
+  const now = Math.floor(Date.now() / 1000);
+  if (timestamp > now + 300) return json({ error: "message timestamp is in the future" }, 400);
+  if (now - timestamp > maxAgeSecs) return json({ error: "admin signature expired" }, 401);
 
   let signer: string;
   try {
@@ -67,6 +73,14 @@ async function requireOwner(req: Request, ctx: AdminContext): Promise<{ signer: 
   }
   if (signer !== ctx.owner.toLowerCase()) return json({ error: "not owner" }, 403);
   return { signer };
+}
+
+function signedTimestamp(message: string): number | null {
+  const line = message.split("\n").find((part) => part.startsWith("timestamp="));
+  if (!line) return null;
+  const timestamp = Number(line.slice("timestamp=".length));
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
+  return Math.floor(timestamp);
 }
 
 function legacyMessage(req: Request): string | null {

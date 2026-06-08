@@ -48,6 +48,7 @@ describe("engine: deposit", () => {
     e.deposit(s, "alice", BNB);
     e.bind(s, "bob", "alice");
     s.ensureUserMut("alice").staticPaidBnb = BNB - 1n;
+    s.ensureUserMut("alice").lpTokenPrincipal = 123n;
 
     const a = e.deposit(s, "bob", BNB);
     expect(a.directBnb).toBe(1n);
@@ -56,8 +57,21 @@ describe("engine: deposit", () => {
     expect(s.user("alice")!.exited).toBe(true);
     expect(a.lpRedeems.length).toBe(1);
     expect(a.lpRedeems[0].user).toBe("alice");
-    expect(a.lpRedeems[0].totalActivePrincipal).toBe((6n * BNB) / 10n);
+    expect(a.lpRedeems[0].lpTokenAmount).toBe(123n);
     expect(s.balances.totalActiveLpPrincipalBnb).toBe((3n * BNB) / 10n);
+  });
+
+  it("pays direct reward to inactive referrer without counting dynamic cap", () => {
+    const e = engine();
+    const s = new ProtocolState("root");
+    e.bind(s, "alice", "root");
+    e.bind(s, "bob", "alice");
+
+    const a = e.deposit(s, "bob", BNB);
+    expect(a.directBnb).toBe(BNB / 10n);
+    expect(a.vaultBnb).toBe(BNB / 10n);
+    expect(s.balances.directPaidBnb.get("alice")).toBe(BNB / 10n);
+    expect(s.user("alice")!.dynamicPaidBnb).toBe(0n);
   });
 
   it("redirects reward of exited referrer to vault", () => {
@@ -79,6 +93,7 @@ describe("engine: deposit", () => {
     const s = new ProtocolState("root");
     e.bind(s, "alice", "root");
     e.deposit(s, "alice", BNB);
+    s.ensureUserMut("alice").lpTokenPrincipal = 123n;
     for (let i = 0; i < 4; i++) e.settleStaticPeriod(s, "alice");
     expect(s.user("alice")!.exited).toBe(true);
     expect(s.user("alice")!.positionId).toBe(0n);
@@ -102,6 +117,7 @@ describe("engine: static settlement", () => {
     e.bind(s, "bob", "alice");
     e.deposit(s, "alice", BNB);
     e.deposit(s, "bob", BNB);
+    s.ensureUserMut("bob").lpTokenPrincipal = 456n;
 
     const settlement = e.settleStaticPeriod(s, "bob");
     expect(settlement.staticBnb).toBe(BNB / 4n);

@@ -46,6 +46,7 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     }
 
     struct DepositBatchParams {
+        address user;
         uint128 lpBnb;
         uint128 lpTokenValueBnb;
         uint128 minLpTokenOut;
@@ -118,8 +119,10 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         address indexed user, uint256 lpAmount, uint256 bnbReturned, uint256 tokenBurned
     );
     event DepositBatchExecuted(
+        address indexed user,
         uint256 lpBnb,
         uint256 lpTokenValueBnb,
+        uint256 lpMinted,
         uint256 builderBnb,
         uint256 vaultBnb,
         address indexed directReferrer,
@@ -392,11 +395,13 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     /// LP build, builder buy, vault credit, node payouts, and direct referral payout.
     function depositBatch(DepositBatchParams calldata params) external onlyOperator nonReentrant {
         require(initialized && pair != address(0), "NOT_READY");
+        require(params.user != address(0), "USER");
         uint256 nodeBnb;
+        uint256 lpMinted;
         inOperatorContext = true;
 
         if (params.lpBnb != 0 || params.lpTokenValueBnb != 0) {
-            _operatorBuildLp(params.lpTokenValueBnb, params.lpBnb, params.minLpTokenOut);
+            lpMinted = _operatorBuildLp(params.lpTokenValueBnb, params.lpBnb, params.minLpTokenOut);
         }
         if (params.builderBnb != 0) {
             _operatorBuyToSelf(params.builderBnb, params.minBuilderTokenOut);
@@ -416,8 +421,10 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
 
         inOperatorContext = false;
         emit DepositBatchExecuted(
+            params.user,
             params.lpBnb,
             params.lpTokenValueBnb,
+            lpMinted,
             params.builderBnb,
             params.vaultBnb,
             params.directReferrer,
@@ -503,11 +510,18 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         _operatorBuildLp(swapBnb, lpBnb, minTokenOut);
     }
 
-    function _operatorBuildLp(uint256 swapBnb, uint256 lpBnb, uint256 minTokenOut) internal {
+    function _operatorBuildLp(
+        uint256 swapBnb,
+        uint256 lpBnb,
+        uint256 minTokenOut
+    )
+        internal
+        returns (uint256 liquidity)
+    {
         require(pair != address(0) && swapBnb != 0 && lpBnb != 0, "LP_ARGS");
         uint256 bought = _operatorBuyToSelf(swapBnb, minTokenOut);
         _approve(address(this), router, bought);
-        IPancakeRouter(router).addLiquidityETH{ value: lpBnb }(
+        (,, liquidity) = IPancakeRouter(router).addLiquidityETH{ value: lpBnb }(
             address(this), bought, 0, 0, address(this), block.timestamp
         );
     }

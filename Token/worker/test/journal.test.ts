@@ -35,7 +35,7 @@ describe("journal idempotency", () => {
     const journal = new ExecutionJournal();
     journal.planBatch("deposit:tx9:0", [
       { kind: "AddLiquidity", bnbAmount: 10n ** 18n, tokenValueBnb: 5n * 10n ** 17n },
-      { kind: "RedeemUserLp", user: "0xabc", lpBnbShare: 3n, totalActivePrincipal: 9n },
+      { kind: "RedeemUserLp", user: "0xabc", lpTokenAmount: 3n },
     ]);
     const restored = ExecutionJournal.fromJSON(journal.toJSON() as never);
     const pending = restored.pendingCommands();

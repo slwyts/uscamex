@@ -83,7 +83,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     const auth = await signOwnerMessage(account);
     setAdminAuth(auth.message, auth.signature);
     setState((prev) => ({ ...prev, authorized: true }));
-    message.success("已签名授权，可以读取后端数据");
+    message.success("已签名授权，7 天内刷新重进无需重复签名");
   }, [connect, state.account, state.owner, loadOwner, message]);
 
   const disconnect = useCallback(() => {

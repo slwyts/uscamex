@@ -1028,6 +1028,7 @@ contract USCAMETest is MiniTest {
         USCAME.NodePayout[] memory payouts = new USCAME.NodePayout[](1);
         payouts[0] = USCAME.NodePayout({ to: carol, amount: uint128(0.1 ether) });
         USCAME.DepositBatchParams memory params = USCAME.DepositBatchParams({
+            user: alice,
             lpBnb: uint128(0.3 ether),
             lpTokenValueBnb: uint128(0.3 ether),
             minLpTokenOut: 1,
@@ -1068,6 +1069,7 @@ contract USCAMETest is MiniTest {
         USCAME.NodePayout[] memory payouts = new USCAME.NodePayout[](1);
         payouts[0] = USCAME.NodePayout({ to: carol, amount: uint128(0.1 ether) });
         USCAME.DepositBatchParams memory params = USCAME.DepositBatchParams({
+            user: alice,
             lpBnb: uint128(0.3 ether),
             lpTokenValueBnb: uint128(0.3 ether),
             minLpTokenOut: 1,
@@ -1144,4 +1146,3 @@ contract USCAMETest is MiniTest {
         assertTrue(token.balanceOf(dave) > 0);
     }
 }
-

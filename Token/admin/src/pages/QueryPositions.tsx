@@ -106,6 +106,13 @@ function PositionsPanel() {
             render: (v: string) => formatBnb(v, 4),
           },
           {
+            title: "平台代持用户LP额",
+            dataIndex: "lp_token_principal",
+            width: 170,
+            align: "right",
+            render: (v: string | undefined) => formatBnb(v ?? "0", 4),
+          },
+          {
             title: "状态",
             width: 130,
             render: (_, row) => (

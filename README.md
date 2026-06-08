@@ -61,7 +61,6 @@ Token protocol work lives in [Token/](Token/): Solidity contracts, Foundry tests
 - 每个地址只能绑定一次上级，绑定后链上不可更改。
 - 已绑定上级的地址再次转账 `bindCost` 枚代币，视为普通 ERC20 转账，不改变绑定关系。
 - 绑定费用 `bindCost`（默认 11 枚）为后台可调参数；设为 0 则关闭"转账绑定"触发。
-- 零枚转账（`transfer(x, 0)`）现为普通 ERC20 转账，**不再触发绑定**。
 - 合约 `owner()` 默认同时作为根节点地址，部署后自动视为已绑定，作为推荐链起点。
 
 ---
@@ -124,7 +123,7 @@ Token protocol work lives in [Token/](Token/): Solidity contracts, Foundry tests
 
 ### 8.1 入金方式
 
-用户完成 0 枚代币绑定后，通过**直接向 Token 合约地址发送原生 BNB 转账**完成入金，无需调用任何具名函数。合约通过 `receive() external payable` 捕获该笔转账并记录入金事件，随后由 Rust server/operator 按后台参数自动执行 LP 建设逻辑。
+用户完成上下级绑定后，通过**直接向 Token 合约地址发送原生 BNB 转账**完成入金，无需调用任何具名函数。合约通过 `receive() external payable` 捕获该笔转账并记录入金事件，随后由 Rust server/operator 按后台参数自动执行 LP 建设逻辑。
 
 > 这意味着用户在任何钱包直接"发送 BNB 到合约地址"即可，无需 ABI、无需函数签名，体验最简洁。
 
@@ -147,8 +146,8 @@ Token protocol work lives in [Token/](Token/): Solidity contracts, Foundry tests
 
 ---
 
-## 九、LP 撤出规则
-
+## 九、静态撤出规则
+*用户未完成出局不可退出，且LP由平台代持有，本条内容无效仅作原始设计参考
 - 用户撤出 LP 时，所持有的**项目代币份额全部销毁至黑洞地址**，仅可取回对应的 **BNB 份额**。
 - 撤出后，该地址的 LP 订单立即失效，**静态收益与动态收益同步停止**。
 - 如需继续获取收益，须以**原地址重新发起入金**，建立新的 LP 仓位。

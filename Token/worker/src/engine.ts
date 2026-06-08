@@ -37,8 +37,7 @@ export interface BnbPayout {
 
 export interface LpRedeem {
   user: Address;
-  lpBnbShare: bigint;
-  totalActivePrincipal: bigint;
+  lpTokenAmount: bigint;
 }
 
 export interface DepositAllocation {
@@ -123,13 +122,11 @@ export class Engine {
     const lpRedeems: LpRedeem[] = [];
     if (directReferrer != null) {
       const account = state.user(directReferrer);
-      if (account) {
-        if (account.exited && !account.active) {
-          directBnb = 0n;
-        } else if (account.active && account.principalBnb > 0n) {
-          const room = this.remainingExitRoom(state, directReferrer) ?? 0n;
-          directBnb = directBnb < room ? directBnb : room;
-        }
+      if (account && account.exited && !account.active) {
+        directBnb = 0n;
+      } else if (account && account.active && account.principalBnb > 0n) {
+        const room = this.remainingExitRoom(state, directReferrer) ?? 0n;
+        directBnb = directBnb < room ? directBnb : room;
       }
     }
     const directRemainder = satSub(directPool, directBnb);
@@ -145,6 +142,7 @@ export class Engine {
       account.staticPaidBnb = 0n;
       account.dynamicPaidBnb = 0n;
       account.lpBnbPrincipal = 0n;
+      account.lpTokenPrincipal = 0n;
     }
     account.principalBnb += amount;
     account.lpBnbPrincipal += lpBnb;
@@ -232,18 +230,15 @@ export class Engine {
     });
 
     const userRedeem = this.exitIfCapReached(state, user);
-    let lpRedeemBnbShare: bigint | null = null;
     let exitRefundBnb: bigint | null = null;
     const acctNow = state.user(user);
     const exited = !!acctNow && !acctNow.active && acctNow.exited;
     if (userRedeem) {
       exitRefundBnb = state.user(user)?.principalBnb ?? null;
-      lpRedeemBnbShare = userRedeem.lpBnbShare;
       lpRedeems.push(userRedeem);
     } else if (exited) {
       exitRefundBnb = state.user(user)?.principalBnb ?? null;
     }
-    if (lpRedeemBnbShare === 0n) lpRedeemBnbShare = null;
 
     return {
       user,
@@ -251,7 +246,7 @@ export class Engine {
       teamRewards,
       exited,
       exitRefundBnb,
-      lpRedeemBnbShare,
+      lpRedeemBnbShare: null,
       totalActiveLpPrincipalBnb: state.balances.totalActiveLpPrincipalBnb,
       lpRedeems,
     };
@@ -266,6 +261,7 @@ export class Engine {
     const principal = account.principalBnb;
     const lpShare = account.lpBnbPrincipal;
     account.lpBnbPrincipal = 0n;
+    account.lpTokenPrincipal = 0n;
     state.balances.totalActiveLpPrincipalBnb = satSub(
       state.balances.totalActiveLpPrincipalBnb,
       lpShare,
@@ -426,18 +422,20 @@ export class Engine {
     const totalPaid = account.staticPaidBnb + account.dynamicPaidBnb;
     if (totalPaid < exitTarget) return null;
 
-    const totalActivePrincipal = state.balances.totalActiveLpPrincipalBnb;
+    const lpTokenAmount = account.lpTokenPrincipal;
+    if (lpTokenAmount === 0n) return null;
+
     const acct = state.ensureUserMut(user);
     acct.active = false;
     acct.exited = true;
     const lpBnbShare = acct.lpBnbPrincipal;
     acct.lpBnbPrincipal = 0n;
+    acct.lpTokenPrincipal = 0n;
     state.balances.totalActiveLpPrincipalBnb = satSub(
       state.balances.totalActiveLpPrincipalBnb,
       lpBnbShare,
     );
-    if (lpBnbShare === 0n || totalActivePrincipal === 0n) return null;
-    return { user, lpBnbShare, totalActivePrincipal };
+    return { user, lpTokenAmount };
   }
 
   /** engine.rs:589 */

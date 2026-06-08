@@ -31,7 +31,7 @@ export default function OwnerGate({ children }: { children: React.ReactNode }) {
         type="info"
         showIcon
         message="请使用管理员钱包完成签名"
-        description="系统会通过签名校验当前钱包是否为合约管理员；签名仅在当前浏览器内存中暂存，不会上链、不消耗 gas。"
+        description="系统会通过签名校验当前钱包是否为合约管理员；签名不上链、不消耗 gas，同一浏览器内 7 天有效，主动退出后失效。"
         action={
           <Button type="primary" onClick={() => wallet.authorize()}>
             进行签名

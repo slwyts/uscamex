@@ -222,11 +222,6 @@ function StatsCard() {
             tip="按每日静态收益率（默认 0.8%，每 6 小时发放一次）折算为 BNB 的累计发放金额，反映项目的总兑付压力。"
           />
           <Metric
-            title="累计动态产出 (BNB)"
-            value={formatBnb(data.total_dynamic_paid_bnb, 4)}
-            tip="直推奖励（默认 10%）与 10 代团队奖励的累计发放金额（BNB 金本位）。与静态产出一起计入出局倍数。"
-          />
-          <Metric
             title="回购销毁仓库余额 (BNB)"
             value={formatBnb(data.vault_bnb, 4)}
             tip="回购销毁仓库是 Token 合约部署的子合约，持有用于回购的 BNB。资金来自买入税、卖出税与入金 10% 划转，启动后每分钟从市场买回代币并销毁至黑洞。"
@@ -250,11 +245,6 @@ function StatsCard() {
             title="累计销毁代币数量"
             value={formatBnb(data.burned_tokens, 4)}
             tip="转入黑洞地址（0xdead）的项目代币总量。来源包括卖出税销毁、出局销毁、回购销毁以及撤出 LP 销毁。"
-          />
-          <Metric
-            title="销毁价值 (BNB)"
-            value={formatBnb(data.tax_burned_token_value_bnb, 4)}
-            tip="上述销毁代币按当前 LP 价格折算为 BNB 的价值，可用于估算累计销毁规模。"
           />
           <Metric
             title="LP 池代币储备"

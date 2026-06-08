@@ -312,6 +312,7 @@ contract BscMainnetForkFlow {
         USCAME.NodePayout[] memory payouts = new USCAME.NodePayout[](1);
         payouts[0] = USCAME.NodePayout({ to: GENESIS_NODE, amount: uint128(0.1 ether) });
         USCAME.DepositBatchParams memory params = USCAME.DepositBatchParams({
+            user: USER,
             lpBnb: uint128(0.3 ether),
             lpTokenValueBnb: uint128(0.3 ether),
             minLpTokenOut: 1,

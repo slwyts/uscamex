@@ -20,6 +20,8 @@ export interface UserAccount {
   dynamicPaidBnb: bigint;
   /** BNB-denominated LP share contributed and not yet redeemed. */
   lpBnbPrincipal: bigint;
+  /** Actual LP tokens minted for user deposits and held by the token contract. */
+  lpTokenPrincipal: bigint;
   active: boolean;
   exited: boolean;
 }
@@ -33,6 +35,7 @@ export function newUserAccount(): UserAccount {
     staticPaidBnb: 0n,
     dynamicPaidBnb: 0n,
     lpBnbPrincipal: 0n,
+    lpTokenPrincipal: 0n,
     active: false,
     exited: false,
   };
@@ -113,13 +116,19 @@ export class ProtocolState {
 
 type SerializedUser = Omit<
   UserAccount,
-  "positionId" | "principalBnb" | "staticPaidBnb" | "dynamicPaidBnb" | "lpBnbPrincipal"
+  | "positionId"
+  | "principalBnb"
+  | "staticPaidBnb"
+  | "dynamicPaidBnb"
+  | "lpBnbPrincipal"
+  | "lpTokenPrincipal"
 > & {
   positionId: string;
   principalBnb: string;
   staticPaidBnb: string;
   dynamicPaidBnb: string;
   lpBnbPrincipal: string;
+  lpTokenPrincipal?: string;
 };
 
 export interface SerializedState {
@@ -159,6 +168,7 @@ export function serializeState(s: ProtocolState): SerializedState {
         staticPaidBnb: u.staticPaidBnb.toString(),
         dynamicPaidBnb: u.dynamicPaidBnb.toString(),
         lpBnbPrincipal: u.lpBnbPrincipal.toString(),
+        lpTokenPrincipal: u.lpTokenPrincipal.toString(),
       },
     ]),
     nodes: s.nodes,
@@ -196,6 +206,7 @@ export function deserializeState(d: SerializedState): ProtocolState {
         staticPaidBnb: BigInt(u.staticPaidBnb),
         dynamicPaidBnb: BigInt(u.dynamicPaidBnb),
         lpBnbPrincipal: BigInt(u.lpBnbPrincipal),
+        lpTokenPrincipal: BigInt(u.lpTokenPrincipal ?? "0"),
       },
     ]),
   );

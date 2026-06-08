@@ -27,6 +27,7 @@ export interface ServiceDatabase {
 /** Chain client interface (BscTransactionClient or a test recorder). */
 export interface ChainClient {
   submit(command: OperatorCommand): Promise<string>;
+  afterConfirmed?(id: string, command: OperatorCommand, txHash: string): Promise<void>;
   findConfirmedCommand?(id: string, command: OperatorCommand): Promise<string | null>;
 }
 
@@ -140,6 +141,7 @@ export class OperatorService {
       try {
         const existingTxHash = await this.chain.findConfirmedCommand?.(id, command);
         if (existingTxHash) {
+          await this.chain.afterConfirmed?.(id, command, existingTxHash);
           this.journal.markConfirmed(id, existingTxHash);
           await this.onPersist?.();
           txHashes.push(existingTxHash);
@@ -147,6 +149,7 @@ export class OperatorService {
         }
         const txHash = await this.chain.submit(command);
         this.journal.markSubmitted(id, txHash);
+        await this.chain.afterConfirmed?.(id, command, txHash);
         this.journal.markConfirmed(id);
         await this.onPersist?.();
         txHashes.push(txHash);
@@ -173,6 +176,7 @@ export class OperatorService {
       try {
         const txHash = await this.chain.findConfirmedCommand(id, record.command);
         if (!txHash) continue;
+        await this.chain.afterConfirmed?.(id, record.command, txHash);
         this.journal.markConfirmed(id, txHash);
         await this.onPersist?.();
         txHashes.push(txHash);

@@ -3,19 +3,21 @@ import { loadSettings } from "./settings";
 import { isBypassActive } from "./bypass";
 
 const AUTH_KEY = "uscamex-admin-auth";
+const AUTH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 interface StoredAuth {
   message: string;
   signature: string;
   token: string;
   chainId: number;
+  expiresAt?: number;
 }
 
 const SHARED_AUTH: { message: string; signature: string } = { message: "", signature: "" };
 
 function loadStoredAuth(): StoredAuth | null {
   try {
-    const raw = sessionStorage.getItem(AUTH_KEY);
+    const raw = localStorage.getItem(AUTH_KEY);
     return raw ? (JSON.parse(raw) as StoredAuth) : null;
   } catch {
     return null;
@@ -23,7 +25,7 @@ function loadStoredAuth(): StoredAuth | null {
 }
 
 function saveStoredAuth(value: StoredAuth) {
-  try { sessionStorage.setItem(AUTH_KEY, JSON.stringify(value)); } catch { /* ignore */ }
+  try { localStorage.setItem(AUTH_KEY, JSON.stringify(value)); } catch { /* ignore */ }
 }
 
 export function restoreAdminAuth(): boolean {
@@ -31,6 +33,10 @@ export function restoreAdminAuth(): boolean {
   if (!stored?.message || !stored?.signature) return false;
   const settings = loadSettings();
   if (stored.token !== settings.tokenAddress || stored.chainId !== settings.chainConfig.id) return false;
+  if (!stored.expiresAt || stored.expiresAt <= Date.now()) {
+    clearAdminAuth();
+    return false;
+  }
   SHARED_AUTH.message = stored.message;
   SHARED_AUTH.signature = stored.signature;
   return true;
@@ -40,13 +46,19 @@ export function setAdminAuth(message: string, signature: string) {
   SHARED_AUTH.message = message;
   SHARED_AUTH.signature = signature;
   const settings = loadSettings();
-  saveStoredAuth({ message, signature, token: settings.tokenAddress, chainId: settings.chainConfig.id });
+  saveStoredAuth({
+    message,
+    signature,
+    token: settings.tokenAddress,
+    chainId: settings.chainConfig.id,
+    expiresAt: Date.now() + AUTH_TTL_MS,
+  });
 }
 
 export function clearAdminAuth() {
   SHARED_AUTH.message = "";
   SHARED_AUTH.signature = "";
-  try { sessionStorage.removeItem(AUTH_KEY); } catch { /* ignore */ }
+  try { localStorage.removeItem(AUTH_KEY); } catch { /* ignore */ }
 }
 
 export function hasAdminAuth() {
@@ -115,6 +127,7 @@ export interface UserSummary {
   principal_bnb: string;
   static_paid_bnb: string;
   dynamic_paid_bnb: string;
+  lp_token_principal?: string;
   active: boolean;
   exited: boolean;
   is_node: boolean;
@@ -171,6 +184,7 @@ export interface PositionItem {
   principal_bnb: string;
   static_paid_bnb: string;
   dynamic_paid_bnb: string;
+  lp_token_principal?: string;
   active: boolean;
   exited: boolean;
 }
