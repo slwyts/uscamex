@@ -235,6 +235,12 @@ export class BscRpcClient {
     return parseHexBig(result);
   }
 
+  async tokenBalance(address: string): Promise<bigint> {
+    const data = functionSelector("balanceOf(address)") + u256Word(BigInt(normalizeAddress(address)));
+    const result = await this.ethCall(data);
+    return parseU128Word(result, 0);
+  }
+
   async blockNumber(): Promise<bigint> {
     return parseHexBig(await this.rpc<string>("eth_blockNumber", []));
   }

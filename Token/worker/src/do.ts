@@ -224,6 +224,7 @@ export class OperatorDO extends DurableObject<Env> {
     await this.syncProtocolConfig(rpc);
     await this.syncNodes(rpc, storage);
     await this.syncPairReserves(rpc);
+    await this.syncBuilderTokenBalance(rpc);
     await this.syncVaultBalance(rpc);
 
     const maxScan = this.settings.rpcMaxBlocksPerScan;
@@ -300,6 +301,9 @@ export class OperatorDO extends DurableObject<Env> {
     if (!reserves) return;
     this.state.pair.tokenReserve = reserves.tokenReserve;
     this.state.pair.bnbReserve = reserves.bnbReserve;
+  }
+  private async syncBuilderTokenBalance(rpc: BscRpcClient): Promise<void> {
+    this.state.balances.builderTokenAmount = await rpc.tokenBalance(this.settings.tokenAddress);
   }
   private async syncVaultBalance(rpc: BscRpcClient): Promise<void> {
     const vault = await rpc.vault();
@@ -404,6 +408,9 @@ export class OperatorDO extends DurableObject<Env> {
   }
 
   async queryStats(): Promise<unknown> {
+    await this.syncBuilderTokenBalance(new BscRpcClient(this.settings.rpcUrl, this.settings.tokenAddress)).catch(
+      () => undefined,
+    );
     let bound = 0;
     let active = 0;
     let exited = 0;
