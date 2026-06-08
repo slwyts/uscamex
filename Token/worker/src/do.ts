@@ -117,6 +117,7 @@ export class OperatorDO extends DurableObject<Env> {
       routerAddress: this.settings.pancakeV2Router,
       ownerAddress: this.state.root,
       burnAddress: this.settings.burnAddress,
+      indexerStartBlock: this.settings.indexerStartBlock,
       slippageBps: this.settings.executorSlippageBps,
       deadlineSeconds: this.settings.transactionDeadlineSeconds,
     };

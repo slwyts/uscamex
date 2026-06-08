@@ -54,4 +54,30 @@ describe("service: submit reconciliation", () => {
     expect(submitted).toBe(0);
     expect(record.status).toEqual({ state: "Confirmed", txHash: TX_HASH });
   });
+
+  it("marks an already-executed failed RedeemUserLp as confirmed without resubmitting", async () => {
+    const journal = new ExecutionJournal();
+    const [id] = journal.planBatch("static:0xuser:slot", [
+      { kind: "RedeemUserLp", user: "0xabc", lpTokenAmount: 123n },
+    ]);
+    const record = journal.records.get(id)!;
+    record.attempts = 5;
+    record.status = { state: "Failed", error: "ReceiptFailed: 0xdead" };
+
+    let submitted = 0;
+    const chain: ChainClient = {
+      async findConfirmedCommand() {
+        return TX_HASH;
+      },
+      async submit() {
+        submitted += 1;
+        throw new Error("must not submit");
+      },
+    };
+
+    const txHashes = await serviceWith(chain, journal).submitPending();
+    expect(txHashes).toEqual([TX_HASH]);
+    expect(submitted).toBe(0);
+    expect(record.status).toEqual({ state: "Confirmed", txHash: TX_HASH });
+  });
 });

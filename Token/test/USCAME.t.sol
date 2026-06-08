@@ -617,6 +617,24 @@ contract USCAMETest is MiniTest {
         assertEq(MockPair(payable(pair)).balanceOf(address(token)), totalLp - lpToBurn);
     }
 
+    function testOperatorRedeemLpWorksWhenBuyDisabledAndDoesNotCollectBuyTax() public {
+        // Default buyEnabled is false. Redeeming protocol-held LP must still work and
+        // must not treat the Pair -> Router token movement as a user buy.
+        address pair = token.pair();
+        uint256 totalLp = MockPair(payable(pair)).balanceOf(address(token));
+        uint256 lpToBurn = totalLp / 20;
+        uint256 contractTokenBefore = token.balanceOf(address(token));
+        uint256 aliceBefore = alice.balance;
+
+        vm.prank(operator);
+        (uint256 bnbReturned, uint256 tokenBurned) = token.operatorRedeemLp(alice, lpToBurn);
+
+        assertTrue(bnbReturned > 0);
+        assertTrue(tokenBurned > 0);
+        assertEq(alice.balance, aliceBefore + bnbReturned);
+        assertEq(token.balanceOf(address(token)), contractTokenBefore);
+    }
+
     function testOperatorRedeemLpOnlyOperator() public {
         vm.expectRevert(bytes("OPERATOR"));
         vm.prank(bob);

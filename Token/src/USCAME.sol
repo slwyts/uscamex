@@ -104,6 +104,7 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     /// gate, which must only restrict ordinary users buying from the DEX.
     /// Auto-clears at end of the transaction, so it can never leak across txs.
     bool private transient inOperatorContext;
+    bool private transient inLpRedeemContext;
 
     event PairInitialized(address indexed pair, uint256 tokenAmount, uint256 bnbAmount);
     event RefBound(address indexed user, address indexed referrer);
@@ -211,10 +212,11 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         IPancakePair(pair).approve(router, lpAmount);
         uint256 tokenBefore = balanceOf(address(this));
         uint256 ethBefore = address(this).balance;
-        IPancakeRouter(router)
-            .removeLiquidityETHSupportingFeeOnTransferTokens(
-                address(this), lpAmount, 0, 0, address(this), block.timestamp
-            );
+        inLpRedeemContext = true;
+        IPancakeRouter(router).removeLiquidityETHSupportingFeeOnTransferTokens(
+            address(this), lpAmount, 0, 0, address(this), block.timestamp
+        );
+        inLpRedeemContext = false;
         unchecked {
             tokenBurned = balanceOf(address(this)) - tokenBefore;
             bnbReturned = address(this).balance - ethBefore;
@@ -594,6 +596,7 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     function _tax(address from, address to, uint256 amount) internal view returns (uint256, uint8) {
         if (feeExempt[from] || feeExempt[to] || pair == address(0)) return (0, 0);
         if (from == pair) {
+            if (inLpRedeemContext && to == router) return (0, 0);
             // Protocol-owned buys (executed via operatorCall/operatorBatchCall/depositBatch) bypass
             // the buy gate; it must only restrict ordinary users buying from the DEX.
             require(buyEnabled || inOperatorContext, "BUY_OFF");

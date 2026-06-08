@@ -172,7 +172,6 @@ export class OperatorService {
     const txHashes: string[] = [];
     for (const [id, record] of this.journal.records.entries()) {
       if (record.status.state === "Confirmed") continue;
-      if (record.command.kind !== "DepositBatch") continue;
       try {
         const txHash = await this.chain.findConfirmedCommand(id, record.command);
         if (!txHash) continue;

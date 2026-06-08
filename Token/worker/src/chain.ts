@@ -21,6 +21,7 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 const DEPOSIT_BATCH_EXECUTED_TOPIC = keccak256(
   toHex("DepositBatchExecuted(address,uint256,uint256,uint256,uint256,uint256,address,uint256,uint256)"),
 );
+const LP_REDEEMED_TOPIC = keccak256(toHex("LpRedeemed(address,uint256,uint256,uint256)"));
 
 export interface ChainExecutionContext {
   tokenAddress: string;
@@ -28,6 +29,7 @@ export interface ChainExecutionContext {
   routerAddress: string;
   ownerAddress: string;
   burnAddress: string;
+  indexerStartBlock: bigint;
   slippageBps: number;
   deadlineSeconds: number;
 }
@@ -43,6 +45,10 @@ function normalizeAddress(value: string): Hex {
   const t = value.trim();
   if (!t.startsWith("0x") || !/^0x[0-9a-fA-F]{40}$/.test(t)) throw new ChainError("InvalidAddress");
   return t.toLowerCase() as Hex;
+}
+
+function addressTopic(value: string): Hex {
+  return `0x${normalizeAddress(value).slice(2).padStart(64, "0")}` as Hex;
 }
 
 function u256ToU128(value: bigint): bigint {
@@ -471,8 +477,9 @@ export class BscTransactionClient {
   }
 
   async findConfirmedCommand(id: string, command: OperatorCommand): Promise<string | null> {
-    if (command.kind !== "DepositBatch") return null;
-    return this.findConfirmedDepositBatch(id, command);
+    if (command.kind === "DepositBatch") return this.findConfirmedDepositBatch(id, command);
+    if (command.kind === "RedeemUserLp") return this.findConfirmedRedeemUserLp(command);
+    return null;
   }
 
   private async findConfirmedDepositBatch(
@@ -550,6 +557,30 @@ export class BscTransactionClient {
       return this.parseU128Word(log.data, 2);
     }
     return 0n;
+  }
+
+  private async findConfirmedRedeemUserLp(
+    command: Extract<OperatorCommand, { kind: "RedeemUserLp" }>,
+  ): Promise<string | null> {
+    const logs = await this.rpc<RpcLogJson[]>("eth_getLogs", [
+      {
+        address: this.token,
+        fromBlock: `0x${this.ctx.indexerStartBlock.toString(16)}`,
+        toBlock: "latest",
+        topics: [LP_REDEEMED_TOPIC, addressTopic(command.user)],
+      },
+    ]);
+    for (const log of logs) {
+      if (log.removed) continue;
+      try {
+        if (this.parseU128Word(log.data, 0) === command.lpTokenAmount) {
+          return log.transactionHash.toLowerCase();
+        }
+      } catch {
+        continue;
+      }
+    }
+    return null;
   }
 
   private lpAmountsValid(lpBnb: bigint, lpTokenValueBnb: bigint): boolean {
