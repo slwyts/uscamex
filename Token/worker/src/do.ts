@@ -9,7 +9,7 @@ import { BscTransactionClient, type ChainExecutionContext } from "./chain";
 import { defaultProtocolConfig, type ProtocolConfig } from "./config";
 import { Engine } from "./engine";
 import { loadSettings, type Env, type OperatorSettings } from "./env";
-import { ExecutionJournal } from "./journal";
+import { ExecutionJournal, type CommandRecord } from "./journal";
 import {
   classifySystemLog,
   decodeProtocolLog,
@@ -26,6 +26,7 @@ import {
 import {
   deserializeState,
   ProtocolState,
+  rebuildInvestedDirectCounts,
   serializeState,
   type SerializedState,
   type UserAccount,
@@ -335,7 +336,7 @@ export class OperatorDO extends DurableObject<Env> {
   // ---- scan implementation ----
   private async scanOnce(): Promise<void> {
     const rpc = new BscRpcClient(this.settings.rpcUrl, this.settings.tokenAddress);
-    const storage = new D1Storage(this.env.DB);
+    const storage = new D1Storage(this.env.DB, this.settings.tokenAddress);
 
     await this.ensureRoot(rpc);
     await this.reconcileStoredEvents(storage);
@@ -584,6 +585,7 @@ export class OperatorDO extends DurableObject<Env> {
 
   // ---- admin query RPC (read-only) ----
   async getState(): Promise<SerializedState> {
+    rebuildInvestedDirectCounts(this.state);
     return serializeState(this.state);
   }
 
@@ -614,6 +616,7 @@ export class OperatorDO extends DurableObject<Env> {
     );
   }
   async getOverview(): Promise<unknown> {
+    rebuildInvestedDirectCounts(this.state);
     return {
       ready: this.ready,
       root: this.state.root,
@@ -658,6 +661,7 @@ export class OperatorDO extends DurableObject<Env> {
   }
 
   async queryStats(): Promise<unknown> {
+    rebuildInvestedDirectCounts(this.state);
     await this.syncBuilderTokenBalance(new BscRpcClient(this.settings.rpcUrl, this.settings.tokenAddress)).catch(
       () => undefined,
     );
@@ -676,7 +680,7 @@ export class OperatorDO extends DurableObject<Env> {
       totalDynamic += u.dynamicPaidBnb;
     }
     const counts = this.statusCounts();
-    const lastBlock = await new D1Storage(this.env.DB).lastIndexedBlock();
+    const lastBlock = await new D1Storage(this.env.DB, this.settings.tokenAddress).lastIndexedBlock();
     return {
       chain_id: this.settings.chainId,
       token_address: this.settings.tokenAddress,
@@ -719,6 +723,7 @@ export class OperatorDO extends DurableObject<Env> {
   }
 
   async queryUser(address: string): Promise<unknown> {
+    rebuildInvestedDirectCounts(this.state);
     const nodes = this.nodeWeightMap();
     const u = this.state.user(address);
     const referrer = u?.referrer && u.referrer !== address ? u.referrer : null;
@@ -736,6 +741,7 @@ export class OperatorDO extends DurableObject<Env> {
   }
 
   async queryUsers(limit: number, offset: number, sort: string, filter: string): Promise<unknown> {
+    rebuildInvestedDirectCounts(this.state);
     const nodes = this.nodeWeightMap();
     let addrs = [...this.state.users.keys()];
     addrs = addrs.filter((a) => {
@@ -865,7 +871,8 @@ export class OperatorDO extends DurableObject<Env> {
   }
 
   async queryJournalList(limit: number, offset: number, status: string): Promise<unknown> {
-    const all = this.journal.recordsInExecutionOrder();
+    const eventSortKeys = await this.journalEventSortKeys([...this.journal.records.values()]);
+    const all = [...this.journal.records.values()].sort((a, b) => compareJournalRecordsNewestFirst(a, b, eventSortKeys));
     const mapStatus = (s: import("./journal").CommandStatus) => s.state.toLowerCase();
     const filtered =
       status === "all" ? all : all.filter((r) => mapStatus(r.status) === status.toLowerCase());
@@ -884,6 +891,34 @@ export class OperatorDO extends DurableObject<Env> {
       payload: serializeCommandForApi(r.command),
     }));
     return { total, limit, offset, items, counts };
+  }
+
+  private async journalEventSortKeys(records: CommandRecord[]): Promise<Map<string, JournalEventSortKey>> {
+    const ids = [...new Set(records.map((record) => eventIdFromJournalId(record.id)).filter((id): id is string => id != null))];
+    const keys = new Map<string, JournalEventSortKey>();
+    if (ids.length === 0) return keys;
+
+    const chunkSize = 100;
+    for (let offset = 0; offset < ids.length; offset += chunkSize) {
+      const chunk = ids.slice(offset, offset + chunkSize);
+      const placeholders = chunk.map(() => "?").join(",");
+      const { results } = await this.env.DB
+        .prepare(
+          `SELECT id, block_number, log_index, created_at
+             FROM chain_events
+            WHERE id IN (${placeholders})`,
+        )
+        .bind(...chunk)
+        .all<{ id: string; block_number: number; log_index: number; created_at: string }>();
+      for (const row of results) {
+        keys.set(row.id.toLowerCase(), {
+          blockNumber: BigInt(row.block_number),
+          logIndex: row.log_index,
+          timestampMs: parseSqliteUtcMs(row.created_at),
+        });
+      }
+    }
+    return keys;
   }
 
   /**
@@ -917,6 +952,118 @@ export class OperatorDO extends DurableObject<Env> {
     await this.persist();
     return { retried, tx_hashes: txHashes };
   }
+
+}
+
+interface JournalEventSortKey {
+  timestampMs: number | null;
+  blockNumber: bigint;
+  logIndex: number;
+}
+
+interface JournalDisplaySortKey {
+  timestampMs: number | null;
+  blockNumber: bigint | null;
+  logIndex: number;
+  sequence: number;
+  id: string;
+}
+
+function compareJournalRecordsNewestFirst(
+  a: CommandRecord,
+  b: CommandRecord,
+  eventSortKeys: Map<string, JournalEventSortKey>,
+): number {
+  const ak = journalDisplaySortKey(a, eventSortKeys);
+  const bk = journalDisplaySortKey(b, eventSortKeys);
+
+  if (ak.timestampMs != null && bk.timestampMs != null && ak.timestampMs !== bk.timestampMs) {
+    return bk.timestampMs - ak.timestampMs;
+  }
+  if (ak.timestampMs != null && bk.timestampMs == null) return -1;
+  if (ak.timestampMs == null && bk.timestampMs != null) return 1;
+
+  if (ak.blockNumber != null && bk.blockNumber != null && ak.blockNumber !== bk.blockNumber) {
+    return ak.blockNumber < bk.blockNumber ? 1 : -1;
+  }
+  if (ak.blockNumber != null && bk.blockNumber == null) return -1;
+  if (ak.blockNumber == null && bk.blockNumber != null) return 1;
+
+  if (ak.logIndex !== bk.logIndex) return bk.logIndex - ak.logIndex;
+  if (ak.sequence !== bk.sequence) return bk.sequence - ak.sequence;
+  return ak.id < bk.id ? 1 : ak.id > bk.id ? -1 : 0;
+}
+
+function journalDisplaySortKey(
+  record: CommandRecord,
+  eventSortKeys: Map<string, JournalEventSortKey>,
+): JournalDisplaySortKey {
+  const eventId = eventIdFromJournalId(record.id);
+  const eventKey = eventId ? eventSortKeys.get(eventId) : null;
+  if (eventKey) {
+    return {
+      timestampMs: eventKey.timestampMs,
+      blockNumber: eventKey.blockNumber,
+      logIndex: eventKey.logIndex,
+      sequence: record.order?.sequence ?? sequenceFromJournalId(record.id),
+      id: record.id,
+    };
+  }
+
+  const slotMs = slotTimestampMsFromJournalId(record.id);
+  if (slotMs != null) {
+    return {
+      timestampMs: slotMs,
+      blockNumber: null,
+      logIndex: 0,
+      sequence: sequenceFromJournalId(record.id),
+      id: record.id,
+    };
+  }
+
+  return {
+    timestampMs: null,
+    blockNumber: record.order?.blockNumber ?? null,
+    logIndex: record.order?.logIndex ?? 0,
+    sequence: record.order?.sequence ?? sequenceFromJournalId(record.id),
+    id: record.id,
+  };
+}
+
+function eventIdFromJournalId(id: string): string | null {
+  const match = /^(?:deposit|tax):(0x[0-9a-fA-F]{64}):(\d+):\d+:[^:]+$/.exec(id);
+  return match ? `${match[1].toLowerCase()}:${match[2]}` : null;
+}
+
+function sequenceFromJournalId(id: string): number {
+  const match = /:(\d+):[^:]+$/.exec(id);
+  return match ? Number(match[1]) : 0;
+}
+
+function slotTimestampMsFromJournalId(id: string): number | null {
+  const prefixed = /^(?:buyback|deflation|tax):(.+):\d+:[^:]+$/.exec(id);
+  if (prefixed) return parseSlotMs(prefixed[1]);
+
+  const settlement = /^static:[^:]+:(.+):\d+:[^:]+$/.exec(id);
+  return settlement ? parseSlotMs(settlement[1]) : null;
+}
+
+function parseSlotMs(slot: string): number | null {
+  const utc = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})(?::(\d{2}))?Z$/.exec(slot);
+  if (utc) {
+    return Date.UTC(Number(utc[1]), Number(utc[2]) - 1, Number(utc[3]), Number(utc[4]), Number(utc[5] ?? 0));
+  }
+
+  const utc8 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})\+08(?:\/\d+)?$/.exec(slot);
+  if (utc8) {
+    return Date.UTC(Number(utc8[1]), Number(utc8[2]) - 1, Number(utc8[3]), Number(utc8[4]) - 8, Number(utc8[5]));
+  }
+  return null;
+}
+
+function parseSqliteUtcMs(value: string): number | null {
+  const ms = Date.parse(`${value.replace(" ", "T")}Z`);
+  return Number.isFinite(ms) ? ms : null;
 }
 
 // ---- slot formatting (runtime.rs:345-391) ----

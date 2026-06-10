@@ -232,3 +232,25 @@ describe("service: tax sweep throttling", () => {
     expect(state.pendingTaxSweep.taxTokenAmount).toBe(3n);
   });
 });
+
+describe("service: settlement derived counters", () => {
+  it("rebuilds invested-direct counts before team reward settlement", () => {
+    const state = new ProtocolState("root");
+    const setupEngine = new Engine(defaultProtocolConfig());
+    setupEngine.bind(state, "alice", "root");
+    setupEngine.deposit(state, "alice", BNB);
+    setupEngine.bind(state, "bob", "alice");
+    setupEngine.deposit(state, "bob", BNB);
+    state.ensureUserMut("alice").investedDirectCount = 0;
+
+    const journal = new ExecutionJournal();
+    const service = serviceWith({ async submit() { return TX_HASH; } }, journal, state);
+    service.tickSettlements("period-1");
+
+    expect(state.user("alice")!.investedDirectCount).toBe(1);
+    const aliceRewards = journal.pendingCommands()
+      .map(([, command]) => command)
+      .filter((command) => command.kind === "PayRewardTokenByBnbValue" && command.to === "alice");
+    expect(aliceRewards.some((command) => command.kind === "PayRewardTokenByBnbValue" && command.amount === BNB / 5000n)).toBe(true);
+  });
+});

@@ -211,6 +211,7 @@ contract USCAMETest is MiniTest {
     address private bob = address(0xB0B);
     address private carol = address(0xCA);
     address private dave = address(0xD0A0E);
+    address private constant BURN = 0x000000000000000000000000000000000000dEaD;
 
     receive() external payable { }
 
@@ -276,6 +277,19 @@ contract USCAMETest is MiniTest {
         assertEq(pair.balance, 10 ether);
         vm.expectRevert(bytes("INIT"));
         token.initializeLP();
+    }
+
+    function testBurnAddressIsFeeExemptForBuyback() public {
+        address pair = token.pair();
+        assertTrue(token.feeExempt(BURN));
+        uint256 amount = 1_000 ether;
+        uint256 contractBefore = token.balanceOf(address(token));
+        uint256 burnBefore = token.balanceOf(BURN);
+
+        MockPair(payable(pair)).buy(BURN, amount);
+
+        assertEq(token.balanceOf(address(token)), contractBefore);
+        assertEq(token.balanceOf(BURN), burnBefore + amount);
     }
 
     function testBindCostTransferBindsReferralTree() public {

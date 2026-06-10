@@ -245,12 +245,12 @@ export async function handleAdmin(req: Request, ctx: AdminContext): Promise<Resp
     }
     case "/api/admin/config-history": {
       const limit = intParam(url, "limit", 50, 200);
-      return json({ signer, items: await queryConfigHistory(ctx.env, limit) });
+      return json({ signer, items: await queryConfigHistory(ctx.env, ctx.settings.tokenAddress, limit) });
     }
     case "/api/admin/node-history": {
       const limit = intParam(url, "limit", 100, 500);
       const address = url.searchParams.get("address");
-      return json({ signer, items: await queryNodeHistory(ctx.env, limit, address) });
+      return json({ signer, items: await queryNodeHistory(ctx.env, ctx.settings.tokenAddress, limit, address) });
     }
     default:
       return json({ error: `route not found: ${path}` }, 404);
@@ -263,12 +263,12 @@ function env(ctx: AdminContext): Env {
 
 // ---- D1 history queries (config/node history live in D1, not the DO) ----
 
-async function queryConfigHistory(env: Env, limit: number): Promise<unknown[]> {
+async function queryConfigHistory(env: Env, tokenAddress: string, limit: number): Promise<unknown[]> {
   const { results } = await env.DB.prepare(
     `SELECT id, payload, updated_by, created_at, block_number, tx_hash
-       FROM protocol_config_history ORDER BY id DESC LIMIT ?`,
+       FROM protocol_config_history WHERE token_address = ? ORDER BY id DESC LIMIT ?`,
   )
-    .bind(limit)
+    .bind(tokenAddress.toLowerCase(), limit)
     .all<{
       id: number;
       payload: string;
@@ -287,16 +287,16 @@ async function queryConfigHistory(env: Env, limit: number): Promise<unknown[]> {
   }));
 }
 
-async function queryNodeHistory(env: Env, limit: number, address: string | null): Promise<unknown[]> {
+async function queryNodeHistory(env: Env, tokenAddress: string, limit: number, address: string | null): Promise<unknown[]> {
   const stmt = address
     ? env.DB.prepare(
         `SELECT id, node_address, weight, block_number, tx_hash, updated_by, created_at
-           FROM node_history WHERE node_address = ? ORDER BY id DESC LIMIT ?`,
-      ).bind(address.toLowerCase(), limit)
+           FROM node_history WHERE token_address = ? AND node_address = ? ORDER BY id DESC LIMIT ?`,
+      ).bind(tokenAddress.toLowerCase(), address.toLowerCase(), limit)
     : env.DB.prepare(
         `SELECT id, node_address, weight, block_number, tx_hash, updated_by, created_at
-           FROM node_history ORDER BY id DESC LIMIT ?`,
-      ).bind(limit);
+           FROM node_history WHERE token_address = ? ORDER BY id DESC LIMIT ?`,
+      ).bind(tokenAddress.toLowerCase(), limit);
   const { results } = await stmt.all<{
     id: number;
     node_address: string;

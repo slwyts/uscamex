@@ -9,6 +9,7 @@ import { IPancakeFactory, IPancakePair, IPancakeRouter, IWETH } from "./interfac
 
 contract USCAME is ERC20, Ownable, ReentrancyGuard {
     uint256 public constant BPS = 10_000;
+    address public constant BURN_ADDRESS = 0x000000000000000000000000000000000000dEaD;
 
     struct ProtocolConfigInput {
         address operator;
@@ -170,6 +171,7 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         feeExempt[address(this)] = true;
         feeExempt[operator] = true;
         feeExempt[vault] = true;
+        feeExempt[BURN_ADDRESS] = true;
         _mint(address(this), 1_000_000_000 ether);
         emit RefBound(root, root);
         emit VaultCreated(vault);

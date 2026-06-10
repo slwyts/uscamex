@@ -30,18 +30,23 @@ export function configPayloadHash(config: ProtocolConfig): string {
 }
 
 export class D1Storage {
-  constructor(private db: D1Database) {}
+  private tokenAddress: string;
+
+  constructor(private db: D1Database, tokenAddress: string) {
+    this.tokenAddress = tokenAddress.toLowerCase();
+  }
 
   async insertEvent(event: IndexedEvent): Promise<boolean> {
     const id = event.event.id;
     const res = await this.db
       .prepare(
         `INSERT OR IGNORE INTO chain_events
-           (id, block_number, block_hash, tx_hash, log_index, kind, payload)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (id, token_address, block_number, block_hash, tx_hash, log_index, kind, payload)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         id,
+        this.tokenAddress,
         Number(event.blockNumber),
         event.blockHash,
         event.txHash,
@@ -55,8 +60,8 @@ export class D1Storage {
 
   async containsEvent(id: string): Promise<boolean> {
     const row = await this.db
-      .prepare("SELECT 1 AS x FROM chain_events WHERE id = ? LIMIT 1")
-      .bind(id)
+      .prepare("SELECT 1 AS x FROM chain_events WHERE token_address = ? AND id = ? LIMIT 1")
+      .bind(this.tokenAddress, id)
       .first<{ x: number }>();
     return row != null;
   }
@@ -66,11 +71,11 @@ export class D1Storage {
       .prepare(
         `SELECT id, block_number, block_hash, tx_hash, log_index, kind, payload
            FROM chain_events
-          WHERE block_number >= ? AND block_number <= ?
+          WHERE token_address = ? AND block_number >= ? AND block_number <= ?
           ORDER BY block_number, log_index
           LIMIT ? OFFSET ?`,
       )
-      .bind(Number(fromBlock), Number(toBlock), limit, offset)
+      .bind(this.tokenAddress, Number(fromBlock), Number(toBlock), limit, offset)
       .all<StoredEventRow>();
     return results.map(storedEventRowToIndexedEvent);
   }
@@ -78,16 +83,19 @@ export class D1Storage {
   async recordBlock(block: StoredBlock): Promise<void> {
     await this.db
       .prepare(
-        `INSERT INTO chain_blocks (block_number, block_hash) VALUES (?, ?)
-         ON CONFLICT (block_number) DO UPDATE SET block_hash = excluded.block_hash`,
+        `INSERT INTO chain_blocks (token_address, block_number, block_hash) VALUES (?, ?, ?)
+         ON CONFLICT (token_address, block_number) DO UPDATE SET block_hash = excluded.block_hash`,
       )
-      .bind(Number(block.number), block.hash)
+      .bind(this.tokenAddress, Number(block.number), block.hash)
       .run();
   }
 
   async lastIndexedBlock(): Promise<StoredBlock | null> {
     const row = await this.db
-      .prepare("SELECT block_number, block_hash FROM chain_blocks ORDER BY block_number DESC LIMIT 1")
+      .prepare(
+        "SELECT block_number, block_hash FROM chain_blocks WHERE token_address = ? ORDER BY block_number DESC LIMIT 1",
+      )
+      .bind(this.tokenAddress)
       .first<{ block_number: number; block_hash: string }>();
     return row ? { number: BigInt(row.block_number), hash: row.block_hash } : null;
   }
@@ -95,8 +103,8 @@ export class D1Storage {
   /** True if we recorded this block with a different hash (reorg). */
   async isReorg(blockNumber: bigint, observedHash: string): Promise<boolean> {
     const row = await this.db
-      .prepare("SELECT block_hash FROM chain_blocks WHERE block_number = ?")
-      .bind(Number(blockNumber))
+      .prepare("SELECT block_hash FROM chain_blocks WHERE token_address = ? AND block_number = ?")
+      .bind(this.tokenAddress, Number(blockNumber))
       .first<{ block_hash: string }>();
     return row != null && row.block_hash !== observedHash;
   }
@@ -114,14 +122,17 @@ export class D1Storage {
 
     await this.db
       .prepare(
-        `INSERT INTO protocol_config (key, payload, updated_by) VALUES ('current', ?, ?)
-         ON CONFLICT (key) DO UPDATE SET payload = excluded.payload, updated_by = excluded.updated_by, updated_at = datetime('now')`,
+        `INSERT INTO protocol_config (token_address, key, payload, updated_by) VALUES (?, 'current', ?, ?)
+         ON CONFLICT (token_address, key) DO UPDATE SET payload = excluded.payload, updated_by = excluded.updated_by, updated_at = datetime('now')`,
       )
-      .bind(payload, updatedBy)
+      .bind(this.tokenAddress, payload, updatedBy)
       .run();
 
     const last = await this.db
-      .prepare("SELECT payload_hash, tx_hash FROM protocol_config_history ORDER BY id DESC LIMIT 1")
+      .prepare(
+        "SELECT payload_hash, tx_hash FROM protocol_config_history WHERE token_address = ? ORDER BY id DESC LIMIT 1",
+      )
+      .bind(this.tokenAddress)
       .first<{ payload_hash: string | null; tx_hash: string | null }>();
 
     let shouldInsert = true;
@@ -135,10 +146,10 @@ export class D1Storage {
     await this.db
       .prepare(
         `INSERT INTO protocol_config_history
-           (key, payload, updated_by, block_number, tx_hash, payload_hash)
-         VALUES ('current', ?, ?, ?, ?, ?)`,
+           (token_address, key, payload, updated_by, block_number, tx_hash, payload_hash)
+         VALUES (?, 'current', ?, ?, ?, ?, ?)`,
       )
-      .bind(payload, updatedBy, blockNumber == null ? null : Number(blockNumber), txLower, payloadHash)
+      .bind(this.tokenAddress, payload, updatedBy, blockNumber == null ? null : Number(blockNumber), txLower, payloadHash)
       .run();
     return true;
   }
@@ -154,17 +165,19 @@ export class D1Storage {
     const addr = nodeAddress.toLowerCase();
     const txLower = txHash ? txHash.toLowerCase() : null;
     const last = await this.db
-      .prepare("SELECT weight, tx_hash FROM node_history WHERE node_address = ? ORDER BY id DESC LIMIT 1")
-      .bind(addr)
+      .prepare(
+        "SELECT weight, tx_hash FROM node_history WHERE token_address = ? AND node_address = ? ORDER BY id DESC LIMIT 1",
+      )
+      .bind(this.tokenAddress, addr)
       .first<{ weight: number; tx_hash: string | null }>();
     if (last && last.weight === weight && last.tx_hash === txLower) return false;
 
     await this.db
       .prepare(
-        `INSERT INTO node_history (node_address, weight, block_number, tx_hash, updated_by)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO node_history (token_address, node_address, weight, block_number, tx_hash, updated_by)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .bind(addr, weight, blockNumber == null ? null : Number(blockNumber), txLower, updatedBy)
+      .bind(this.tokenAddress, addr, weight, blockNumber == null ? null : Number(blockNumber), txLower, updatedBy)
       .run();
     return true;
   }

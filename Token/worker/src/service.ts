@@ -12,7 +12,7 @@ import {
 } from "./executor";
 import type { IndexedEvent } from "./indexer";
 import { ExecutionJournal } from "./journal";
-import { deserializeState, newPendingTaxSweep, serializeState, type PendingTaxSweep, type ProtocolState } from "./state";
+import { deserializeState, newPendingTaxSweep, rebuildInvestedDirectCounts, serializeState, type PendingTaxSweep, type ProtocolState } from "./state";
 
 const MIN_TAX_SWEEP_SELL_TOKENS = 10n ** 18n;
 
@@ -99,6 +99,7 @@ export class OperatorService {
 
   /** service.rs:143 — uplines settled before downlines. */
   tickSettlements(periodKey: string): number {
+    rebuildInvestedDirectCounts(this.state);
     const activeUsers = [...this.state.users.entries()]
       .filter(([, a]) => a.active && a.principalBnb > 0n)
       .map(([address]) => address);

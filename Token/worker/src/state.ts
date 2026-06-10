@@ -298,7 +298,7 @@ function deserializePendingTaxSweep(pending: NonNullable<SerializedState["pendin
   };
 }
 
-function rebuildInvestedDirectCounts(s: ProtocolState): void {
+export function rebuildInvestedDirectCounts(s: ProtocolState): void {
   for (const account of s.users.values()) account.investedDirectCount = 0;
   for (const [addr, account] of s.users) {
     if (!account.hasInvested) continue;
