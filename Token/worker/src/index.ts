@@ -15,6 +15,10 @@ function operatorStub(env: Env): DurableObjectStub {
   return env.OPERATOR.get(env.OPERATOR.idFromName(`operator:${env.TOKEN_ADDRESS.toLowerCase()}`));
 }
 
+function activeOperatorName(env: Env): string {
+  return `operator:${env.TOKEN_ADDRESS.toLowerCase()}`;
+}
+
 // owner() + chain head caches (admin_api.rs: owner 300s, head 10s)
 let ownerCache: { value: string; at: number } | null = null;
 let headCache: { value: number | null; at: number } | null = null;
@@ -61,7 +65,7 @@ export default {
     // Kick the scan loop on traffic (idempotent).
     const stub = operatorStub(env);
     // @ts-expect-error DO RPC
-    await stub.ensureRunning();
+    await stub.ensureRunning(activeOperatorName(env));
 
     const rpc = new BscRpcClient(settings.rpcUrl, settings.tokenAddress);
     let owner = "0x0000000000000000000000000000000000000000";
@@ -80,7 +84,7 @@ export default {
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
     const stub = operatorStub(env);
     // @ts-expect-error DO RPC
-    await stub.ensureRunning();
+    await stub.ensureRunning(activeOperatorName(env));
     // @ts-expect-error DO RPC
     await stub.runScheduledTicks();
   },

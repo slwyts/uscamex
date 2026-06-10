@@ -6,11 +6,21 @@
  */
 import { keccak256, toHex } from "viem";
 import type { ProtocolConfig } from "./config";
-import { eventKind, eventPayload, type IndexedEvent } from "./indexer";
+import { eventKind, eventPayload, type ChainEvent, type IndexedEvent, type TaxSide } from "./indexer";
 
 export interface StoredBlock {
   number: bigint;
   hash: string;
+}
+
+interface StoredEventRow {
+  id: string;
+  block_number: number;
+  block_hash: string;
+  tx_hash: string;
+  log_index: number;
+  kind: "RefBound" | "Deposit" | "TaxCollected";
+  payload: string;
 }
 
 /** keccak256 hex of the config JSON (storage.rs:664 config_payload_hash). */
@@ -49,6 +59,20 @@ export class D1Storage {
       .bind(id)
       .first<{ x: number }>();
     return row != null;
+  }
+
+  async storedEvents(fromBlock: bigint, toBlock: bigint, limit: number, offset: number): Promise<IndexedEvent[]> {
+    const { results } = await this.db
+      .prepare(
+        `SELECT id, block_number, block_hash, tx_hash, log_index, kind, payload
+           FROM chain_events
+          WHERE block_number >= ? AND block_number <= ?
+          ORDER BY block_number, log_index
+          LIMIT ? OFFSET ?`,
+      )
+      .bind(Number(fromBlock), Number(toBlock), limit, offset)
+      .all<StoredEventRow>();
+    return results.map(storedEventRowToIndexedEvent);
   }
 
   async recordBlock(block: StoredBlock): Promise<void> {
@@ -144,4 +168,59 @@ export class D1Storage {
       .run();
     return true;
   }
+}
+
+function storedEventRowToIndexedEvent(row: StoredEventRow): IndexedEvent {
+  const payload = JSON.parse(row.payload) as Record<string, unknown>;
+  return {
+    blockNumber: BigInt(row.block_number),
+    blockHash: row.block_hash,
+    txHash: row.tx_hash,
+    logIndex: row.log_index,
+    event: storedEventFromPayload(row.id, row.kind, payload),
+  };
+}
+
+function storedEventFromPayload(
+  id: string,
+  kind: StoredEventRow["kind"],
+  payload: Record<string, unknown>,
+): ChainEvent {
+  switch (kind) {
+    case "RefBound":
+      return {
+        kind,
+        id,
+        user: stringField(payload, "user"),
+        referrer: stringField(payload, "referrer"),
+      };
+    case "Deposit":
+      return {
+        kind,
+        id,
+        user: stringField(payload, "user"),
+        amount: BigInt(stringField(payload, "amount")),
+      };
+    case "TaxCollected":
+      return {
+        kind,
+        id,
+        from: stringField(payload, "from"),
+        to: stringField(payload, "to"),
+        amount: BigInt(stringField(payload, "amount")),
+        side: taxSideFromStored(stringField(payload, "side")),
+      };
+  }
+}
+
+function stringField(payload: Record<string, unknown>, key: string): string {
+  const value = payload[key];
+  if (typeof value !== "string") throw new Error(`invalid stored chain event payload: ${key}`);
+  return value.toLowerCase();
+}
+
+function taxSideFromStored(value: string): TaxSide {
+  if (value === "buy") return "Buy";
+  if (value === "sell") return "Sell";
+  throw new Error(`invalid stored tax side: ${value}`);
 }

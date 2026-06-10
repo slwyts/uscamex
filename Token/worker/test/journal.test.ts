@@ -80,4 +80,35 @@ describe("journal idempotency", () => {
       expect(cmd.nodePayouts[1].to).toBe("0xnode2");
     }
   });
+
+  it("orders commands by chain position instead of tx hash", () => {
+    const journal = new ExecutionJournal();
+    const firstId = journal.planBatch(`deposit:0x${"f".repeat(64)}:0`, [commands[0]], {
+      blockNumber: 10n,
+      logIndex: 1,
+    })[0];
+    const secondId = journal.planBatch(`deposit:0x${"0".repeat(64)}:0`, [commands[1]], {
+      blockNumber: 10n,
+      logIndex: 2,
+    })[0];
+
+    expect(firstId > secondId).toBe(true);
+    expect(journal.pendingCommands().map(([id]) => id)).toEqual([firstId, secondId]);
+  });
+
+  it("preserves chain ordering metadata through JSON", () => {
+    const journal = new ExecutionJournal();
+    const firstId = journal.planBatch(`deposit:0x${"f".repeat(64)}:0`, [commands[0]], {
+      blockNumber: 11n,
+      logIndex: 1,
+    })[0];
+    const secondId = journal.planBatch(`deposit:0x${"0".repeat(64)}:0`, [commands[1]], {
+      blockNumber: 11n,
+      logIndex: 2,
+    })[0];
+
+    const restored = ExecutionJournal.fromJSON(journal.toJSON() as never);
+    expect(restored.records.get(firstId)!.order).toEqual({ blockNumber: 11n, logIndex: 1, sequence: 0 });
+    expect(restored.pendingCommands().map(([id]) => id)).toEqual([firstId, secondId]);
+  });
 });

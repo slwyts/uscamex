@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -26,6 +26,7 @@ const MANIFEST_PATH = join(LOCALTEST_DIR, "manifest.json");
 const WORKER_CONFIG_PATH = join(WORKER_DIR, "wrangler.localtest.generated.jsonc");
 const WORKER_DEV_VARS_PATH = join(WORKER_DIR, ".dev.vars.localtest");
 const WORKER_LOCAL_DIR = join(WORKER_DIR, ".localtest");
+const LOCALTEST_ADMIN_DIST = join(LOCALTEST_DIR, "admin-dist");
 
 loadDotEnv(join(ROOT, ".env"));
 loadDotEnv(join(ROOT, ".env.localtest"));
@@ -63,6 +64,7 @@ async function main() {
   await run("forge", ["build"], { cwd: TOKEN_DIR });
   await run("pnpm", ["--dir", "Token/admin", "install"], { cwd: ROOT });
   await run("pnpm", ["--dir", "Token/admin", "build"], { cwd: ROOT });
+  prepareLocaltestAdminDist();
 
   const forkBlock = await resolveForkBlockNumber();
   const anvil = startAnvil(forkBlock);
@@ -252,7 +254,7 @@ function writeLocaltestFiles({ tokenAddress, vaultAddress, pairAddress, deployme
         compatibility_flags: ["nodejs_compat"],
         observability: { enabled: true },
         assets: {
-          directory: "../admin/dist",
+          directory: "../localtest/admin-dist",
           binding: "ASSETS",
           not_found_handling: "single-page-application",
           run_worker_first: ["/api/*"],
@@ -304,7 +306,7 @@ function writeLocaltestFiles({ tokenAddress, vaultAddress, pairAddress, deployme
 }
 
 function injectAdminLocaltestWallet() {
-  const indexPath = join(TOKEN_DIR, "admin/dist/index.html");
+  const indexPath = join(LOCALTEST_ADMIN_DIST, "index.html");
   if (!existsSync(indexPath)) fail("admin dist/index.html not found after build");
   const config = {
     chainId: BSC_CHAIN_ID,
@@ -319,6 +321,14 @@ function injectAdminLocaltestWallet() {
   const html = readFileSync(indexPath, "utf8");
   if (html.includes("__USCAMEX_LOCALTEST_WALLET__")) return;
   writeFileSync(indexPath, html.replace("<script", `${script}\n    <script`));
+}
+
+function prepareLocaltestAdminDist() {
+  const source = join(TOKEN_DIR, "admin/dist");
+  if (!existsSync(source)) fail("admin dist not found after build");
+  rmSync(LOCALTEST_ADMIN_DIST, { recursive: true, force: true });
+  mkdirSync(LOCALTEST_ADMIN_DIST, { recursive: true });
+  cpSync(source, LOCALTEST_ADMIN_DIST, { recursive: true });
 }
 
 async function resolveForkBlockNumber() {

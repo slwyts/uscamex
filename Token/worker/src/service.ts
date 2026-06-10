@@ -67,7 +67,10 @@ export class OperatorService {
         const allocation = this.engine.computeDeposit(this.planningState, event.user, event.amount);
         const commands = commandsForDeposit(allocation);
         plannedCommands = commands.length;
-        this.journal.planBatch(`deposit:${eventId}`, commands);
+        this.journal.planBatch(`deposit:${eventId}`, commands, {
+          blockNumber: indexed.blockNumber,
+          logIndex: indexed.logIndex,
+        });
         this.engine.applyDeposit(this.planningState, allocation);
         break;
       }
@@ -75,7 +78,10 @@ export class OperatorService {
         const command = this.planTaxSweep(this.state, event.amount, event.side);
         if (this.planningState !== this.state) this.planTaxSweep(this.planningState, event.amount, event.side);
         if (command) {
-          this.journal.planBatch(`tax:${eventId}`, [command]);
+          this.journal.planBatch(`tax:${eventId}`, [command], {
+            blockNumber: indexed.blockNumber,
+            logIndex: indexed.logIndex,
+          });
           plannedCommands = 1;
         }
         break;
@@ -165,7 +171,7 @@ export class OperatorService {
       } catch (e) {
         const err = String((e as Error).message ?? e);
         console.error(`submitPending: ${id} failed: ${err}`);
-        if (this.journal.canRetry(id)) {
+        if (this.journal.canRetry(id, err)) {
           this.journal.markFailed(id, err);
           this.journal.resetToPending(id);
         } else {
@@ -235,7 +241,7 @@ export function depositAllocationFromCommand(command: Extract<OperatorCommand, {
 
 function buildPlanningState(engine: Engine, state: ProtocolState, journal: ExecutionJournal): ProtocolState {
   const planning = deserializeState(serializeState(state));
-  const records = [...journal.records.values()].sort((a, b) => a.id.localeCompare(b.id));
+  const records = journal.recordsInExecutionOrder();
   for (const record of records) {
     if (record.status.state === "Confirmed") continue;
     if (record.command.kind !== "DepositBatch") continue;

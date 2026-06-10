@@ -21,6 +21,21 @@ const depositBatch: OperatorCommand = {
   nodePayouts: [],
 };
 
+function depositCommand(user: string, directReferrer: string | null): Extract<OperatorCommand, { kind: "DepositBatch" }> {
+  return {
+    kind: "DepositBatch",
+    user,
+    amount: BNB,
+    lpBnb: (3n * BNB) / 10n,
+    lpTokenValueBnb: (3n * BNB) / 10n,
+    builderBnb: BNB / 10n,
+    vaultBnb: BNB / 10n,
+    directReferrer,
+    directBnb: directReferrer ? BNB / 10n : 0n,
+    nodePayouts: [],
+  };
+}
+
 function serviceWith(chain: ChainClient, journal: ExecutionJournal, state = new ProtocolState("root")): OperatorService {
   return new OperatorService(
     new Engine(defaultProtocolConfig()),
@@ -110,5 +125,43 @@ describe("service: deposit planning", () => {
     const bobBatch = journal.pendingCommands().map(([, command]) => command).find((command) => command.kind === "DepositBatch" && command.user === "bob");
     expect(bobBatch).toMatchObject({ directReferrer: "alice", directBnb: BNB / 10n });
     expect(state.user("alice")!.principalBnb).toBe(0n);
+  });
+
+  it("submits rapid deposits in chain order, not tx hash order", () => {
+    const state = new ProtocolState("root");
+    const journal = new ExecutionJournal();
+    const service = serviceWith({ async submit() { return TX_HASH; } }, journal, state);
+    const highTx = `0x${"f".repeat(64)}`;
+    const lowTx = `0x${"0".repeat(64)}`;
+
+    service.processEvent({ blockNumber: 1n, blockHash: "0x1", txHash: highTx, logIndex: 0, event: { kind: "RefBound", id: `${highTx}:0`, user: "alice", referrer: "root" } });
+    service.processEvent({ blockNumber: 1n, blockHash: "0x1", txHash: highTx, logIndex: 1, event: { kind: "Deposit", id: `${highTx}:1`, user: "alice", amount: BNB } });
+    service.processEvent({ blockNumber: 1n, blockHash: "0x1", txHash: lowTx, logIndex: 2, event: { kind: "RefBound", id: `${lowTx}:2`, user: "bob", referrer: "alice" } });
+    service.processEvent({ blockNumber: 1n, blockHash: "0x1", txHash: lowTx, logIndex: 3, event: { kind: "Deposit", id: `${lowTx}:3`, user: "bob", amount: BNB } });
+
+    const pendingUsers = journal.pendingCommands().map(([, command]) => command.kind === "DepositBatch" ? command.user : command.kind);
+    expect(pendingUsers).toEqual(["alice", "bob"]);
+  });
+
+  it("rebuilds planning state by chain order when pending deposit ids sort differently", () => {
+    const state = new ProtocolState("root");
+    const setupEngine = new Engine(defaultProtocolConfig());
+    setupEngine.bind(state, "alice", "root");
+    setupEngine.bind(state, "bob", "alice");
+    const journal = new ExecutionJournal();
+    const firstId = journal.planBatch(`deposit:0x${"f".repeat(64)}:0`, [depositCommand("alice", "root")], {
+      blockNumber: 1n,
+      logIndex: 1,
+    })[0];
+    const secondId = journal.planBatch(`deposit:0x${"0".repeat(64)}:0`, [depositCommand("bob", "alice")], {
+      blockNumber: 1n,
+      logIndex: 2,
+    })[0];
+    expect(firstId > secondId).toBe(true);
+
+    const service = serviceWith({ async submit() { return TX_HASH; } }, journal, state);
+    const planningState = (service as unknown as { planningState: ProtocolState }).planningState;
+    expect(planningState.user("alice")!.principalBnb).toBe(BNB);
+    expect(planningState.user("alice")!.dynamicPaidBnb).toBe(BNB / 10n);
   });
 });

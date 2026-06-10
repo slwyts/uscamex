@@ -90,6 +90,36 @@ function kindLabel(kind: string): { text: string; tip: string } {
   return KIND_LABEL[kind] ?? { text: kind, tip: kind };
 }
 
+function shortHash(value: string): string {
+  return `${value.slice(0, 8)}…${value.slice(-6)}`;
+}
+
+function formatSlot(value: string): string {
+  return value
+    .replace(/^deflation:/, "")
+    .replace(/^buyback:/, "")
+    .replace("T", " ")
+    .replace("Z", "点")
+    .replace("+08", "");
+}
+
+function displayJournalId(record: JournalEntry): string {
+  const deposit = /^deposit:(0x[0-9a-fA-F]{64}):(\d+):\d+:deposit-batch$/.exec(record.id);
+  if (deposit) return `入金分配 ${shortHash(deposit[1])} #${deposit[2]}`;
+
+  const tax = /^tax:(0x[0-9a-fA-F]{64}):(\d+):\d+:sweep-tax-to-bnb$/.exec(record.id);
+  if (tax) return `税费清算 ${shortHash(tax[1])} #${tax[2]}`;
+
+  const deflation = /^deflation:(.+):\d+:pull-pair-tokens$/.exec(record.id);
+  if (deflation) return `LP通缩 ${formatSlot(deflation[1])}`;
+
+  const buyback = /^buyback:(.+):\d+:buyback$/.exec(record.id);
+  if (buyback) return `回购销毁 ${formatSlot(buyback[1])}`;
+
+  const label = kindLabel(record.kind).text;
+  return `${label} ${shortHash(record.id)}`;
+}
+
 const STATUS_TEXT: Record<string, string> = {
   pending: "待执行",
   submitted: "已提交",
@@ -217,12 +247,13 @@ function JournalPanel() {
           }}
           columns={[
             {
-              title: "ID",
+              title: "流水编号",
               dataIndex: "id",
+              width: 260,
               ellipsis: true,
-              render: (v: string) => (
-                <Tooltip title={v}>
-                  <span className="address-mono">{v}</span>
+              render: (_v: string, record) => (
+                <Tooltip title={`原始ID：${record.id}`}>
+                  <span>{displayJournalId(record)}</span>
                 </Tooltip>
               ),
             },

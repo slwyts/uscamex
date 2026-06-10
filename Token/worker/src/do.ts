@@ -68,6 +68,11 @@ export class OperatorDO extends DurableObject<Env> {
   private lastDeflationSlot: string | null = null;
   private lastBuybackSlot: string | null = null;
   private stateHadAppliedDepositBatches = false;
+  private storedEventsReconciled = false;
+  private confirmedDepositCommandsReconciled = false;
+  private disabled = false;
+  private instanceName: string | null = null;
+  private instanceTokenAddress: string | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -81,6 +86,9 @@ export class OperatorDO extends DurableObject<Env> {
       this.lastDeflationSlot = (await this.ctx.storage.get<string>("slot:deflation")) ?? null;
       this.lastBuybackSlot = (await this.ctx.storage.get<string>("slot:buyback")) ?? null;
       this.vaultAddress = (await this.ctx.storage.get<string>("vault")) ?? null;
+      this.disabled = (await this.ctx.storage.get<boolean>("disabled")) ?? false;
+      this.instanceName = (await this.ctx.storage.get<string>("instance:name")) ?? null;
+      this.instanceTokenAddress = (await this.ctx.storage.get<string>("instance:token")) ?? null;
       this.ready = true;
     });
   }
@@ -121,8 +129,8 @@ export class OperatorDO extends DurableObject<Env> {
     return new OperatorService(this.engine, this.state, this.journal, cache, chain, () => this.persist());
   }
 
-  private newChain(): ChainClient {
-    const ctx: ChainExecutionContext = {
+  private chainContext(): ChainExecutionContext {
+    return {
       tokenAddress: this.settings.tokenAddress,
       vaultAddress: this.vaultAddress ?? this.settings.tokenAddress,
       routerAddress: this.settings.pancakeV2Router,
@@ -132,24 +140,48 @@ export class OperatorDO extends DurableObject<Env> {
       slippageBps: this.settings.executorSlippageBps,
       deadlineSeconds: this.settings.transactionDeadlineSeconds,
     };
-    const client = new BscTransactionClient(
+  }
+
+  private newTransactionClient(): BscTransactionClient {
+    return new BscTransactionClient(
       this.settings.rpcUrl,
       this.settings.chainId,
       this.settings.operatorPrivateKey,
-      ctx,
+      this.chainContext(),
       this.settings.confirmations,
       this.settings.ammFeeBps,
     );
+  }
+
+  private newChain(): ChainClient {
+    const client = this.newTransactionClient();
     return {
       submit: (command) => client.submit(command),
       findConfirmedCommand: (id, command) => client.findConfirmedCommand(id, command),
       afterConfirmed: async (id, command, txHash) => {
         if (command.kind !== "DepositBatch") return;
         if (this.state.appliedDepositBatches.has(id)) return;
-        const lpMinted = await client.depositBatchLpMinted(txHash, command);
-        if (command.lpBnb !== 0n && lpMinted === 0n) throw new Error("deposit batch LP mint event missing");
-        this.engine.applyDeposit(this.state, depositAllocationFromCommand(command));
-        this.state.ensureUserMut(command.user).lpTokenPrincipal += lpMinted;
+        const executed = await client.depositBatchExecution(txHash, command);
+        if (!executed) throw new Error("deposit batch execution event missing");
+        if (command.lpBnb !== 0n && executed.lpMinted === 0n) throw new Error("deposit batch LP mint event missing");
+        const nodeBnb = command.nodePayouts.reduce((sum, payout) => sum + payout.amount, 0n);
+        if (executed.nodeBnb !== nodeBnb) throw new Error("deposit batch node payout mismatch");
+        const actualCommand = {
+          ...command,
+          lpBnb: executed.lpBnb,
+          lpTokenValueBnb: executed.lpTokenValueBnb,
+          builderBnb: executed.builderBnb,
+          vaultBnb: executed.vaultBnb,
+          directReferrer: executed.directReferrer,
+          directBnb: executed.directBnb,
+        };
+        const record = this.journal.records.get(id);
+        if (record?.command.kind === "DepositBatch") record.command = actualCommand;
+        this.engine.applyDeposit(
+          this.state,
+          depositAllocationFromCommand(actualCommand),
+        );
+        this.state.ensureUserMut(command.user).lpTokenPrincipal += executed.lpMinted;
         this.state.appliedDepositBatches.add(id);
       },
     };
@@ -157,13 +189,64 @@ export class OperatorDO extends DurableObject<Env> {
 
   // ---- public RPC (called from Worker) ----
 
-  async ensureRunning(): Promise<void> {
+  private activeInstanceName(): string {
+    return `operator:${this.settings.tokenAddress.toLowerCase()}`;
+  }
+
+  private async disableStaleInstance(reason: string): Promise<void> {
+    this.disabled = true;
+    await this.ctx.storage.put("disabled", true);
+    await this.ctx.storage.put("disabledReason", reason);
+    await this.ctx.storage.deleteAlarm();
+    console.error(`disabled stale OperatorDO: ${reason}`);
+  }
+
+  private async canRunScheduledWork(): Promise<boolean> {
+    if (this.disabled) return false;
+    const expectedName = this.activeInstanceName();
+    const expectedToken = this.settings.tokenAddress.toLowerCase();
+    if (!this.instanceName || !this.instanceTokenAddress) {
+      // This instance predates the active-instance registration guard. Do not
+      // mutate chain state from an unregistered alarm; the active Worker stub will
+      // register and re-arm the current instance on the next fetch/cron tick.
+      await this.ctx.storage.deleteAlarm();
+      return false;
+    }
+    if (this.instanceName !== expectedName || this.instanceTokenAddress !== expectedToken) {
+      await this.disableStaleInstance(
+        `registered=${this.instanceName}/${this.instanceTokenAddress}, expected=${expectedName}/${expectedToken}`,
+      );
+      return false;
+    }
+    return true;
+  }
+
+  async ensureRunning(instanceName?: string): Promise<void> {
+    if (this.disabled) return;
+    const expectedName = this.activeInstanceName();
+    if (instanceName !== expectedName) {
+      await this.disableStaleInstance(`ensureRunning(${instanceName ?? "missing"}) expected ${expectedName}`);
+      return;
+    }
+    this.instanceName = instanceName;
+    this.instanceTokenAddress = this.settings.tokenAddress.toLowerCase();
+    await this.ctx.storage.put("instance:name", this.instanceName);
+    await this.ctx.storage.put("instance:token", this.instanceTokenAddress);
     const existing = await this.ctx.storage.getAlarm();
     if (existing == null) await this.ctx.storage.setAlarm(Date.now() + 1_000);
   }
 
+  async stopRunning(): Promise<{ disabled: boolean; clearedAlarm: boolean; records: number }> {
+    this.disabled = true;
+    await this.ctx.storage.put("disabled", true);
+    const existing = await this.ctx.storage.getAlarm();
+    if (existing != null) await this.ctx.storage.deleteAlarm();
+    return { disabled: true, clearedAlarm: existing != null, records: this.journal.records.size };
+  }
+
   /** Scan tick. Port of runtime.rs scan_confirmed_logs_once + run_forever loop body. */
   async alarm(): Promise<void> {
+    if (!(await this.canRunScheduledWork())) return;
     let nextDelay = SCAN_INTERVAL_MS;
     try {
       await this.scanOnce();
@@ -174,12 +257,17 @@ export class OperatorDO extends DurableObject<Env> {
       const factor = 1 << Math.min(Math.max(this.scanFailures - 1, 0), 4);
       nextDelay = Math.min(SCAN_INTERVAL_MS * factor, MAX_BACKOFF_MS);
     } finally {
-      await this.ctx.storage.setAlarm(Date.now() + nextDelay);
+      if (this.disabled) {
+        await this.ctx.storage.deleteAlarm();
+      } else {
+        await this.ctx.storage.setAlarm(Date.now() + nextDelay);
+      }
     }
   }
 
   /** Cron-driven scheduled ticks. Port of runtime.rs run_scheduled_ticks. */
   async runScheduledTicks(): Promise<void> {
+    if (!(await this.canRunScheduledWork())) return;
     const cache = new EventCache(this.state.processedEvents);
     const service = this.newService(cache);
     const now = BigInt(Math.floor(Date.now() / 1000));
@@ -222,6 +310,8 @@ export class OperatorDO extends DurableObject<Env> {
     const storage = new D1Storage(this.env.DB);
 
     await this.ensureRoot(rpc);
+    await this.reconcileStoredEvents(storage);
+    await this.reconcileConfirmedDepositCommands();
 
     const chainHead = await rpc.blockNumber();
     const safeHead = chainHead - BigInt(this.settings.confirmations);
@@ -260,6 +350,7 @@ export class OperatorDO extends DurableObject<Env> {
     const cache = new EventCache(this.state.processedEvents);
     const service = this.newService(cache);
     let hadProcessingFailure = false;
+    const eventsToMirror: import("./indexer").IndexedEvent[] = [];
     for (const log of logs) {
       if (last && last.number === log.blockNumber && last.hash !== log.blockHash) {
         throw new Error(`ReorgDetected at ${log.blockNumber}`);
@@ -268,6 +359,7 @@ export class OperatorDO extends DurableObject<Env> {
       if (!indexed) continue;
       try {
         service.processEvent(indexed);
+        eventsToMirror.push(indexed);
       } catch (err) {
         // A single bad event must NOT abort the whole batch. Log it, keep
         // processing the rest, and remember that this range is not fully done so
@@ -277,22 +369,103 @@ export class OperatorDO extends DurableObject<Env> {
       }
     }
 
-    // flush newly indexed events to D1. Only advance the block cursor when every
-    // event in the range was applied; otherwise re-scan this range next tick so a
-    // failed event can never be permanently skipped. Idempotency (processedEvents /
-    // journal batch keys) makes the replay safe.
-    for (const { event } of cache.pending) await storage.insertEvent(event);
+    // Persist DO state/journal before advancing the D1 cursor. If DO storage has a
+    // transient failure, replaying this range is safe; advancing D1 first can skip
+    // a deposit forever after an eviction.
+    await this.persist();
+
+    // Mirror all successfully processed (including duplicate) events to D1. This
+    // repairs the opposite split-brain case where DO state persisted but D1 history
+    // did not; INSERT OR IGNORE keeps the retry idempotent.
+    for (const event of eventsToMirror) await storage.insertEvent(event);
     if (!hadProcessingFailure) {
       await storage.recordBlock({ number: toBlock, hash: toHash });
     }
 
-    await this.persist();
     try {
       await service.submitPending();
     } catch (err) {
       console.error("scan submit_pending failed:", err);
     }
     await this.persist();
+  }
+
+  private async reconcileStoredEvents(storage: D1Storage): Promise<void> {
+    if (this.storedEventsReconciled) return;
+
+    const last = await storage.lastIndexedBlock();
+    if (!last) {
+      this.storedEventsReconciled = true;
+      return;
+    }
+
+    const cache = new EventCache(this.state.processedEvents);
+    const service = this.newService(cache);
+    let replayed = 0;
+    const pageSize = 500;
+
+    for (let offset = 0; ; offset += pageSize) {
+      const events = await storage.storedEvents(this.settings.indexerStartBlock, last.number, pageSize, offset);
+      if (events.length === 0) break;
+      for (const event of events) {
+        if (this.state.processedEvents.has(event.event.id)) continue;
+        try {
+          service.processEvent(event);
+          replayed += 1;
+        } catch (err) {
+          throw new Error(`replay stored event ${event.event.id} failed: ${(err as Error).message}`);
+        }
+      }
+      if (events.length < pageSize) break;
+    }
+
+    this.storedEventsReconciled = true;
+    if (replayed === 0) return;
+
+    console.warn(`replayed ${replayed} stored chain_events into DO state`);
+    await this.persist();
+    try {
+      await service.submitPending();
+    } catch (err) {
+      console.error("reconcile submit_pending failed:", err);
+    }
+    await this.persist();
+  }
+
+  private async reconcileConfirmedDepositCommands(): Promise<void> {
+    if (this.confirmedDepositCommandsReconciled) return;
+    this.confirmedDepositCommandsReconciled = true;
+
+    const client = this.newTransactionClient();
+    let changed = 0;
+    for (const record of this.journal.records.values()) {
+      if (record.command.kind !== "DepositBatch") continue;
+      if (record.status.state !== "Confirmed" || !record.status.txHash) continue;
+      const executed = await client.depositBatchExecution(record.status.txHash, record.command).catch(() => null);
+      if (!executed) continue;
+      const actualCommand = {
+        ...record.command,
+        lpBnb: executed.lpBnb,
+        lpTokenValueBnb: executed.lpTokenValueBnb,
+        builderBnb: executed.builderBnb,
+        vaultBnb: executed.vaultBnb,
+        directReferrer: executed.directReferrer,
+        directBnb: executed.directBnb,
+      };
+      if (
+        record.command.lpBnb !== actualCommand.lpBnb ||
+        record.command.lpTokenValueBnb !== actualCommand.lpTokenValueBnb ||
+        record.command.builderBnb !== actualCommand.builderBnb ||
+        record.command.vaultBnb !== actualCommand.vaultBnb ||
+        record.command.directReferrer !== actualCommand.directReferrer ||
+        record.command.directBnb !== actualCommand.directBnb
+      ) {
+        record.command = actualCommand;
+        changed += 1;
+      }
+    }
+
+    if (changed !== 0) await this.persist();
   }
 
   private async syncProtocolConfig(rpc: BscRpcClient): Promise<void> {
@@ -419,6 +592,9 @@ export class OperatorDO extends DurableObject<Env> {
       nodes: this.state.nodes.length,
       pendingCommands: this.journal.pendingCommands().length,
       confirmedCommands: this.journal.confirmedCount(),
+      instanceName: this.instanceName,
+      activeInstanceName: this.activeInstanceName(),
+      disabled: this.disabled,
     };
   }
 
@@ -660,7 +836,7 @@ export class OperatorDO extends DurableObject<Env> {
   }
 
   async queryJournalList(limit: number, offset: number, status: string): Promise<unknown> {
-    const all = [...this.journal.records.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const all = this.journal.recordsInExecutionOrder();
     const mapStatus = (s: import("./journal").CommandStatus) => s.state.toLowerCase();
     const filtered =
       status === "all" ? all : all.filter((r) => mapStatus(r.status) === status.toLowerCase());

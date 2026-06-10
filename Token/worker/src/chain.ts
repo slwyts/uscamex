@@ -16,6 +16,7 @@ export const MAX_BUY_TAX_BPS = 2_500;
 export const GAS_LIMIT = 600_000n;
 const RECEIPT_POLL_INTERVAL_MS = 2_000;
 const RECEIPT_POLL_LIMIT = 60;
+const GAS_PRICE_BUMP_BPS = [12_000n, 20_000n, 40_000n, 80_000n];
 const U128_MAX = (1n << 128n) - 1n;
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 const DEPOSIT_BATCH_EXECUTED_TOPIC = keccak256(
@@ -81,6 +82,24 @@ function nowSeconds(): bigint {
   return BigInt(Math.floor(Date.now() / 1000));
 }
 
+function gasPriceForAttempt(base: bigint, attempt: number): bigint {
+  const factor = GAS_PRICE_BUMP_BPS[Math.min(attempt, GAS_PRICE_BUMP_BPS.length - 1)];
+  return (base * factor) / BPS_DENOMINATOR + 1n;
+}
+
+function errorMessage(err: unknown): string {
+  return String((err as Error).message ?? err);
+}
+
+function isReplacementUnderpriced(err: unknown): boolean {
+  return errorMessage(err).toLowerCase().includes("replacement transaction underpriced");
+}
+
+function isAlreadyKnown(err: unknown): boolean {
+  const msg = errorMessage(err).toLowerCase();
+  return msg.includes("already known") || msg.includes("known transaction");
+}
+
 interface EvmCall {
   target: string;
   value: bigint;
@@ -97,6 +116,18 @@ interface RpcLogJson {
   topics: string[];
   data: string;
   removed?: boolean;
+}
+
+export interface DepositBatchExecution {
+  txHash: string;
+  lpBnb: bigint;
+  lpTokenValueBnb: bigint;
+  lpMinted: bigint;
+  builderBnb: bigint;
+  vaultBnb: bigint;
+  directReferrer: string | null;
+  directBnb: bigint;
+  nodeBnb: bigint;
 }
 
 // ABI item definitions for encodeFunctionData
@@ -299,19 +330,38 @@ export class BscTransactionClient {
       this.rpc<string>("eth_getTransactionCount", [this.walletAddress(), "pending"]),
       this.rpc<string>("eth_gasPrice", []),
     ]);
-    const signed = await this.account.signTransaction!({
-      chainId: this.chainId,
-      type: "legacy",
-      to: target,
-      value: call.value,
-      data: call.data,
-      nonce: Number(BigInt(nonceHex)),
-      gas: GAS_LIMIT,
-      gasPrice: BigInt(gasPriceHex) + (BigInt(gasPriceHex) / 10n),
-    });
-    const txHash = await this.rpc<string>("eth_sendRawTransaction", [signed]);
-    await this.waitForConfirmedReceipt(txHash, BigInt(Math.max(1, this.confirmations)));
-    return txHash;
+    const nonce = Number(BigInt(nonceHex));
+    const baseGasPrice = BigInt(gasPriceHex);
+    let lastErr: unknown = null;
+
+    for (let attempt = 0; attempt < GAS_PRICE_BUMP_BPS.length; attempt += 1) {
+      const signed = await this.account.signTransaction!({
+        chainId: this.chainId,
+        type: "legacy",
+        to: target,
+        value: call.value,
+        data: call.data,
+        nonce,
+        gas: GAS_LIMIT,
+        gasPrice: gasPriceForAttempt(baseGasPrice, attempt),
+      });
+      const signedTxHash = keccak256(signed);
+      try {
+        const txHash = await this.rpc<string>("eth_sendRawTransaction", [signed]);
+        await this.waitForConfirmedReceipt(txHash, BigInt(Math.max(1, this.confirmations)));
+        return txHash;
+      } catch (err) {
+        lastErr = err;
+        if (isAlreadyKnown(err)) {
+          await this.waitForConfirmedReceipt(signedTxHash, BigInt(Math.max(1, this.confirmations)));
+          return signedTxHash;
+        }
+        if (isReplacementUnderpriced(err) && attempt + 1 < GAS_PRICE_BUMP_BPS.length) continue;
+        throw err;
+      }
+    }
+
+    throw lastErr instanceof Error ? lastErr : new ChainError(errorMessage(lastErr));
   }
 
   private async waitForConfirmedReceipt(txHash: string, confirmations: bigint): Promise<void> {
@@ -506,6 +556,10 @@ export class BscTransactionClient {
       if (log.removed || !this.depositBatchLogMatches(log, command)) continue;
       return log.transactionHash.toLowerCase();
     }
+    for (const log of logs) {
+      if (log.removed || !this.depositBatchLogRecoveryMatches(log, command)) continue;
+      return log.transactionHash.toLowerCase();
+    }
     return null;
   }
 
@@ -540,12 +594,34 @@ export class BscTransactionClient {
     }
   }
 
-  async depositBatchLpMinted(
+  private depositBatchLogRecoveryMatches(
+    log: RpcLogJson,
+    command: Extract<OperatorCommand, { kind: "DepositBatch" }>,
+  ): boolean {
+    if (log.topics[0]?.toLowerCase() !== DEPOSIT_BATCH_EXECUTED_TOPIC) return false;
+    if (this.parseTopicAddress(log.topics[1]) !== normalizeAddress(command.user)) return false;
+    const nodeBnb = command.nodePayouts.reduce((sum, payout) => sum + payout.amount, 0n);
+    try {
+      const eventVaultBnb = this.parseU128Word(log.data, 4);
+      const eventDirectBnb = this.parseU128Word(log.data, 5);
+      return (
+        this.parseU128Word(log.data, 0) === command.lpBnb &&
+        this.parseU128Word(log.data, 1) === command.lpTokenValueBnb &&
+        this.parseU128Word(log.data, 3) === command.builderBnb &&
+        this.parseU128Word(log.data, 6) === nodeBnb &&
+        eventVaultBnb + eventDirectBnb === command.vaultBnb + command.directBnb
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  async depositBatchExecution(
     txHash: string,
     command: Extract<OperatorCommand, { kind: "DepositBatch" }>,
-  ): Promise<bigint> {
+  ): Promise<DepositBatchExecution | null> {
     const receipt = await this.rpc<RpcReceiptJson | null>("eth_getTransactionReceipt", [txHash]).catch(() => null);
-    if (!receipt || receipt.status !== "0x1") return 0n;
+    if (!receipt || receipt.status !== "0x1") return null;
     const logs = await this.rpc<RpcLogJson[]>("eth_getLogs", [
       {
         address: this.token,
@@ -555,10 +631,27 @@ export class BscTransactionClient {
       },
     ]);
     for (const log of logs) {
-      if (log.removed || !this.depositBatchLogMatches(log, command)) continue;
-      return this.parseU128Word(log.data, 2);
+      if (
+        log.removed ||
+        (!this.depositBatchLogMatches(log, command) &&
+          !this.depositBatchLogRecoveryMatches(log, command))
+      ) {
+        continue;
+      }
+      const directReferrer = this.parseTopicAddress(log.topics[2]);
+      return {
+        txHash: log.transactionHash.toLowerCase(),
+        lpBnb: this.parseU128Word(log.data, 0),
+        lpTokenValueBnb: this.parseU128Word(log.data, 1),
+        lpMinted: this.parseU128Word(log.data, 2),
+        builderBnb: this.parseU128Word(log.data, 3),
+        vaultBnb: this.parseU128Word(log.data, 4),
+        directReferrer: directReferrer === ZERO_ADDRESS ? null : directReferrer,
+        directBnb: this.parseU128Word(log.data, 5),
+        nodeBnb: this.parseU128Word(log.data, 6),
+      };
     }
-    return 0n;
+    return null;
   }
 
   private async findConfirmedRedeemUserLp(

@@ -22,6 +22,14 @@ function operatorStub(env: Env): DurableObjectStub {
   return env.OPERATOR.get(env.OPERATOR.idFromName(`operator:${env.TOKEN_ADDRESS.toLowerCase()}`));
 }
 
+function operatorStubByName(env: Env, name: string): DurableObjectStub {
+  return env.OPERATOR.get(env.OPERATOR.idFromName(name));
+}
+
+function activeOperatorName(env: Env): string {
+  return `operator:${env.TOKEN_ADDRESS.toLowerCase()}`;
+}
+
 function json(data: unknown, status = 200): Response {
   const body = JSON.stringify(data, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
   return new Response(body, {
@@ -204,6 +212,16 @@ export async function handleAdmin(req: Request, ctx: AdminContext): Promise<Resp
       }
       // @ts-expect-error DO RPC
       return json({ signer, ...(await stub.retryFailedCommands(ids)) });
+    }
+    case "/api/admin/stop-operator-instance": {
+      const name = url.searchParams.get("name") ?? "";
+      if (!name) return json({ error: "name is required" }, 400);
+      if (signer === "bypass" && name === activeOperatorName(env(ctx))) {
+        return json({ error: "owner signature required to stop active operator instance" }, 403);
+      }
+      const target = operatorStubByName(env(ctx), name);
+      // @ts-expect-error DO RPC
+      return json({ signer, name, ...(await target.stopRunning()) });
     }
     case "/api/admin/forget-events": {
       if (req.method !== "POST") return json({ error: "method not allowed" }, 405);

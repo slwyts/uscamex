@@ -158,24 +158,15 @@ export class Engine {
     const directPool = bps(amount, this.config.directPoolBps);
     const directReferrer = state.user(user)?.referrer ?? null;
 
-    let configuredDirectBnb = 0n;
-    if (directReferrer != null && directReferrer !== user) {
-      configuredDirectBnb = bps(amount, this.config.directRewardBps);
-    }
-    let directBnb = configuredDirectBnb;
+    const directBnb = directReferrer != null && directReferrer !== user
+      ? bps(amount, this.config.directRewardBps)
+      : 0n;
     const lpRedeems: LpRedeem[] = [];
-    if (directReferrer != null) {
+    if (directBnb !== 0n && directReferrer != null) {
       const account = state.user(directReferrer);
-      const isRoot = directReferrer === state.root;
-      if (isRoot) {
-        // root always receives its configured direct reward
-      } else if (account && account.active && account.principalBnb > 0n) {
-        if (directBnb !== 0n) {
-          const willExit = this.willExitAfter(state, directReferrer, directBnb);
-          if (willExit) lpRedeems.push(willExit);
-        }
-      } else {
-        directBnb = 0n;
+      if (account && account.active && account.principalBnb > 0n) {
+        const willExit = this.willExitAfter(state, directReferrer, directBnb);
+        if (willExit) lpRedeems.push(willExit);
       }
     }
     const directRemainder = satSub(directPool, directBnb);

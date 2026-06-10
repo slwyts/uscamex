@@ -66,17 +66,16 @@ describe("engine: deposit", () => {
     expect(s.balances.totalActiveLpPrincipalBnb).toBe((3n * BNB) / 10n);
   });
 
-  it("withholds direct reward from a bound-but-never-invested upline (non-root)", () => {
+  it("pays direct reward to a bound-but-never-invested upline", () => {
     const e = engine();
     const s = new ProtocolState("root");
     e.bind(s, "alice", "root");
     e.bind(s, "bob", "alice");
 
-    // alice is bound but never invested -> not a valid investing account -> no direct reward
     const a = e.deposit(s, "bob", BNB);
-    expect(a.directBnb).toBe(0n);
-    expect(a.vaultBnb).toBe(BNB / 5n);
-    expect(s.balances.directPaidBnb.has("alice")).toBe(false);
+    expect(a.directBnb).toBe(BNB / 10n);
+    expect(a.vaultBnb).toBe(BNB / 10n);
+    expect(s.balances.directPaidBnb.get("alice")).toBe(BNB / 10n);
     expect(s.user("alice")!.dynamicPaidBnb).toBe(0n);
   });
 
@@ -92,7 +91,7 @@ describe("engine: deposit", () => {
     expect(s.balances.directPaidBnb.get("root")).toBe(BNB / 10n);
   });
 
-  it("redirects reward of exited referrer to vault", () => {
+  it("pays direct reward to an exited referrer without changing inactive dynamic income", () => {
     const e = engine();
     const s = new ProtocolState("root");
     e.bind(s, "alice", "root");
@@ -101,9 +100,10 @@ describe("engine: deposit", () => {
     e.bind(s, "bob", "alice");
 
     const a = e.deposit(s, "bob", BNB);
-    expect(a.directBnb).toBe(0n);
-    expect(a.vaultBnb).toBe(BNB / 5n);
-    expect(s.balances.directPaidBnb.has("alice")).toBe(false);
+    expect(a.directBnb).toBe(BNB / 10n);
+    expect(a.vaultBnb).toBe(BNB / 10n);
+    expect(s.balances.directPaidBnb.get("alice")).toBe(BNB / 10n);
+    expect(s.user("alice")!.dynamicPaidBnb).toBe(0n);
   });
 
   it("exited user re-enters with fresh position accounting", () => {
