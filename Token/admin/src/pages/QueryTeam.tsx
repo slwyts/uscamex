@@ -75,17 +75,17 @@ function TeamExplorer() {
       {data && (
         <Card>
           <Row gutter={[16, 16]}>
-            <Col xs={12} md={6}>
+            <Col xs={12} md={6} xl={4}>
               <Statistic title="总下线人数" value={data.total_descendants} />
             </Col>
-            <Col xs={12} md={6}>
+            <Col xs={12} md={6} xl={5}>
+              <Statistic title="下级总入金" value={formatBnb(data.subordinate_principal_bnb, 4)} suffix="BNB" />
+            </Col>
+            <Col xs={12} md={6} xl={4}>
               <Statistic title="直推数量" value={data.direct_members.length} />
             </Col>
-            <Col xs={12} md={6}>
+            <Col xs={12} md={6} xl={4}>
               <Statistic title="层级数" value={data.generations.length} />
-            </Col>
-            <Col xs={12} md={6}>
-              <Statistic title="读取深度" value={data.truncated_at_depth} />
             </Col>
             <Col xs={24}>
               <RootCard summary={data.root} />

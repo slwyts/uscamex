@@ -149,6 +149,7 @@ export interface TeamResponse {
   direct_members: UserSummary[];
   generations: GenerationGroup[];
   total_descendants: number;
+  subordinate_principal_bnb: string;
   truncated_at_depth: number;
 }
 

@@ -798,10 +798,12 @@ export class OperatorDO extends DurableObject<Env> {
     const generations: { generation: number; count: number; members: unknown[] }[] = [];
     let frontier = childrenOf(address);
     let total = 0;
+    let subordinatePrincipalBnb = 0n;
     for (let gen = 1; gen <= depth && frontier.length > 0; gen++) {
       const members = frontier.map((a) => this.userSummary(a, nodes));
       generations.push({ generation: gen, count: frontier.length, members });
       total += frontier.length;
+      for (const a of frontier) subordinatePrincipalBnb += this.state.user(a)?.principalBnb ?? 0n;
       const next: string[] = [];
       for (const a of frontier) next.push(...childrenOf(a));
       frontier = next;
@@ -811,6 +813,7 @@ export class OperatorDO extends DurableObject<Env> {
       direct_members: directMembers,
       generations,
       total_descendants: total,
+      subordinate_principal_bnb: subordinatePrincipalBnb.toString(),
       truncated_at_depth: depth,
     };
   }
