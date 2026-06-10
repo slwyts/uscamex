@@ -7,10 +7,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import { WalletProvider } from "./hooks/useWallet";
 import { initBypassFromUrl } from "./utils/bypass";
+import { installLocaltestWallet } from "./utils/localtestWallet";
 import "antd/dist/reset.css";
 import "./theme.css";
 
 // Resolve ?force from the launch URL before anything renders.
+installLocaltestWallet();
 initBypassFromUrl();
 
 const queryClient = new QueryClient({

@@ -15,6 +15,18 @@ function mapAdd(map: Map<string, bigint>, key: string, delta: bigint): void {
   map.set(key, (map.get(key) ?? 0n) + delta);
 }
 
+/** Pure: compute per-node payout shares without touching any state. */
+function computeNodePayouts(nodes: { address: string; weight: number }[], amount: bigint): BnbPayout[] {
+  const totalWeight = nodes.reduce((sum, n) => sum + n.weight, 0);
+  if (amount === 0n || totalWeight === 0) return [];
+  const payouts: BnbPayout[] = [];
+  for (const node of nodes) {
+    const share = (amount * BigInt(node.weight)) / BigInt(totalWeight);
+    if (share !== 0n) payouts.push({ to: node.address, amount: share, reason: "node" });
+  }
+  return payouts;
+}
+
 export type EngineErrorKind =
   | "SelfReferral"
   | "ReferrerNotBound"
@@ -96,8 +108,40 @@ export class Engine {
     return true;
   }
 
+  /**
+   * Adopt an on-chain RefBound unconditionally. The contract's `_bind` already
+   * enforces the no-broken-chain rule before emitting RefBound, so the worker
+   * must trust the chain and never reject a bind because of local event ordering
+   * (e.g. a downline RefBound processed before its upline's in the same batch).
+   * Missing upline records are materialized so the relationship is never dropped.
+   */
+  adoptChainBind(state: ProtocolState, user: Address, referrer: Address): boolean {
+    if (user === referrer) {
+      // root / self-bind: just make sure the account exists.
+      state.ensureUserMut(user);
+      return false;
+    }
+    if (state.user(user)?.referrer != null) return false;
+    state.ensureUserMut(referrer);
+    state.ensureUserMut(user).referrer = referrer;
+    state.ensureUserMut(referrer).directCount += 1;
+    return true;
+  }
+
   /** engine.rs:130 */
   deposit(state: ProtocolState, user: Address, amount: bigint): DepositAllocation {
+    const allocation = this.computeDeposit(state, user, amount);
+    this.applyDeposit(state, allocation);
+    return allocation;
+  }
+
+  /**
+   * Pure computation of a deposit's allocation. Does NOT modify state —
+   * state is only committed in {@link applyDeposit} after the on-chain
+   * DepositBatch has been confirmed. This makes high-volume concurrent
+   * deposits safe: a failed batch leaves no phantom ledger entries.
+   */
+  computeDeposit(state: ProtocolState, user: Address, amount: bigint): DepositAllocation {
     if (amount < this.config.minDeposit || amount > this.config.maxDeposit) {
       throw new EngineError("DepositOutOfRange");
     }
@@ -107,7 +151,7 @@ export class Engine {
     const lpTotal = bps(amount, this.config.lpBuildBps);
     const lpBnb = lpTotal / 2n;
     const lpTokenValueBnb = lpTotal - lpBnb;
-    const nodePayouts = this.distributeNodes(state, bps(amount, this.config.nodeBps));
+    const nodePayouts = computeNodePayouts(state.nodes, bps(amount, this.config.nodeBps));
     const nodeBnb = nodePayouts.reduce((acc, p) => acc + p.amount, 0n);
     const builderBnb = bps(amount, this.config.builderBuyBps);
     const vaultBase = bps(amount, this.config.vaultBps);
@@ -122,43 +166,21 @@ export class Engine {
     const lpRedeems: LpRedeem[] = [];
     if (directReferrer != null) {
       const account = state.user(directReferrer);
-      if (account && account.exited && !account.active) {
-        directBnb = 0n;
+      const isRoot = directReferrer === state.root;
+      if (isRoot) {
+        // root always receives its configured direct reward
       } else if (account && account.active && account.principalBnb > 0n) {
         const room = this.remainingExitRoom(state, directReferrer) ?? 0n;
         directBnb = directBnb < room ? directBnb : room;
+        if (directBnb !== 0n) {
+          const willExit = this.willExitAfter(state, directReferrer, directBnb);
+          if (willExit) lpRedeems.push(willExit);
+        }
+      } else {
+        directBnb = 0n;
       }
     }
     const directRemainder = satSub(directPool, directBnb);
-
-    state.pair.bnbReserve = state.pair.bnbReserve + lpBnb + lpTokenValueBnb + builderBnb;
-    state.balances.builderTokenValueBnb += builderBnb;
-    state.balances.vaultBnb += vaultBase + directRemainder;
-
-    const account = state.ensureUserMut(user);
-    if (account.exited && !account.active) {
-      account.positionId += 1n;
-      account.principalBnb = 0n;
-      account.staticPaidBnb = 0n;
-      account.dynamicPaidBnb = 0n;
-      account.lpBnbPrincipal = 0n;
-      account.lpTokenPrincipal = 0n;
-    }
-    account.principalBnb += amount;
-    account.lpBnbPrincipal += lpBnb;
-    account.active = true;
-    account.exited = false;
-    state.balances.totalActiveLpPrincipalBnb += lpBnb;
-
-    if (directReferrer != null && directBnb !== 0n) {
-      mapAdd(state.balances.directPaidBnb, directReferrer, directBnb);
-      const ref = state.user(directReferrer);
-      if (ref && ref.active && ref.principalBnb > 0n) {
-        state.ensureUserMut(directReferrer).dynamicPaidBnb += directBnb;
-        const redeem = this.exitIfCapReached(state, directReferrer);
-        if (redeem) lpRedeems.push(redeem);
-      }
-    }
 
     return {
       user,
@@ -173,6 +195,77 @@ export class Engine {
       directReferrer,
       lpRedeems,
     };
+  }
+
+  /**
+   * Commit all state changes for a deposit whose on-chain batch is confirmed.
+   * Must be called with the exact {@link DepositAllocation} returned by
+   * {@link computeDeposit} on the same state snapshot.
+   */
+  applyDeposit(state: ProtocolState, allocation: DepositAllocation): void {
+    const { user, amount, lpBnb, lpTokenValueBnb, builderBnb, vaultBnb, directBnb, directReferrer, lpRedeems, nodePayouts } = allocation;
+
+    state.pair.bnbReserve = state.pair.bnbReserve + lpBnb + lpTokenValueBnb + builderBnb;
+    state.balances.builderTokenValueBnb += builderBnb;
+    state.balances.vaultBnb += vaultBnb;
+
+    const account = state.ensureUserMut(user);
+    if (account.exited && !account.active) {
+      account.positionId += 1n;
+      account.principalBnb = 0n;
+      account.staticPaidBnb = 0n;
+      account.dynamicPaidBnb = 0n;
+      account.lpBnbPrincipal = 0n;
+      account.lpTokenPrincipal = 0n;
+    }
+    account.principalBnb += amount;
+    account.lpBnbPrincipal += lpBnb;
+    account.active = true;
+    account.exited = false;
+    if (!account.hasInvested) {
+      account.hasInvested = true;
+      if (directReferrer != null && directReferrer !== user) {
+        state.ensureUserMut(directReferrer).investedDirectCount += 1;
+      }
+    }
+    state.balances.totalActiveLpPrincipalBnb += lpBnb;
+
+    for (const p of nodePayouts) {
+      mapAdd(state.balances.nodePaidBnb, p.to, p.amount);
+    }
+    const nodeAllocation = bps(amount, this.config.nodeBps);
+    const nodeDust = satSub(nodeAllocation, allocation.nodeBnb);
+    state.balances.ownerBnb += nodeDust;
+
+    if (directReferrer != null && directBnb !== 0n) {
+      mapAdd(state.balances.directPaidBnb, directReferrer, directBnb);
+      const ref = state.user(directReferrer);
+      if (ref && ref.active && ref.principalBnb > 0n) {
+        state.ensureUserMut(directReferrer).dynamicPaidBnb += directBnb;
+        this.exitIfCapReached(state, directReferrer);
+      }
+    }
+
+    for (const redeem of lpRedeems) {
+      this.exitIfCapReached(state, redeem.user);
+    }
+  }
+
+  /**
+   * Check whether adding `delta` to `user`'s dynamicPaidBnb would push them past
+   * the exit cap, and if so return the LP redeem info WITHOUT modifying state.
+   * Used by {@link computeDeposit} to pre-calculate lpRedeems.
+   */
+  private willExitAfter(state: ProtocolState, user: string, delta: bigint): LpRedeem | null {
+    const account = state.user(user);
+    if (!account) return null;
+    if (!account.active || account.principalBnb === 0n) return null;
+    const exitTarget = (account.principalBnb * BigInt(this.config.exitMultipleBps)) / BPS_DENOMINATOR;
+    const projectedTotal = account.staticPaidBnb + account.dynamicPaidBnb + delta;
+    if (projectedTotal < exitTarget) return null;
+    const lpTokenAmount = account.lpTokenPrincipal;
+    if (lpTokenAmount === 0n) return null;
+    return { user, lpTokenAmount };
   }
 
   /** engine.rs:242 — keyed idempotency. */
@@ -210,7 +303,7 @@ export class Engine {
       const rewardRate = this.config.teamRewardBps[index];
       const a = state.user(ancestor);
       const eligible =
-        !!a && a.active && a.principalBnb > 0n && a.directCount >= generation;
+        !!a && a.active && a.principalBnb > 0n && a.investedDirectCount >= generation;
       if (!eligible) return;
 
       const room = this.remainingExitRoom(state, ancestor) ?? 0n;

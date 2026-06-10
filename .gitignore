@@ -50,6 +50,9 @@ typechain-types/
 /Token/out/
 /Token/cache/
 /Token/broadcast/
+/Token/localtest/
 /Token/worker/node_modules/
 /Token/worker/.wrangler/
-
+/Token/worker/.localtest/
+/Token/worker/.dev.vars.localtest
+/Token/worker/wrangler.localtest.generated.jsonc

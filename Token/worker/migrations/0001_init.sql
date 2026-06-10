@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS chain_blocks (
 
 CREATE TABLE IF NOT EXISTS chain_events (
     id           TEXT PRIMARY KEY,        -- "{txHash}:{logIndex}"
-    block_number INTEGER NOT NULL REFERENCES chain_blocks(block_number),
+    block_number INTEGER NOT NULL,
     block_hash   TEXT NOT NULL,
     tx_hash      TEXT NOT NULL,
     log_index    INTEGER NOT NULL,

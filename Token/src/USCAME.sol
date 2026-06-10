@@ -47,6 +47,7 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
 
     struct DepositBatchParams {
         address user;
+        uint128 amount;
         uint128 lpBnb;
         uint128 lpTokenValueBnb;
         uint128 minLpTokenOut;
@@ -97,6 +98,10 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     mapping(address => uint32) public nodeWeight;
     mapping(address => uint256) private nodeIndexPlusOne;
     address[] private nodes;
+    /// Per-user BNB received via receive() and not yet spent by depositBatch().
+    /// Every user deposit is isolated — a batch for user A can never consume
+    /// user B's deposit, making high-volume concurrent deposits safe.
+    mapping(address => uint256) public pendingDeposit;
 
     /// Transient (EIP-1153) flag: set while an operator-driven call is executing
     /// (operatorCall / operatorBatchCall / depositBatch). Used by `_tax` to let protocol-owned
@@ -421,6 +426,19 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
             _sendBnb(params.directReferrer, params.directBnb);
         }
 
+        // Deduct this exact user deposit from pendingDeposit. The actual payout
+        // sum can be lower than amount when config leaves dust/unallocated BNB;
+        // that residual stays as protocol treasury, but can never be reused as a
+        // later pending deposit for the same user.
+        {
+            uint256 totalSpend = uint256(params.lpBnb) + uint256(params.lpTokenValueBnb)
+                + uint256(params.builderBnb) + uint256(params.vaultBnb)
+                + uint256(params.directBnb) + nodeBnb;
+            require(totalSpend <= params.amount, "BATCH_OVERRUN");
+            require(pendingDeposit[params.user] >= params.amount, "INSUFFICIENT_DEPOSIT");
+            unchecked { pendingDeposit[params.user] -= params.amount; }
+        }
+
         inOperatorContext = false;
         emit DepositBatchExecuted(
             params.user,
@@ -569,6 +587,7 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         }
         require(referrer[msg.sender] != address(0), "NO_REF");
         require(msg.value >= minDeposit && msg.value <= maxDeposit, "DEPOSIT");
+        pendingDeposit[msg.sender] += msg.value;
         emit Deposit(msg.sender, msg.value, referrer[msg.sender]);
     }
 

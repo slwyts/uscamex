@@ -14,6 +14,10 @@ export interface Node {
 export interface UserAccount {
   referrer: Address | null;
   directCount: number;
+  /** Direct referrals that have invested at least once (active OR exited). Used for team-reward generation gating. */
+  investedDirectCount: number;
+  /** True once this account has ever made a deposit (stays true after exit). */
+  hasInvested: boolean;
   positionId: bigint;
   principalBnb: bigint;
   staticPaidBnb: bigint;
@@ -30,6 +34,8 @@ export function newUserAccount(): UserAccount {
   return {
     referrer: null,
     directCount: 0,
+    investedDirectCount: 0,
+    hasInvested: false,
     positionId: 0n,
     principalBnb: 0n,
     staticPaidBnb: 0n,
@@ -83,6 +89,7 @@ export class ProtocolState {
   deflationUsedBps = 0;
   processedEvents: Set<string> = new Set();
   processedSettlements: Set<string> = new Set();
+  appliedDepositBatches: Set<string> = new Set();
 
   constructor(root: Address) {
     this.root = root;
@@ -122,6 +129,8 @@ type SerializedUser = Omit<
   | "dynamicPaidBnb"
   | "lpBnbPrincipal"
   | "lpTokenPrincipal"
+  | "investedDirectCount"
+  | "hasInvested"
 > & {
   positionId: string;
   principalBnb: string;
@@ -129,6 +138,8 @@ type SerializedUser = Omit<
   dynamicPaidBnb: string;
   lpBnbPrincipal: string;
   lpTokenPrincipal?: string;
+  investedDirectCount?: number;
+  hasInvested?: boolean;
 };
 
 export interface SerializedState {
@@ -151,6 +162,7 @@ export interface SerializedState {
   deflationUsedBps: number;
   processedEvents: string[];
   processedSettlements: string[];
+  appliedDepositBatches?: string[];
 }
 
 export function serializeState(s: ProtocolState): SerializedState {
@@ -161,6 +173,8 @@ export function serializeState(s: ProtocolState): SerializedState {
       {
         referrer: u.referrer,
         directCount: u.directCount,
+        investedDirectCount: u.investedDirectCount,
+        hasInvested: u.hasInvested,
         active: u.active,
         exited: u.exited,
         positionId: u.positionId.toString(),
@@ -188,17 +202,21 @@ export function serializeState(s: ProtocolState): SerializedState {
     deflationUsedBps: s.deflationUsedBps,
     processedEvents: [...s.processedEvents],
     processedSettlements: [...s.processedSettlements],
+    appliedDepositBatches: [...s.appliedDepositBatches],
   };
 }
 
 export function deserializeState(d: SerializedState): ProtocolState {
   const s = new ProtocolState(d.root);
+  let needsInvestedDirectRebuild = false;
   s.users = new Map(
-    d.users.map(([addr, u]) => [
-      addr,
-      {
+    d.users.map(([addr, u]) => {
+      if (u.investedDirectCount == null) needsInvestedDirectRebuild = true;
+      return [addr, {
         referrer: u.referrer,
         directCount: u.directCount,
+        investedDirectCount: u.investedDirectCount ?? 0,
+        hasInvested: u.hasInvested ?? (BigInt(u.principalBnb) > 0n || u.exited),
         active: u.active,
         exited: u.exited,
         positionId: BigInt(u.positionId),
@@ -207,8 +225,8 @@ export function deserializeState(d: SerializedState): ProtocolState {
         dynamicPaidBnb: BigInt(u.dynamicPaidBnb),
         lpBnbPrincipal: BigInt(u.lpBnbPrincipal),
         lpTokenPrincipal: BigInt(u.lpTokenPrincipal ?? "0"),
-      },
-    ]),
+      }];
+    }),
   );
   s.nodes = d.nodes;
   s.balances = {
@@ -227,5 +245,17 @@ export function deserializeState(d: SerializedState): ProtocolState {
   s.deflationUsedBps = d.deflationUsedBps;
   s.processedEvents = new Set(d.processedEvents);
   s.processedSettlements = new Set(d.processedSettlements);
+  s.appliedDepositBatches = new Set(d.appliedDepositBatches ?? []);
+  if (needsInvestedDirectRebuild) rebuildInvestedDirectCounts(s);
   return s;
+}
+
+function rebuildInvestedDirectCounts(s: ProtocolState): void {
+  for (const account of s.users.values()) account.investedDirectCount = 0;
+  for (const [addr, account] of s.users) {
+    if (!account.hasInvested) continue;
+    const referrer = account.referrer;
+    if (!referrer || referrer === addr) continue;
+    s.ensureUserMut(referrer).investedDirectCount += 1;
+  }
 }

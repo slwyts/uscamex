@@ -17,6 +17,7 @@ export type OperatorCommand =
   | {
       kind: "DepositBatch";
       user: string;
+      amount: bigint;
       lpBnb: bigint;
       lpTokenValueBnb: bigint;
       builderBnb: bigint;
@@ -74,6 +75,7 @@ export function commandsForDeposit(a: DepositAllocation): OperatorCommand[] {
     {
       kind: "DepositBatch",
       user: a.user,
+      amount: a.amount,
       lpBnb: a.lpBnb,
       lpTokenValueBnb: a.lpTokenValueBnb,
       builderBnb: a.builderBnb,

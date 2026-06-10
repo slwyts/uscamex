@@ -7,6 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "localtest": "node scripts/localtest.mjs",
+    "localtest:wallet": "node scripts/localtest-wallet.mjs",
     "token:solc-check": "node Token/scripts/compile-solc-check.mjs"
   },
   "dependencies": {

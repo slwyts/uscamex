@@ -123,6 +123,7 @@ export interface UserSummary {
   address: string;
   referrer: string | null;
   direct_count: number;
+  invested_direct_count?: number;
   position_id: number;
   principal_bnb: string;
   static_paid_bnb: string;

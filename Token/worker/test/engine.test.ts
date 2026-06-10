@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { BNB, bps, defaultProtocolConfig, type ProtocolConfig } from "../src/config";
-import { Engine, EngineError } from "../src/engine";
+import { Engine } from "../src/engine";
 import { ProtocolState } from "../src/state";
 
 function engine(overrides: Partial<ProtocolConfig> = {}): Engine {
@@ -8,14 +8,19 @@ function engine(overrides: Partial<ProtocolConfig> = {}): Engine {
 }
 
 describe("engine: binding (zero-transfer model)", () => {
-  it("requires bound referrer", () => {
+  it("adopts on-chain binds unconditionally, even out of order", () => {
     const e = engine();
     const s = new ProtocolState("root");
-    expect(e.bind(s, "alice", "root")).toBe(true);
-    expect(e.bind(s, "bob", "alice")).toBe(true);
-    expect(e.bind(s, "bob", "root")).toBe(false);
-    expect(() => e.bind(s, "carol", "dave")).toThrow(EngineError);
-    expect(s.user("alice")!.directCount).toBe(1);
+    // downline event arrives BEFORE its upline's event in the same batch
+    expect(e.adoptChainBind(s, "carol", "bob")).toBe(true);
+    expect(s.user("carol")!.referrer).toBe("bob");
+    expect(s.user("bob")!.directCount).toBe(1);
+    // upline event arrives later; carol must stay bound, bob now binds alice
+    expect(e.adoptChainBind(s, "bob", "alice")).toBe(true);
+    expect(s.user("bob")!.referrer).toBe("alice");
+    // re-adopting an already-bound user is a no-op
+    expect(e.adoptChainBind(s, "carol", "bob")).toBe(false);
+    expect(s.user("bob")!.directCount).toBe(1);
   });
 });
 
@@ -61,17 +66,30 @@ describe("engine: deposit", () => {
     expect(s.balances.totalActiveLpPrincipalBnb).toBe((3n * BNB) / 10n);
   });
 
-  it("pays direct reward to inactive referrer without counting dynamic cap", () => {
+  it("withholds direct reward from a bound-but-never-invested upline (non-root)", () => {
     const e = engine();
     const s = new ProtocolState("root");
     e.bind(s, "alice", "root");
     e.bind(s, "bob", "alice");
 
+    // alice is bound but never invested -> not a valid investing account -> no direct reward
     const a = e.deposit(s, "bob", BNB);
+    expect(a.directBnb).toBe(0n);
+    expect(a.vaultBnb).toBe(BNB / 5n);
+    expect(s.balances.directPaidBnb.has("alice")).toBe(false);
+    expect(s.user("alice")!.dynamicPaidBnb).toBe(0n);
+  });
+
+  it("pays direct reward to root upline even though root has no principal", () => {
+    const e = engine();
+    const s = new ProtocolState("root");
+    e.bind(s, "alice", "root");
+
+    // root (project wallet) is always eligible for the direct reward
+    const a = e.deposit(s, "alice", BNB);
     expect(a.directBnb).toBe(BNB / 10n);
     expect(a.vaultBnb).toBe(BNB / 10n);
-    expect(s.balances.directPaidBnb.get("alice")).toBe(BNB / 10n);
-    expect(s.user("alice")!.dynamicPaidBnb).toBe(0n);
+    expect(s.balances.directPaidBnb.get("root")).toBe(BNB / 10n);
   });
 
   it("redirects reward of exited referrer to vault", () => {
@@ -129,7 +147,7 @@ describe("engine: static settlement", () => {
     expect(s.user("bob")!.exited).toBe(true);
   });
 
-  it("ten generation rewards obey direct_count gates", () => {
+  it("ten generation rewards obey invested-direct-count gates", () => {
     const e = engine({ dailyStaticBps: 10_000, exitMultipleBps: 1_000_000 });
     const s = new ProtocolState("root");
     let previous = "root";
@@ -141,11 +159,19 @@ describe("engine: static settlement", () => {
     }
     e.bind(s, "leaf", "u10");
     e.deposit(s, "leaf", BNB);
+    // Each ancestor uN needs investedDirectCount >= generation. Generation k maps
+    // to ancestor u(11-k), which must have k invested directs. The main chain
+    // already gives each uN one invested direct (its chain child), so add
+    // (generation-1) MORE directs that actually deposit (bound-only must NOT count).
     for (let generation = 1; generation <= 10; generation++) {
       const ancestor = `u${11 - generation}`;
       for (let extra = 1; extra < generation; extra++) {
-        e.bind(s, `${ancestor}-dummy-${extra}`, ancestor);
+        const child = `${ancestor}-inv-${extra}`;
+        e.bind(s, child, ancestor);
+        e.deposit(s, child, BNB);
       }
+      // a bound-only child that never invests must not unlock a generation
+      e.bind(s, `${ancestor}-boundonly`, ancestor);
     }
 
     const settlement = e.settleStaticPeriod(s, "leaf");
@@ -155,6 +181,25 @@ describe("engine: static settlement", () => {
       expect(reward.user).toBe(`u${10 - index}`);
       expect(reward.amount).toBe(bps(BNB / 4n, e.config.teamRewardBps[index]));
     });
+  });
+
+  it("bound-only directs do not unlock team generations", () => {
+    const e = engine({ dailyStaticBps: 10_000, exitMultipleBps: 1_000_000 });
+    const s = new ProtocolState("root");
+    e.bind(s, "alice", "root");
+    e.deposit(s, "alice", BNB);
+    e.bind(s, "bob", "alice");
+    e.deposit(s, "bob", BNB);
+    // carol binds to alice but never deposits -> alice.investedDirectCount stays 1
+    e.bind(s, "carol", "alice");
+
+    expect(s.user("alice")!.directCount).toBe(2);
+    expect(s.user("alice")!.investedDirectCount).toBe(1);
+
+    // bob settles: alice is gen-1 upline, needs investedDirectCount >= 1 -> ok
+    const settlement = e.settleStaticPeriod(s, "bob");
+    expect(settlement.teamRewards.length).toBe(1);
+    expect(settlement.teamRewards[0].user).toBe("alice");
   });
 
   it("period key prevents duplicate rewards", () => {

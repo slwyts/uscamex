@@ -122,7 +122,7 @@ const ABI = {
 } as const;
 
 const ABI_DEPOSIT_BATCH = parseAbiItem(
-  "function depositBatch((address user,uint128 lpBnb,uint128 lpTokenValueBnb,uint128 minLpTokenOut,uint128 builderBnb,uint128 minBuilderTokenOut,uint128 vaultBnb,address directReferrer,uint128 directBnb,(address to,uint128 amount)[] nodePayouts) params)",
+  "function depositBatch((address user,uint128 amount,uint128 lpBnb,uint128 lpTokenValueBnb,uint128 minLpTokenOut,uint128 builderBnb,uint128 minBuilderTokenOut,uint128 vaultBnb,address directReferrer,uint128 directBnb,(address to,uint128 amount)[] nodePayouts) params)",
 );
 
 const SELECTORS = {
@@ -398,6 +398,7 @@ export class BscTransactionClient {
 
   private async submitDepositBatch(b: {
     user: string;
+    amount: bigint;
     lpBnb: bigint;
     lpTokenValueBnb: bigint;
     builderBnb: bigint;
@@ -461,6 +462,7 @@ export class BscTransactionClient {
       args: [
         {
           user: normalizeAddress(b.user),
+          amount: u256ToU128(b.amount),
           lpBnb: u256ToU128(b.lpBnb),
           lpTokenValueBnb: u256ToU128(b.lpTokenValueBnb),
           minLpTokenOut,
@@ -767,6 +769,7 @@ export class BscTransactionClient {
         return this.submitDepositBatch({
           lpBnb: command.lpBnb,
           user: command.user,
+          amount: command.amount,
           lpTokenValueBnb: command.lpTokenValueBnb,
           builderBnb: command.builderBnb,
           vaultBnb: command.vaultBnb,

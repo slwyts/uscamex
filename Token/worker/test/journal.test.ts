@@ -53,6 +53,7 @@ describe("journal idempotency", () => {
       {
         kind: "DepositBatch",
         user: "0xuser",
+        amount: 10n ** 18n,
         lpBnb: 3n * 10n ** 17n,
         lpTokenValueBnb: 3n * 10n ** 17n,
         builderBnb: 10n ** 17n,
@@ -70,6 +71,7 @@ describe("journal idempotency", () => {
     expect(cmd.kind).toBe("DepositBatch");
     if (cmd.kind === "DepositBatch") {
       expect(cmd.lpBnb).toBe(3n * 10n ** 17n);
+      expect(cmd.amount).toBe(10n ** 18n);
       expect(typeof cmd.lpBnb).toBe("bigint");
       expect(cmd.directReferrer).toBe("0xref");
       expect(cmd.nodePayouts.length).toBe(2);

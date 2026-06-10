@@ -205,6 +205,26 @@ export async function handleAdmin(req: Request, ctx: AdminContext): Promise<Resp
       // @ts-expect-error DO RPC
       return json({ signer, ...(await stub.retryFailedCommands(ids)) });
     }
+    case "/api/admin/forget-events": {
+      if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+      let ids: string[] = [];
+      let rewindToBlock = 0;
+      try {
+        const body = (await req.json().catch(() => ({}))) as {
+          ids?: unknown;
+          rewindToBlock?: unknown;
+        };
+        if (Array.isArray(body.ids)) ids = body.ids.filter((x): x is string => typeof x === "string");
+        if (typeof body.rewindToBlock === "number") rewindToBlock = Math.floor(body.rewindToBlock);
+      } catch {
+        // invalid body
+      }
+      if (ids.length === 0 || rewindToBlock <= 0) {
+        return json({ error: "ids[] and rewindToBlock are required" }, 400);
+      }
+      // @ts-expect-error DO RPC
+      return json({ signer, ...(await stub.forgetEvents(ids, rewindToBlock)) });
+    }
     case "/api/admin/config-history": {
       const limit = intParam(url, "limit", 50, 200);
       return json({ signer, items: await queryConfigHistory(ctx.env, limit) });

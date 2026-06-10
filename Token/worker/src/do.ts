@@ -18,6 +18,7 @@ import {
 } from "./indexer";
 import { BscRpcClient } from "./rpc";
 import {
+  depositAllocationFromCommand,
   OperatorService,
   type ChainClient,
   type ServiceDatabase,
@@ -66,6 +67,7 @@ export class OperatorDO extends DurableObject<Env> {
   private lastSettlementSlot: string | null = null;
   private lastDeflationSlot: string | null = null;
   private lastBuybackSlot: string | null = null;
+  private stateHadAppliedDepositBatches = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -74,6 +76,7 @@ export class OperatorDO extends DurableObject<Env> {
       this.engine = new Engine(await this.loadConfig());
       this.state = await this.loadState();
       this.journal = await this.loadJournal();
+      this.backfillLegacyAppliedDepositBatches();
       this.lastSettlementSlot = (await this.ctx.storage.get<string>("slot:settlement")) ?? null;
       this.lastDeflationSlot = (await this.ctx.storage.get<string>("slot:deflation")) ?? null;
       this.lastBuybackSlot = (await this.ctx.storage.get<string>("slot:buyback")) ?? null;
@@ -90,6 +93,7 @@ export class OperatorDO extends DurableObject<Env> {
   }
   private async loadState(): Promise<ProtocolState> {
     const raw = await this.ctx.storage.get<SerializedState>("state");
+    this.stateHadAppliedDepositBatches = raw?.appliedDepositBatches != null;
     return raw ? deserializeState(raw) : new ProtocolState(this.settings.tokenAddress);
   }
   private async loadJournal(): Promise<ExecutionJournal> {
@@ -103,6 +107,13 @@ export class OperatorDO extends DurableObject<Env> {
       "config",
       JSON.stringify(this.engine.config, (_k, v) => (typeof v === "bigint" ? v.toString() : v)),
     );
+  }
+
+  private backfillLegacyAppliedDepositBatches(): void {
+    if (this.stateHadAppliedDepositBatches) return;
+    for (const record of this.journal.records.values()) {
+      if (record.command.kind === "DepositBatch") this.state.appliedDepositBatches.add(record.id);
+    }
   }
 
   private newService(cache: EventCache): OperatorService {
@@ -134,13 +145,12 @@ export class OperatorDO extends DurableObject<Env> {
       findConfirmedCommand: (id, command) => client.findConfirmedCommand(id, command),
       afterConfirmed: async (id, command, txHash) => {
         if (command.kind !== "DepositBatch") return;
-        const appliedKey = `lp-minted:${id}`;
-        if (await this.ctx.storage.get(appliedKey)) return;
+        if (this.state.appliedDepositBatches.has(id)) return;
         const lpMinted = await client.depositBatchLpMinted(txHash, command);
         if (command.lpBnb !== 0n && lpMinted === 0n) throw new Error("deposit batch LP mint event missing");
-        if (lpMinted === 0n) return;
+        this.engine.applyDeposit(this.state, depositAllocationFromCommand(command));
         this.state.ensureUserMut(command.user).lpTokenPrincipal += lpMinted;
-        await this.ctx.storage.put(appliedKey, lpMinted.toString());
+        this.state.appliedDepositBatches.add(id);
       },
     };
   }
@@ -249,18 +259,32 @@ export class OperatorDO extends DurableObject<Env> {
     // process business logs through the service (engine + journal)
     const cache = new EventCache(this.state.processedEvents);
     const service = this.newService(cache);
+    let hadProcessingFailure = false;
     for (const log of logs) {
       if (last && last.number === log.blockNumber && last.hash !== log.blockHash) {
         throw new Error(`ReorgDetected at ${log.blockNumber}`);
       }
       const indexed = decodeProtocolLog(log);
       if (!indexed) continue;
-      service.processEvent(indexed);
+      try {
+        service.processEvent(indexed);
+      } catch (err) {
+        // A single bad event must NOT abort the whole batch. Log it, keep
+        // processing the rest, and remember that this range is not fully done so
+        // we do NOT advance the indexed-block cursor past an unprocessed event.
+        hadProcessingFailure = true;
+        console.error(`processEvent failed for ${indexed.event.kind} ${indexed.event.id}:`, err);
+      }
     }
 
-    // flush newly indexed events to D1, then record the block
+    // flush newly indexed events to D1. Only advance the block cursor when every
+    // event in the range was applied; otherwise re-scan this range next tick so a
+    // failed event can never be permanently skipped. Idempotency (processedEvents /
+    // journal batch keys) makes the replay safe.
     for (const { event } of cache.pending) await storage.insertEvent(event);
-    await storage.recordBlock({ number: toBlock, hash: toHash });
+    if (!hadProcessingFailure) {
+      await storage.recordBlock({ number: toBlock, hash: toHash });
+    }
 
     await this.persist();
     try {
@@ -360,6 +384,25 @@ export class OperatorDO extends DurableObject<Env> {
   async getState(): Promise<SerializedState> {
     return serializeState(this.state);
   }
+
+  /**
+   * Recovery tool: forget one or more processed event ids so they can be replayed,
+   * and rewind the D1 block cursor so the indexer re-pulls their range. Used to
+   * repair state when a DO storage reset left an event marked processed without its
+   * side effects applied. All on-chain actions are idempotent, so replay is safe.
+   */
+  async forgetEvents(eventIds: string[], rewindToBlock: number): Promise<{ forgotten: number }> {
+    let forgotten = 0;
+    for (const id of eventIds) {
+      if (this.state.processedEvents.delete(id)) forgotten += 1;
+    }
+    await this.persist();
+    await this.env.DB.prepare("DELETE FROM chain_blocks WHERE block_number >= ?")
+      .bind(rewindToBlock)
+      .run();
+    return { forgotten };
+  }
+
   async getJournal(): Promise<unknown> {
     return this.journal.toJSON();
   }
@@ -394,6 +437,7 @@ export class OperatorDO extends DurableObject<Env> {
       address,
       referrer: u?.referrer && u.referrer !== address ? u.referrer : null,
       direct_count: u?.directCount ?? 0,
+      invested_direct_count: u?.investedDirectCount ?? 0,
       position_id: Number(u?.positionId ?? 0n),
       principal_bnb: (u?.principalBnb ?? 0n).toString(),
       static_paid_bnb: (u?.staticPaidBnb ?? 0n).toString(),

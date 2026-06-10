@@ -12,7 +12,7 @@ import {
 } from "./executor";
 import type { IndexedEvent } from "./indexer";
 import { ExecutionJournal } from "./journal";
-import type { ProtocolState } from "./state";
+import { deserializeState, serializeState, type ProtocolState } from "./state";
 
 export type EventOutcome =
   | { kind: "Applied"; plannedCommands: number }
@@ -32,6 +32,8 @@ export interface ChainClient {
 }
 
 export class OperatorService {
+  private planningState: ProtocolState;
+
   constructor(
     public engine: Engine,
     public state: ProtocolState,
@@ -39,7 +41,9 @@ export class OperatorService {
     public eventCache: ServiceDatabase,
     public chain: ChainClient,
     private onPersist?: () => Promise<void>,
-  ) {}
+  ) {
+    this.planningState = buildPlanningState(engine, state, journal);
+  }
 
   /** service.rs:62 */
   processEvent(indexed: IndexedEvent): EventOutcome {
@@ -52,23 +56,24 @@ export class OperatorService {
     const event = indexed.event;
     switch (event.kind) {
       case "RefBound": {
-        // Tolerate self-referral RefBound(x,x): just register the user.
-        if (event.user === event.referrer) {
-          if (!this.state.isBound(event.user)) this.state.ensureUserMut(event.user);
-        } else {
-          this.engine.bind(this.state, event.user, event.referrer);
-        }
+        // Trust the chain: the contract already validated the bind before emitting.
+        // Adopt it unconditionally, materializing the upline if event ordering put
+        // the downline first. Never reject or throw on a RefBound.
+        this.engine.adoptChainBind(this.state, event.user, event.referrer);
+        this.engine.adoptChainBind(this.planningState, event.user, event.referrer);
         break;
       }
       case "Deposit": {
-        const allocation = this.engine.deposit(this.state, event.user, event.amount);
+        const allocation = this.engine.computeDeposit(this.planningState, event.user, event.amount);
         const commands = commandsForDeposit(allocation);
         plannedCommands = commands.length;
         this.journal.planBatch(`deposit:${eventId}`, commands);
+        this.engine.applyDeposit(this.planningState, allocation);
         break;
       }
       case "TaxCollected": {
-        const command = this.planTaxSweep(event.amount, event.side);
+        const command = this.planTaxSweep(this.state, event.amount, event.side);
+        if (this.planningState !== this.state) this.planTaxSweep(this.planningState, event.amount, event.side);
         if (command) {
           this.journal.planBatch(`tax:${eventId}`, [command]);
           plannedCommands = 1;
@@ -135,10 +140,14 @@ export class OperatorService {
 
   /** service.rs:220 — drain pending; on error stop. Returns tx hashes. */
   async submitPending(): Promise<string[]> {
-    const txHashes = await this.reconcileAlreadyConfirmed();
+    const txHashes: string[] = [];
     this.journal.retryFailed();
     for (const [id, command] of this.journal.pendingCommands()) {
       try {
+        // Idempotency guard: before (re)submitting, check whether this exact command
+        // already landed on-chain (e.g. a prior attempt that we lost the receipt for).
+        // This is only done for the pending set, NOT a full-journal sweep every tick,
+        // so a backlog can never explode RPC usage and time out the DO.
         const existingTxHash = await this.chain.findConfirmedCommand?.(id, command);
         if (existingTxHash) {
           await this.chain.afterConfirmed?.(id, command, existingTxHash);
@@ -167,27 +176,8 @@ export class OperatorService {
     return txHashes;
   }
 
-  private async reconcileAlreadyConfirmed(): Promise<string[]> {
-    if (!this.chain.findConfirmedCommand) return [];
-    const txHashes: string[] = [];
-    for (const [id, record] of this.journal.records.entries()) {
-      if (record.status.state === "Confirmed") continue;
-      try {
-        const txHash = await this.chain.findConfirmedCommand(id, record.command);
-        if (!txHash) continue;
-        await this.chain.afterConfirmed?.(id, record.command, txHash);
-        this.journal.markConfirmed(id, txHash);
-        await this.onPersist?.();
-        txHashes.push(txHash);
-      } catch (err) {
-        console.error(`reconcileAlreadyConfirmed: ${id} failed: ${err}`);
-      }
-    }
-    return txHashes;
-  }
-
   /** service.rs:226 */
-  private planTaxSweep(taxTokenAmount: bigint, side: TaxSide): OperatorCommand | null {
+  private planTaxSweep(state: ProtocolState, taxTokenAmount: bigint, side: TaxSide): OperatorCommand | null {
     if (taxTokenAmount === 0n) return null;
     const split = taxSplitFromEngine(this.engine, side);
     if (split.taxBps === 0) return null;
@@ -195,16 +185,16 @@ export class OperatorService {
     const grossBnbValue = grossBnbValueFromTaxTokens(
       taxTokenAmount,
       split.taxBps,
-      this.state.pair.tokenReserve,
-      this.state.pair.bnbReserve,
+      state.pair.tokenReserve,
+      state.pair.bnbReserve,
     );
-    this.engine.applyTradeTax(this.state, side, grossBnbValue);
+    this.engine.applyTradeTax(state, side, grossBnbValue);
 
     const builderTokenAmount = prorateTaxTokens(taxTokenAmount, split.builderBps, split.taxBps);
     const burnTokenAmount = prorateTaxTokens(taxTokenAmount, split.burnBps, split.taxBps);
     const sellTokenAmount = taxTokenAmount - builderTokenAmount - burnTokenAmount;
-    this.state.balances.builderTokenAmount += builderTokenAmount;
-    this.state.balances.burnedTokens += burnTokenAmount;
+    state.balances.builderTokenAmount += builderTokenAmount;
+    state.balances.burnedTokens += burnTokenAmount;
 
     if (burnTokenAmount === 0n && sellTokenAmount === 0n) return null;
 
@@ -225,6 +215,36 @@ export class OperatorService {
 
 export class ServiceError extends Error {}
 export { EngineError };
+
+export function depositAllocationFromCommand(command: Extract<OperatorCommand, { kind: "DepositBatch" }>) {
+  const nodePayouts = command.nodePayouts.map((p) => ({ to: p.to, amount: p.amount, reason: "node" }));
+  return {
+    user: command.user,
+    amount: command.amount,
+    lpBnb: command.lpBnb,
+    lpTokenValueBnb: command.lpTokenValueBnb,
+    nodePayouts,
+    nodeBnb: nodePayouts.reduce((sum, p) => sum + p.amount, 0n),
+    builderBnb: command.builderBnb,
+    vaultBnb: command.vaultBnb,
+    directBnb: command.directBnb,
+    directReferrer: command.directReferrer,
+    lpRedeems: [],
+  };
+}
+
+function buildPlanningState(engine: Engine, state: ProtocolState, journal: ExecutionJournal): ProtocolState {
+  const planning = deserializeState(serializeState(state));
+  const records = [...journal.records.values()].sort((a, b) => a.id.localeCompare(b.id));
+  for (const record of records) {
+    if (record.status.state === "Confirmed") continue;
+    if (record.command.kind !== "DepositBatch") continue;
+    if (planning.appliedDepositBatches.has(record.id)) continue;
+    engine.applyDeposit(planning, depositAllocationFromCommand(record.command));
+    planning.appliedDepositBatches.add(record.id);
+  }
+  return planning;
+}
 
 function referralDepth(state: ProtocolState, user: string): number {
   let depth = 0;
