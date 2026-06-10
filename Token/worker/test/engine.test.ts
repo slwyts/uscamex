@@ -46,7 +46,7 @@ describe("engine: deposit", () => {
     expect(s.user("alice")!.lpBnbPrincipal).toBe((3n * BNB) / 10n);
   });
 
-  it("direct referral counts toward dynamic exit cap", () => {
+  it("pays the full direct reward that triggers dynamic exit", () => {
     const e = engine({ exitMultipleBps: 10_000 });
     const s = new ProtocolState("root");
     e.bind(s, "alice", "root");
@@ -56,9 +56,9 @@ describe("engine: deposit", () => {
     s.ensureUserMut("alice").lpTokenPrincipal = 123n;
 
     const a = e.deposit(s, "bob", BNB);
-    expect(a.directBnb).toBe(1n);
-    expect(a.vaultBnb).toBe(BNB / 10n + (BNB / 10n - 1n));
-    expect(s.user("alice")!.dynamicPaidBnb).toBe(1n);
+    expect(a.directBnb).toBe(BNB / 10n);
+    expect(a.vaultBnb).toBe(BNB / 10n);
+    expect(s.user("alice")!.dynamicPaidBnb).toBe(BNB / 10n);
     expect(s.user("alice")!.exited).toBe(true);
     expect(a.lpRedeems.length).toBe(1);
     expect(a.lpRedeems[0].user).toBe("alice");
@@ -128,6 +128,21 @@ describe("engine: deposit", () => {
 });
 
 describe("engine: static settlement", () => {
+  it("pays the full static period reward that triggers exit", () => {
+    const e = engine({ dailyStaticBps: 10_000, exitMultipleBps: 10_000 });
+    const s = new ProtocolState("root");
+    e.bind(s, "alice", "root");
+    e.deposit(s, "alice", BNB);
+    s.ensureUserMut("alice").staticPaidBnb = BNB - 1n;
+    s.ensureUserMut("alice").lpTokenPrincipal = 123n;
+
+    const settlement = e.settleStaticPeriod(s, "alice");
+    expect(settlement.staticBnb).toBe(BNB / 4n);
+    expect(s.user("alice")!.staticPaidBnb).toBe(BNB - 1n + BNB / 4n);
+    expect(s.user("alice")!.exited).toBe(true);
+    expect(settlement.lpRedeems[0]).toEqual({ user: "alice", lpTokenAmount: 123n });
+  });
+
   it("pays team and exits at cap", () => {
     const e = engine({ dailyStaticBps: 10_000, directRewardBps: 0, exitMultipleBps: 10_000 });
     const s = new ProtocolState("root");

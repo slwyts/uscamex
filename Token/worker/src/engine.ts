@@ -170,8 +170,6 @@ export class Engine {
       if (isRoot) {
         // root always receives its configured direct reward
       } else if (account && account.active && account.principalBnb > 0n) {
-        const room = this.remainingExitRoom(state, directReferrer) ?? 0n;
-        directBnb = directBnb < room ? directBnb : room;
         if (directBnb !== 0n) {
           const willExit = this.willExitAfter(state, directReferrer, directBnb);
           if (willExit) lpRedeems.push(willExit);
@@ -291,8 +289,7 @@ export class Engine {
     const periodStaticBnb =
       bps(account.principalBnb, this.config.dailyStaticBps) /
       BigInt(this.config.settlementPeriodsPerDay);
-    const room0 = this.remainingExitRoom(state, user) ?? 0n;
-    const staticBnb = periodStaticBnb < room0 ? periodStaticBnb : room0;
+    const staticBnb = periodStaticBnb;
     const ancestors = this.ancestors(state, user, 10);
     const teamRewards: RewardPayout[] = [];
     const lpRedeems: LpRedeem[] = [];
@@ -306,14 +303,9 @@ export class Engine {
         !!a && a.active && a.principalBnb > 0n && a.investedDirectCount >= generation;
       if (!eligible) return;
 
-      const room = this.remainingExitRoom(state, ancestor) ?? 0n;
       const amountRaw = bps(staticBnb, rewardRate);
-      const amount = amountRaw < room ? amountRaw : room;
+      const amount = amountRaw;
       if (amount === 0n) {
-        if (room === 0n) {
-          const redeem = this.exitIfCapReached(state, ancestor);
-          if (redeem) lpRedeems.push(redeem);
-        }
         return;
       }
       state.ensureUserMut(ancestor).dynamicPaidBnb += amount;
@@ -531,13 +523,4 @@ export class Engine {
     return { user, lpTokenAmount };
   }
 
-  /** engine.rs:589 */
-  private remainingExitRoom(state: ProtocolState, user: string): bigint | null {
-    const account = state.user(user);
-    if (!account) return null;
-    if (!account.active || account.principalBnb === 0n) return 0n;
-    const exitTarget = (account.principalBnb * BigInt(this.config.exitMultipleBps)) / BPS_DENOMINATOR;
-    const totalPaid = account.staticPaidBnb + account.dynamicPaidBnb;
-    return satSub(exitTarget, totalPaid);
-  }
 }
