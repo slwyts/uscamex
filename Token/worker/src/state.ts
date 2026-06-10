@@ -65,6 +65,24 @@ export interface ProtocolBalances {
   totalActiveLpPrincipalBnb: bigint;
 }
 
+export interface PendingTaxSweep {
+  taxTokenAmount: bigint;
+  builderTokenAmount: bigint;
+  burnTokenAmount: bigint;
+  ownerSellTokenAmount: bigint;
+  vaultSellTokenAmount: bigint;
+}
+
+export function newPendingTaxSweep(): PendingTaxSweep {
+  return {
+    taxTokenAmount: 0n,
+    builderTokenAmount: 0n,
+    burnTokenAmount: 0n,
+    ownerSellTokenAmount: 0n,
+    vaultSellTokenAmount: 0n,
+  };
+}
+
 export function newProtocolBalances(): ProtocolBalances {
   return {
     vaultBnb: 0n,
@@ -90,6 +108,7 @@ export class ProtocolState {
   processedEvents: Set<string> = new Set();
   processedSettlements: Set<string> = new Set();
   appliedDepositBatches: Set<string> = new Set();
+  pendingTaxSweep: PendingTaxSweep = newPendingTaxSweep();
 
   constructor(root: Address) {
     this.root = root;
@@ -163,6 +182,13 @@ export interface SerializedState {
   processedEvents: string[];
   processedSettlements: string[];
   appliedDepositBatches?: string[];
+  pendingTaxSweep?: {
+    taxTokenAmount: string;
+    builderTokenAmount: string;
+    burnTokenAmount: string;
+    ownerSellTokenAmount: string;
+    vaultSellTokenAmount: string;
+  };
 }
 
 export function serializeState(s: ProtocolState): SerializedState {
@@ -203,6 +229,7 @@ export function serializeState(s: ProtocolState): SerializedState {
     processedEvents: [...s.processedEvents],
     processedSettlements: [...s.processedSettlements],
     appliedDepositBatches: [...s.appliedDepositBatches],
+    pendingTaxSweep: serializePendingTaxSweep(s.pendingTaxSweep),
   };
 }
 
@@ -246,8 +273,29 @@ export function deserializeState(d: SerializedState): ProtocolState {
   s.processedEvents = new Set(d.processedEvents);
   s.processedSettlements = new Set(d.processedSettlements);
   s.appliedDepositBatches = new Set(d.appliedDepositBatches ?? []);
+  s.pendingTaxSweep = d.pendingTaxSweep ? deserializePendingTaxSweep(d.pendingTaxSweep) : newPendingTaxSweep();
   if (needsInvestedDirectRebuild) rebuildInvestedDirectCounts(s);
   return s;
+}
+
+function serializePendingTaxSweep(pending: PendingTaxSweep): SerializedState["pendingTaxSweep"] {
+  return {
+    taxTokenAmount: pending.taxTokenAmount.toString(),
+    builderTokenAmount: pending.builderTokenAmount.toString(),
+    burnTokenAmount: pending.burnTokenAmount.toString(),
+    ownerSellTokenAmount: pending.ownerSellTokenAmount.toString(),
+    vaultSellTokenAmount: pending.vaultSellTokenAmount.toString(),
+  };
+}
+
+function deserializePendingTaxSweep(pending: NonNullable<SerializedState["pendingTaxSweep"]>): PendingTaxSweep {
+  return {
+    taxTokenAmount: BigInt(pending.taxTokenAmount),
+    builderTokenAmount: BigInt(pending.builderTokenAmount),
+    burnTokenAmount: BigInt(pending.burnTokenAmount),
+    ownerSellTokenAmount: BigInt(pending.ownerSellTokenAmount),
+    vaultSellTokenAmount: BigInt(pending.vaultSellTokenAmount),
+  };
 }
 
 function rebuildInvestedDirectCounts(s: ProtocolState): void {

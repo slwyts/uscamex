@@ -12,7 +12,9 @@ import {
 } from "./executor";
 import type { IndexedEvent } from "./indexer";
 import { ExecutionJournal } from "./journal";
-import { deserializeState, serializeState, type ProtocolState } from "./state";
+import { deserializeState, newPendingTaxSweep, serializeState, type PendingTaxSweep, type ProtocolState } from "./state";
+
+const MIN_TAX_SWEEP_SELL_TOKENS = 10n ** 18n;
 
 export type EventOutcome =
   | { kind: "Applied"; plannedCommands: number }
@@ -75,15 +77,8 @@ export class OperatorService {
         break;
       }
       case "TaxCollected": {
-        const command = this.planTaxSweep(this.state, event.amount, event.side);
-        if (this.planningState !== this.state) this.planTaxSweep(this.planningState, event.amount, event.side);
-        if (command) {
-          this.journal.planBatch(`tax:${eventId}`, [command], {
-            blockNumber: indexed.blockNumber,
-            logIndex: indexed.logIndex,
-          });
-          plannedCommands = 1;
-        }
+        this.recordTaxForSweep(this.state, event.amount, event.side);
+        if (this.planningState !== this.state) this.recordTaxForSweep(this.planningState, event.amount, event.side);
         break;
       }
     }
@@ -144,6 +139,27 @@ export class OperatorService {
     return burned;
   }
 
+  /** Plan at most one aggregate tax sweep for this slot. TaxCollected events only accumulate. */
+  tickTaxSweep(slotKey: string): OperatorCommand | null {
+    const batchKey = `tax:${slotKey}`;
+    if (this.journal.records.has(`${batchKey}:0:sweep-tax-to-bnb`)) return null;
+
+    if (pendingTaxIsEmpty(this.state.pendingTaxSweep)) return null;
+    if (pendingTaxHasNoOnchainAction(this.state.pendingTaxSweep)) {
+      this.state.pendingTaxSweep = newPendingTaxSweep();
+      this.planningState.pendingTaxSweep = newPendingTaxSweep();
+      return null;
+    }
+
+    const command = commandForPendingTaxSweep(this.state.pendingTaxSweep);
+    if (!command) return null;
+
+    this.journal.planBatch(batchKey, [command]);
+    this.state.pendingTaxSweep = newPendingTaxSweep();
+    this.planningState.pendingTaxSweep = newPendingTaxSweep();
+    return command;
+  }
+
   /** service.rs:220 — drain pending; on error stop. Returns tx hashes. */
   async submitPending(): Promise<string[]> {
     const txHashes: string[] = [];
@@ -183,10 +199,10 @@ export class OperatorService {
   }
 
   /** service.rs:226 */
-  private planTaxSweep(state: ProtocolState, taxTokenAmount: bigint, side: TaxSide): OperatorCommand | null {
-    if (taxTokenAmount === 0n) return null;
+  private recordTaxForSweep(state: ProtocolState, taxTokenAmount: bigint, side: TaxSide): void {
+    if (taxTokenAmount === 0n) return;
     const split = taxSplitFromEngine(this.engine, side);
-    if (split.taxBps === 0) return null;
+    if (split.taxBps === 0) return;
 
     const grossBnbValue = grossBnbValueFromTaxTokens(
       taxTokenAmount,
@@ -201,21 +217,12 @@ export class OperatorService {
     const sellTokenAmount = taxTokenAmount - builderTokenAmount - burnTokenAmount;
     state.balances.builderTokenAmount += builderTokenAmount;
     state.balances.burnedTokens += burnTokenAmount;
-
-    if (burnTokenAmount === 0n && sellTokenAmount === 0n) return null;
-
-    const ownerBnbBpsOfSold = splitBpsOfSold(split.ownerBps, split.sellBps);
-    const vaultBnbBpsOfSold =
-      split.vaultBps === 0 ? 0 : Math.max(0, Number(BPS_DENOMINATOR) - ownerBnbBpsOfSold);
-
-    return {
-      kind: "SweepTaxToBnb",
-      taxTokenAmount,
-      builderTokenAmount,
-      burnTokenAmount,
-      ownerBnbBpsOfSold,
-      vaultBnbBpsOfSold,
-    };
+    state.pendingTaxSweep.taxTokenAmount += taxTokenAmount;
+    state.pendingTaxSweep.builderTokenAmount += builderTokenAmount;
+    state.pendingTaxSweep.burnTokenAmount += burnTokenAmount;
+    const ownerSellTokenAmount = prorateTaxTokens(taxTokenAmount, split.ownerBps, split.taxBps);
+    state.pendingTaxSweep.ownerSellTokenAmount += ownerSellTokenAmount;
+    state.pendingTaxSweep.vaultSellTokenAmount += sellTokenAmount - ownerSellTokenAmount;
   }
 }
 
@@ -302,7 +309,30 @@ function prorateTaxTokens(taxTokenAmount: bigint, partBps: number, taxBps: numbe
   return (taxTokenAmount * BigInt(partBps)) / BigInt(taxBps);
 }
 
-function splitBpsOfSold(partBps: number, sellBps: number): number {
-  if (partBps === 0 || sellBps === 0) return 0;
-  return Math.floor((partBps * Number(BPS_DENOMINATOR)) / sellBps);
+function commandForPendingTaxSweep(pending: PendingTaxSweep): Extract<OperatorCommand, { kind: "SweepTaxToBnb" }> | null {
+  const sellTokenAmount = pending.taxTokenAmount - pending.builderTokenAmount - pending.burnTokenAmount;
+  if (sellTokenAmount < 0n) throw new ServiceError("pending tax sweep over-allocated");
+  if (pending.burnTokenAmount === 0n && sellTokenAmount < MIN_TAX_SWEEP_SELL_TOKENS) return null;
+
+  const ownerBnbBpsOfSoldRaw = sellTokenAmount === 0n
+    ? 0
+    : Number((pending.ownerSellTokenAmount * BPS_DENOMINATOR) / sellTokenAmount);
+  const ownerBnbBpsOfSold = Math.min(Number(BPS_DENOMINATOR), Math.max(0, ownerBnbBpsOfSoldRaw));
+  return {
+    kind: "SweepTaxToBnb",
+    taxTokenAmount: pending.taxTokenAmount,
+    builderTokenAmount: pending.builderTokenAmount,
+    burnTokenAmount: pending.burnTokenAmount,
+    ownerBnbBpsOfSold,
+    vaultBnbBpsOfSold: sellTokenAmount === 0n ? 0 : Math.max(0, Number(BPS_DENOMINATOR) - ownerBnbBpsOfSold),
+  };
+}
+
+function pendingTaxIsEmpty(pending: PendingTaxSweep): boolean {
+  return pending.taxTokenAmount === 0n;
+}
+
+function pendingTaxHasNoOnchainAction(pending: PendingTaxSweep): boolean {
+  const sellTokenAmount = pending.taxTokenAmount - pending.builderTokenAmount - pending.burnTokenAmount;
+  return pending.taxTokenAmount !== 0n && pending.burnTokenAmount === 0n && sellTokenAmount === 0n;
 }

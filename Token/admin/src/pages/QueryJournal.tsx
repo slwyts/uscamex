@@ -98,6 +98,7 @@ function formatSlot(value: string): string {
   return value
     .replace(/^deflation:/, "")
     .replace(/^buyback:/, "")
+    .replace(/^tax:/, "")
     .replace("T", " ")
     .replace("Z", "点")
     .replace("+08", "");
@@ -109,6 +110,9 @@ function displayJournalId(record: JournalEntry): string {
 
   const tax = /^tax:(0x[0-9a-fA-F]{64}):(\d+):\d+:sweep-tax-to-bnb$/.exec(record.id);
   if (tax) return `税费清算 ${shortHash(tax[1])} #${tax[2]}`;
+
+  const throttledTax = /^tax:(.+):\d+:sweep-tax-to-bnb$/.exec(record.id);
+  if (throttledTax) return `税费清算 ${formatSlot(throttledTax[1])}`;
 
   const deflation = /^deflation:(.+):\d+:pull-pair-tokens$/.exec(record.id);
   if (deflation) return `LP通缩 ${formatSlot(deflation[1])}`;

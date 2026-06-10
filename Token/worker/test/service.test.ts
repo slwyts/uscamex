@@ -165,3 +165,70 @@ describe("service: deposit planning", () => {
     expect(planningState.user("alice")!.dynamicPaidBnb).toBe(BNB / 10n);
   });
 });
+
+describe("service: tax sweep throttling", () => {
+  it("accumulates tax events and flushes one aggregate sweep per slot", () => {
+    const state = new ProtocolState("root");
+    const journal = new ExecutionJournal();
+    const service = serviceWith({ async submit() { return TX_HASH; } }, journal, state);
+
+    service.processEvent({
+      blockNumber: 1n,
+      blockHash: "0x1",
+      txHash: "0x1",
+      logIndex: 0,
+      event: { kind: "TaxCollected", id: "0x1:0", from: "pair", to: "buyer-a", amount: 3n * BNB, side: "Buy" },
+    });
+    service.processEvent({
+      blockNumber: 1n,
+      blockHash: "0x1",
+      txHash: "0x2",
+      logIndex: 1,
+      event: { kind: "TaxCollected", id: "0x2:1", from: "pair", to: "buyer-b", amount: 6n * BNB, side: "Buy" },
+    });
+
+    expect(journal.pendingCommands()).toHaveLength(0);
+    expect(state.pendingTaxSweep.taxTokenAmount).toBe(9n * BNB);
+    expect(state.pendingTaxSweep.builderTokenAmount).toBe(3n * BNB);
+
+    const command = service.tickTaxSweep("2026-06-10T14:20Z");
+    expect(command).toMatchObject({
+      kind: "SweepTaxToBnb",
+      taxTokenAmount: 9n * BNB,
+      builderTokenAmount: 3n * BNB,
+      burnTokenAmount: 0n,
+      ownerBnbBpsOfSold: 0,
+      vaultBnbBpsOfSold: 10_000,
+    });
+    expect(state.pendingTaxSweep.taxTokenAmount).toBe(0n);
+    expect(journal.pendingCommands()).toHaveLength(1);
+    expect(journal.pendingCommands()[0][0]).toBe("tax:2026-06-10T14:20Z:0:sweep-tax-to-bnb");
+  });
+
+  it("keeps same-slot overflow pending for the next tax slot", () => {
+    const state = new ProtocolState("root");
+    const journal = new ExecutionJournal();
+    const service = serviceWith({ async submit() { return TX_HASH; } }, journal, state);
+
+    service.processEvent({ blockNumber: 1n, blockHash: "0x1", txHash: "0x1", logIndex: 0, event: { kind: "TaxCollected", id: "0x1:0", from: "pair", to: "buyer-a", amount: 3n * BNB, side: "Buy" } });
+    expect(service.tickTaxSweep("2026-06-10T14:20Z")).not.toBe(null);
+    service.processEvent({ blockNumber: 1n, blockHash: "0x1", txHash: "0x2", logIndex: 1, event: { kind: "TaxCollected", id: "0x2:1", from: "pair", to: "buyer-b", amount: 6n * BNB, side: "Buy" } });
+
+    expect(service.tickTaxSweep("2026-06-10T14:20Z")).toBe(null);
+    expect(state.pendingTaxSweep.taxTokenAmount).toBe(6n * BNB);
+    const next = service.tickTaxSweep("2026-06-10T14:21Z");
+    expect(next).toMatchObject({ kind: "SweepTaxToBnb", taxTokenAmount: 6n * BNB, builderTokenAmount: 2n * BNB });
+  });
+
+  it("keeps dust tax pending until it reaches the sweep threshold", () => {
+    const state = new ProtocolState("root");
+    const journal = new ExecutionJournal();
+    const service = serviceWith({ async submit() { return TX_HASH; } }, journal, state);
+
+    service.processEvent({ blockNumber: 1n, blockHash: "0x1", txHash: "0x1", logIndex: 0, event: { kind: "TaxCollected", id: "0x1:0", from: "pair", to: "buyer-a", amount: 3n, side: "Buy" } });
+
+    expect(service.tickTaxSweep("2026-06-10T14:20Z")).toBe(null);
+    expect(journal.pendingCommands()).toHaveLength(0);
+    expect(state.pendingTaxSweep.taxTokenAmount).toBe(3n);
+  });
+});

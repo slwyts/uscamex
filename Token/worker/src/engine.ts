@@ -366,16 +366,15 @@ export class Engine {
   buybackTick(state: ProtocolState): bigint {
     if (
       !this.config.buybackEnabled ||
+      this.config.buybackPerMinute === 0n ||
       state.balances.vaultBnb === 0n ||
+      state.balances.vaultBnb < this.config.buybackPerMinute ||
       state.pair.bnbReserve === 0n ||
       state.pair.tokenReserve === 0n
     ) {
       return 0n;
     }
-    const spend =
-      state.balances.vaultBnb < this.config.buybackPerMinute
-        ? state.balances.vaultBnb
-        : this.config.buybackPerMinute;
+    const spend = this.config.buybackPerMinute;
     let tokens = (spend * state.pair.tokenReserve) / state.pair.bnbReserve;
     if (tokens > state.pair.tokenReserve) tokens = state.pair.tokenReserve;
     state.balances.vaultBnb -= spend;

@@ -249,6 +249,18 @@ describe("engine: deflation + buyback + tax", () => {
     expect(s.balances.burnedTokens).toBe(burned);
   });
 
+  it("skips buyback when vault balance is below the configured per-minute target", () => {
+    const e = engine({ buybackPerMinute: BNB / 10n });
+    const s = new ProtocolState("root");
+    s.pair.tokenReserve = 1_000_000n * BNB;
+    s.pair.bnbReserve = 100n * BNB;
+    s.balances.vaultBnb = BNB / 10n - 1n;
+
+    expect(e.buybackTick(s)).toBe(0n);
+    expect(s.balances.vaultBnb).toBe(BNB / 10n - 1n);
+    expect(s.balances.burnedTokens).toBe(0n);
+  });
+
   it("deflation respects daily cap, disable, and day reset", () => {
     const e = engine({ deflationHourlyBps: 150, deflationDailyCapBps: 200 });
     const s = new ProtocolState("root");

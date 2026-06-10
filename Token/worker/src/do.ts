@@ -66,6 +66,7 @@ export class OperatorDO extends DurableObject<Env> {
   private rootInitialized = false;
   private lastSettlementSlot: string | null = null;
   private lastDeflationSlot: string | null = null;
+  private lastTaxSweepSlot: string | null = null;
   private lastBuybackSlot: string | null = null;
   private stateHadAppliedDepositBatches = false;
   private storedEventsReconciled = false;
@@ -84,6 +85,7 @@ export class OperatorDO extends DurableObject<Env> {
       this.backfillLegacyAppliedDepositBatches();
       this.lastSettlementSlot = (await this.ctx.storage.get<string>("slot:settlement")) ?? null;
       this.lastDeflationSlot = (await this.ctx.storage.get<string>("slot:deflation")) ?? null;
+      this.lastTaxSweepSlot = (await this.ctx.storage.get<string>("slot:tax-sweep")) ?? null;
       this.lastBuybackSlot = (await this.ctx.storage.get<string>("slot:buyback")) ?? null;
       this.vaultAddress = (await this.ctx.storage.get<string>("vault")) ?? null;
       this.disabled = (await this.ctx.storage.get<boolean>("disabled")) ?? false;
@@ -271,6 +273,7 @@ export class OperatorDO extends DurableObject<Env> {
     const cache = new EventCache(this.state.processedEvents);
     const service = this.newService(cache);
     const now = BigInt(Math.floor(Date.now() / 1000));
+    const rpc = new BscRpcClient(this.settings.rpcUrl, this.settings.tokenAddress);
 
     const periodsPerDay = BigInt(Math.max(1, this.engine.config.settlementPeriodsPerDay));
     const periodSecs = SECS_PER_DAY / periodsPerDay;
@@ -288,9 +291,34 @@ export class OperatorDO extends DurableObject<Env> {
       await this.ctx.storage.put("slot:deflation", deflationSlot);
     }
 
+    const taxSweepSlot = formatMinuteSlot(now);
+    let plannedTaxSweep = false;
+    if (this.lastTaxSweepSlot !== taxSweepSlot) {
+      plannedTaxSweep = !!service.tickTaxSweep(taxSweepSlot);
+      this.lastTaxSweepSlot = taxSweepSlot;
+      await this.ctx.storage.put("slot:tax-sweep", taxSweepSlot);
+    }
+
+    if (plannedTaxSweep) {
+      await this.persist();
+      try {
+        await service.submitPending();
+      } catch (err) {
+        console.error("tax sweep submit_pending failed:", err);
+      }
+      await this.persist();
+    }
+
     const buybackSlot = formatMinuteSlot(now);
     if (this.lastBuybackSlot !== buybackSlot) {
-      service.tickBuyback(buybackSlot);
+      let canBuyback = false;
+      try {
+        await this.syncVaultBalance(rpc);
+        canBuyback = true;
+      } catch (err) {
+        console.error("sync vault before buyback failed:", err);
+      }
+      if (canBuyback) service.tickBuyback(buybackSlot);
       this.lastBuybackSlot = buybackSlot;
       await this.ctx.storage.put("slot:buyback", buybackSlot);
     }
@@ -486,6 +514,7 @@ export class OperatorDO extends DurableObject<Env> {
       rebuilt.nodes = this.state.nodes;
       rebuilt.pair = this.state.pair;
       rebuilt.balances = this.state.balances;
+      rebuilt.pendingTaxSweep = this.state.pendingTaxSweep;
       this.state = rebuilt;
       await this.ctx.storage.put("state", serializeState(this.state));
     }
