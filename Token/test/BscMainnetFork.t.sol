@@ -317,11 +317,15 @@ contract BscMainnetForkFlow {
             lpBnb: uint128(0.3 ether),
             lpTokenValueBnb: uint128(0.3 ether),
             minLpTokenOut: 1,
+            minLpAddToken: 1,
+            minLpAddBnb: 1,
+            minLpLiquidityOut: 1,
             builderBnb: uint128(0.1 ether),
             minBuilderTokenOut: 1,
             vaultBnb: uint128(0.1 ether),
             directReferrer: address(this),
             directBnb: uint128(0.1 ether),
+            deadline: block.timestamp + 1 hours,
             nodePayouts: payouts
         });
 

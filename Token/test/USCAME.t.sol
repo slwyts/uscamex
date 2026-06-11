@@ -160,8 +160,8 @@ contract MockRouter {
     function addLiquidityETH(
         address token,
         uint256 amountTokenDesired,
-        uint256,
-        uint256,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
         address to,
         uint256
     )
@@ -169,6 +169,8 @@ contract MockRouter {
         payable
         returns (uint256, uint256, uint256)
     {
+        require(amountTokenDesired >= amountTokenMin, "TOKEN_MIN");
+        require(msg.value >= amountETHMin, "ETH_MIN");
         address pair = factory.pair();
         if (pair == address(0)) pair = factory.createPair(token, WETH);
         require(
@@ -185,10 +187,10 @@ contract MockRouter {
     }
 
     function removeLiquidityETHSupportingFeeOnTransferTokens(
-        address token,
+        address,
         uint256 liquidity,
-        uint256,
-        uint256,
+        uint256 amountTokenMin,
+        uint256 amountETHMin,
         address to,
         uint256
     )
@@ -199,7 +201,10 @@ contract MockRouter {
         require(pair != address(0), "NO_PAIR");
         // Pull LP from caller to the pair, then burn it.
         require(MockPair(payable(pair)).transferFrom(msg.sender, pair, liquidity), "lp pull");
-        (, amountETH) = MockPair(payable(pair)).burnFor(liquidity, to, to);
+        (uint256 tokenOut, uint256 bnbOut) = MockPair(payable(pair)).burnFor(liquidity, to, to);
+        require(tokenOut >= amountTokenMin, "TOKEN_MIN");
+        require(bnbOut >= amountETHMin, "ETH_MIN");
+        amountETH = bnbOut;
     }
 }
 
@@ -282,7 +287,7 @@ contract USCAMETest is MiniTest {
     function testBurnAddressIsFeeExemptForBuyback() public {
         address pair = token.pair();
         assertTrue(token.feeExempt(BURN));
-        uint256 amount = 1_000 ether;
+        uint256 amount = 1000 ether;
         uint256 contractBefore = token.balanceOf(address(token));
         uint256 burnBefore = token.balanceOf(BURN);
 
@@ -595,7 +600,7 @@ contract USCAMETest is MiniTest {
     // Self-custody LP & operatorRedeemLp
     // --------------------------------------------------------------------
 
-    function testInitialLpStaysSelfCustodied() public {
+    function testInitialLpStaysSelfCustodied() public view {
         // Spec invariant: 100% of initial LP must live on the token contract
         // itself so the operator can orchestrate user exits without holding
         // any LP off-chain.
@@ -620,7 +625,8 @@ contract USCAMETest is MiniTest {
         uint256 totalSupplyBefore = token.totalSupply();
 
         vm.prank(operator);
-        (uint256 bnbReturned, uint256 tokenBurned) = token.operatorRedeemLp(alice, lpToBurn);
+        (uint256 bnbReturned, uint256 tokenBurned) =
+            token.operatorRedeemLp(alice, lpToBurn, 1, 1, block.timestamp + 1 hours);
 
         assertTrue(bnbReturned > 0);
         assertTrue(tokenBurned > 0);
@@ -641,7 +647,8 @@ contract USCAMETest is MiniTest {
         uint256 aliceBefore = alice.balance;
 
         vm.prank(operator);
-        (uint256 bnbReturned, uint256 tokenBurned) = token.operatorRedeemLp(alice, lpToBurn);
+        (uint256 bnbReturned, uint256 tokenBurned) =
+            token.operatorRedeemLp(alice, lpToBurn, 1, 1, block.timestamp + 1 hours);
 
         assertTrue(bnbReturned > 0);
         assertTrue(tokenBurned > 0);
@@ -652,17 +659,35 @@ contract USCAMETest is MiniTest {
     function testOperatorRedeemLpOnlyOperator() public {
         vm.expectRevert(bytes("OPERATOR"));
         vm.prank(bob);
-        token.operatorRedeemLp(alice, 1);
+        token.operatorRedeemLp(alice, 1, 1, 1, block.timestamp + 1 hours);
     }
 
     function testOperatorRedeemLpRejectsZeroArgs() public {
         vm.expectRevert(bytes("REDEEM"));
         vm.prank(operator);
-        token.operatorRedeemLp(address(0), 1);
+        token.operatorRedeemLp(address(0), 1, 1, 1, block.timestamp + 1 hours);
 
         vm.expectRevert(bytes("REDEEM"));
         vm.prank(operator);
-        token.operatorRedeemLp(alice, 0);
+        token.operatorRedeemLp(alice, 0, 1, 1, block.timestamp + 1 hours);
+
+        vm.expectRevert(bytes("SLIPPAGE"));
+        vm.prank(operator);
+        token.operatorRedeemLp(alice, 1, 0, 1, block.timestamp + 1 hours);
+
+        vm.expectRevert(bytes("SLIPPAGE"));
+        vm.prank(operator);
+        token.operatorRedeemLp(alice, 1, 1, 0, block.timestamp + 1 hours);
+    }
+
+    function testOperatorRedeemLpRejectsSlippageMin() public {
+        address pair = token.pair();
+        uint256 totalLp = MockPair(payable(pair)).balanceOf(address(token));
+        uint256 lpToBurn = totalLp / 20;
+
+        vm.expectRevert(bytes("TOKEN_MIN"));
+        vm.prank(operator);
+        token.operatorRedeemLp(alice, lpToBurn, type(uint128).max, 1, block.timestamp + 1 hours);
     }
 
     // --------------------------------------------------------------------
@@ -1037,11 +1062,39 @@ contract USCAMETest is MiniTest {
 
         // 0.3 buy + 0.3 LP = 0.6 BNB consumed from the contract balance.
         vm.prank(operator);
-        token.operatorBuildLp(0.3 ether, 0.3 ether, 1);
+        token.operatorBuildLp(0.3 ether, 0.3 ether, 1, 1, 1, 1, block.timestamp + 1 hours);
 
         // LP minted to the contract (self-custody for exits) and pool BNB +0.6.
         assertTrue(MockPair(payable(pair)).balanceOf(address(token)) > lpBefore);
         assertEq(pair.balance, pairBnbBefore + 0.6 ether);
+    }
+
+    function testOperatorBuildLpRejectsAddLiquiditySlippage() public {
+        bind(alice, address(this));
+        vm.deal(alice, 1 ether);
+        vm.prank(alice);
+        (bool ok,) = payable(address(token)).call{ value: 1 ether }("");
+        assertTrue(ok);
+
+        vm.expectRevert(bytes("TOKEN_MIN"));
+        vm.prank(operator);
+        token.operatorBuildLp(
+            0.3 ether, 0.3 ether, 1, type(uint128).max, 1, 1, block.timestamp + 1 hours
+        );
+    }
+
+    function testOperatorBuildLpRejectsLowLiquidityMint() public {
+        bind(alice, address(this));
+        vm.deal(alice, 1 ether);
+        vm.prank(alice);
+        (bool ok,) = payable(address(token)).call{ value: 1 ether }("");
+        assertTrue(ok);
+
+        vm.expectRevert(bytes("LP_SLIPPAGE"));
+        vm.prank(operator);
+        token.operatorBuildLp(
+            0.3 ether, 0.3 ether, 1, 1, 1, type(uint128).max, block.timestamp + 1 hours
+        );
     }
 
     function testDepositBatchExecutesFullDistributionAtomically() public {
@@ -1065,11 +1118,15 @@ contract USCAMETest is MiniTest {
             lpBnb: uint128(0.3 ether),
             lpTokenValueBnb: uint128(0.3 ether),
             minLpTokenOut: 1,
+            minLpAddToken: 1,
+            minLpAddBnb: 1,
+            minLpLiquidityOut: 1,
             builderBnb: uint128(0.1 ether),
             minBuilderTokenOut: 1,
             vaultBnb: uint128(0.1 ether),
             directReferrer: address(this),
             directBnb: uint128(0.1 ether),
+            deadline: block.timestamp + 1 hours,
             nodePayouts: payouts
         });
 
@@ -1107,11 +1164,15 @@ contract USCAMETest is MiniTest {
             lpBnb: uint128(0.3 ether),
             lpTokenValueBnb: uint128(0.3 ether),
             minLpTokenOut: 1,
+            minLpAddToken: 1,
+            minLpAddBnb: 1,
+            minLpLiquidityOut: 1,
             builderBnb: uint128(0.1 ether),
             minBuilderTokenOut: 1,
             vaultBnb: uint128(0.1 ether),
             directReferrer: address(token),
             directBnb: uint128(0.1 ether),
+            deadline: block.timestamp + 1 hours,
             nodePayouts: payouts
         });
 

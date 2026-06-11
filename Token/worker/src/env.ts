@@ -37,6 +37,7 @@ export interface Env {
   AMM_FEE_BPS?: string;
 
   // --- Chain metadata for admin frontend ---
+  PUBLIC_RPC_URL?: string;
   CHAIN_NAME?: string;
   EXPLORER_URL?: string;
   NATIVE_CURRENCY_NAME?: string;
@@ -110,8 +111,8 @@ export function loadSettings(env: Env): OperatorSettings {
   }
 
   const slippage = requirePosInt("EXECUTOR_SLIPPAGE_BPS", env.EXECUTOR_SLIPPAGE_BPS);
-  if (slippage > 10_000) {
-    throw new SettingsError("EXECUTOR_SLIPPAGE_BPS must be <= 10000");
+  if (slippage > 500) {
+    throw new SettingsError("EXECUTOR_SLIPPAGE_BPS must be <= 500");
   }
 
   // AMM fee numerator. Default by chain: BSC → PancakeSwap 9975; Polygon → QuickSwap 9970.
@@ -151,7 +152,7 @@ export function loadSettings(env: Env): OperatorSettings {
     ),
     ammFeeBps,
     chainName: env.CHAIN_NAME || "Unknown Chain",
-    publicRpcUrl: env.RPC_URL, // same as operator RPC; served to admin frontend
+    publicRpcUrl: env.PUBLIC_RPC_URL || "",
     explorerUrl: env.EXPLORER_URL || "https://polygonscan.com",
     nativeCurrency: {
       name: env.NATIVE_CURRENCY_NAME || "Native Token",

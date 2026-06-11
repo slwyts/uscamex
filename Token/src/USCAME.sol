@@ -52,16 +52,21 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         uint128 lpBnb;
         uint128 lpTokenValueBnb;
         uint128 minLpTokenOut;
+        uint128 minLpAddToken;
+        uint128 minLpAddBnb;
+        uint128 minLpLiquidityOut;
         uint128 builderBnb;
         uint128 minBuilderTokenOut;
         uint128 vaultBnb;
         address directReferrer;
         uint128 directBnb;
+        uint256 deadline;
         NodePayout[] nodePayouts;
     }
 
     address public immutable router;
     address public immutable vault;
+    uint256 public immutable ammFeeBps;
     address public operator;
     address public root;
     address public pair;
@@ -154,6 +159,7 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         require(owner_ != address(0), "OWNER_ZERO");
         router = router_;
         vault = address(new BuybackVault(address(this)));
+        ammFeeBps = block.chainid == 56 || block.chainid == 97 ? 9975 : 9970;
         root = owner_;
         operator = operator_ == address(0) ? owner_ : operator_;
         teamRewardBps[0] = 1000;
@@ -191,11 +197,17 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         uint256 bnbAmount = address(this).balance;
         require(tokenAmount != 0 && bnbAmount != 0, "NO_LP");
         IPancakeRouter pancake = IPancakeRouter(router);
+        address weth = pancake.WETH();
+        address existingPair = IPancakeFactory(pancake.factory()).getPair(address(this), weth);
+        if (existingPair != address(0)) {
+            (uint112 r0, uint112 r1,) = IPancakePair(existingPair).getReserves();
+            require(r0 == 0 && r1 == 0, "PAIR_EXISTS");
+        }
         _approve(address(this), router, tokenAmount);
         pancake.addLiquidityETH{ value: bnbAmount }(
-            address(this), tokenAmount, 0, 0, address(this), block.timestamp
+            address(this), tokenAmount, tokenAmount, bnbAmount, address(this), block.timestamp
         );
-        pair = IPancakeFactory(pancake.factory()).getPair(address(this), pancake.WETH());
+        pair = IPancakeFactory(pancake.factory()).getPair(address(this), weth);
         require(pair != address(0), "NO_PAIR");
         initialized = true;
         emit PairInitialized(pair, tokenAmount, bnbAmount);
@@ -208,7 +220,10 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     /// this entry point.
     function operatorRedeemLp(
         address user,
-        uint256 lpAmount
+        uint256 lpAmount,
+        uint256 minTokenOut,
+        uint256 minBnbOut,
+        uint256 deadline
     )
         external
         onlyOperator
@@ -216,18 +231,22 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         returns (uint256 bnbReturned, uint256 tokenBurned)
     {
         require(user != address(0) && lpAmount != 0 && pair != address(0), "REDEEM");
+        require(minTokenOut != 0 && minBnbOut != 0, "SLIPPAGE");
+        require(block.timestamp <= deadline, "DEADLINE");
         IPancakePair(pair).approve(router, lpAmount);
         uint256 tokenBefore = balanceOf(address(this));
         uint256 ethBefore = address(this).balance;
         inLpRedeemContext = true;
-        IPancakeRouter(router).removeLiquidityETHSupportingFeeOnTransferTokens(
-            address(this), lpAmount, 0, 0, address(this), block.timestamp
-        );
+        IPancakeRouter(router)
+            .removeLiquidityETHSupportingFeeOnTransferTokens(
+                address(this), lpAmount, minTokenOut, minBnbOut, address(this), deadline
+            );
         inLpRedeemContext = false;
         unchecked {
             tokenBurned = balanceOf(address(this)) - tokenBefore;
             bnbReturned = address(this).balance - ethBefore;
         }
+        require(tokenBurned >= minTokenOut && bnbReturned >= minBnbOut, "SLIPPAGE");
         if (tokenBurned != 0) {
             _burn(address(this), tokenBurned);
         }
@@ -405,12 +424,21 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     function depositBatch(DepositBatchParams calldata params) external onlyOperator nonReentrant {
         require(initialized && pair != address(0), "NOT_READY");
         require(params.user != address(0), "USER");
+        require(block.timestamp <= params.deadline, "DEADLINE");
         uint256 nodeBnb;
         uint256 lpMinted;
         inOperatorContext = true;
 
         if (params.lpBnb != 0 || params.lpTokenValueBnb != 0) {
-            lpMinted = _operatorBuildLp(params.lpTokenValueBnb, params.lpBnb, params.minLpTokenOut);
+            lpMinted = _operatorBuildLp(
+                params.lpTokenValueBnb,
+                params.lpBnb,
+                params.minLpTokenOut,
+                params.minLpAddToken,
+                params.minLpAddBnb,
+                params.minLpLiquidityOut,
+                params.deadline
+            );
         }
         if (params.builderBnb != 0) {
             _operatorBuyToSelf(params.builderBnb, params.minBuilderTokenOut);
@@ -434,11 +462,13 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         // later pending deposit for the same user.
         {
             uint256 totalSpend = uint256(params.lpBnb) + uint256(params.lpTokenValueBnb)
-                + uint256(params.builderBnb) + uint256(params.vaultBnb)
-                + uint256(params.directBnb) + nodeBnb;
+                + uint256(params.builderBnb) + uint256(params.vaultBnb) + uint256(params.directBnb)
+                + nodeBnb;
             require(totalSpend <= params.amount, "BATCH_OVERRUN");
             require(pendingDeposit[params.user] >= params.amount, "INSUFFICIENT_DEPOSIT");
-            unchecked { pendingDeposit[params.user] -= params.amount; }
+            unchecked {
+                pendingDeposit[params.user] -= params.amount;
+            }
         }
 
         inOperatorContext = false;
@@ -523,29 +553,47 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     function operatorBuildLp(
         uint256 swapBnb,
         uint256 lpBnb,
-        uint256 minTokenOut
+        uint256 minTokenOut,
+        uint256 minLpAddToken,
+        uint256 minLpAddBnb,
+        uint256 minLpLiquidityOut,
+        uint256 deadline
     )
         external
         onlyOperator
         nonReentrant
     {
-        _operatorBuildLp(swapBnb, lpBnb, minTokenOut);
+        _operatorBuildLp(
+            swapBnb, lpBnb, minTokenOut, minLpAddToken, minLpAddBnb, minLpLiquidityOut, deadline
+        );
     }
 
     function _operatorBuildLp(
         uint256 swapBnb,
         uint256 lpBnb,
-        uint256 minTokenOut
+        uint256 minTokenOut,
+        uint256 minLpAddToken,
+        uint256 minLpAddBnb,
+        uint256 minLpLiquidityOut,
+        uint256 deadline
     )
         internal
         returns (uint256 liquidity)
     {
         require(pair != address(0) && swapBnb != 0 && lpBnb != 0, "LP_ARGS");
+        require(minLpAddToken != 0 && minLpAddBnb != 0 && minLpLiquidityOut != 0, "SLIPPAGE");
+        require(block.timestamp <= deadline, "DEADLINE");
         uint256 bought = _operatorBuyToSelf(swapBnb, minTokenOut);
         _approve(address(this), router, bought);
-        (,, liquidity) = IPancakeRouter(router).addLiquidityETH{ value: lpBnb }(
-            address(this), bought, 0, 0, address(this), block.timestamp
+        (uint256 amountToken, uint256 amountETH, uint256 minted) = IPancakeRouter(router)
+        .addLiquidityETH{ value: lpBnb }(
+            address(this), bought, minLpAddToken, minLpAddBnb, address(this), deadline
         );
+        require(
+            amountToken >= minLpAddToken && amountETH >= minLpAddBnb && minted >= minLpLiquidityOut,
+            "LP_SLIPPAGE"
+        );
+        liquidity = minted;
     }
 
     function _sendBnb(address to, uint256 amount) internal {
@@ -555,15 +603,15 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
     }
 
     /// Quote project-token output for buying with `bnbAmount`, using live reserves
-    /// and the standard UniswapV2 0.3% fee (matches QuickSwap/Sushi pairs).
+    /// and the chain-default V2 AMM fee used by the offchain operator.
     function _quoteBuyTokenOut(uint256 bnbAmount) internal view returns (uint256) {
         (uint112 r0, uint112 r1,) = IPancakePair(pair).getReserves();
         address token0 = IPancakePair(pair).token0();
         (uint256 reserveBnb, uint256 reserveToken) =
             token0 == address(this) ? (uint256(r1), uint256(r0)) : (uint256(r0), uint256(r1));
         require(reserveBnb != 0 && reserveToken != 0, "NO_RESERVES");
-        uint256 amountInWithFee = bnbAmount * 997;
-        return (amountInWithFee * reserveToken) / (reserveBnb * 1000 + amountInWithFee);
+        uint256 amountInWithFee = bnbAmount * ammFeeBps;
+        return (amountInWithFee * reserveToken) / (reserveBnb * BPS + amountInWithFee);
     }
 
     function burn(uint256 amount) external {

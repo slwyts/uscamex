@@ -42,6 +42,17 @@ interface PairReserves {
   bnbReserve: bigint;
 }
 
+interface AddLiquidityQuote {
+  tokenUsed: bigint;
+  bnbUsed: bigint;
+  liquidity: bigint;
+}
+
+interface RemoveLiquidityQuote {
+  tokenOut: bigint;
+  bnbOut: bigint;
+}
+
 function normalizeAddress(value: string): Hex {
   const t = value.trim();
   if (!t.startsWith("0x") || !/^0x[0-9a-fA-F]{40}$/.test(t)) throw new ChainError("InvalidAddress");
@@ -63,6 +74,42 @@ function quoteTokenAmount(bnbValue: bigint, r: PairReserves): bigint {
   return u256ToU128((bnbValue * r.tokenReserve) / r.bnbReserve);
 }
 
+function quoteBnbAmount(tokenValue: bigint, r: PairReserves): bigint {
+  if (tokenValue === 0n || r.bnbReserve === 0n || r.tokenReserve === 0n) throw new ChainError("InvalidAmount");
+  return u256ToU128((tokenValue * r.bnbReserve) / r.tokenReserve);
+}
+
+function minBigint(a: bigint, b: bigint): bigint {
+  return a < b ? a : b;
+}
+
+function quoteAddLiquidity(
+  bnbDesired: bigint,
+  tokenDesired: bigint,
+  reserves: PairReserves,
+  totalSupply: bigint,
+): AddLiquidityQuote {
+  if (bnbDesired === 0n || tokenDesired === 0n || totalSupply === 0n) throw new ChainError("InvalidAmount");
+  const tokenOptimal = quoteTokenAmount(bnbDesired, reserves);
+  const tokenUsed = tokenOptimal <= tokenDesired ? tokenOptimal : tokenDesired;
+  const bnbUsed = tokenOptimal <= tokenDesired ? bnbDesired : quoteBnbAmount(tokenDesired, reserves);
+  if (tokenUsed === 0n || bnbUsed === 0n) throw new ChainError("InvalidAmount");
+  const liquidity = minBigint(
+    (tokenUsed * totalSupply) / reserves.tokenReserve,
+    (bnbUsed * totalSupply) / reserves.bnbReserve,
+  );
+  if (liquidity === 0n) throw new ChainError("InvalidAmount");
+  return { tokenUsed: u256ToU128(tokenUsed), bnbUsed: u256ToU128(bnbUsed), liquidity: u256ToU128(liquidity) };
+}
+
+function quoteRemoveLiquidity(lpAmount: bigint, reserves: PairReserves, totalSupply: bigint): RemoveLiquidityQuote {
+  if (lpAmount === 0n || totalSupply === 0n) throw new ChainError("InvalidAmount");
+  const tokenOut = (lpAmount * reserves.tokenReserve) / totalSupply;
+  const bnbOut = (lpAmount * reserves.bnbReserve) / totalSupply;
+  if (tokenOut === 0n || bnbOut === 0n) throw new ChainError("InvalidAmount");
+  return { tokenOut: u256ToU128(tokenOut), bnbOut: u256ToU128(bnbOut) };
+}
+
 /** chain.rs:1075 — constant product with configurable fee. */
 function v2AmountOut(amountIn: bigint, reserveIn: bigint, reserveOut: bigint, feeBps: bigint): bigint {
   if (amountIn === 0n || reserveIn === 0n || reserveOut === 0n) throw new ChainError("InvalidAmount");
@@ -74,7 +121,7 @@ function v2AmountOut(amountIn: bigint, reserveIn: bigint, reserveOut: bigint, fe
 
 /** chain.rs:1089 — saturating. */
 function applySlippage(amount: bigint, slippageBps: number): bigint {
-  if (slippageBps > 10_000) throw new ChainError("InvalidAmount");
+  if (slippageBps > 500) throw new ChainError("InvalidAmount");
   return (amount * BigInt(10_000 - slippageBps)) / BPS_DENOMINATOR;
 }
 
@@ -138,7 +185,9 @@ const ABI = {
   transfer: parseAbiItem("function transfer(address to, uint256 amount)"),
   burn: parseAbiItem("function burn(uint256 amount)"),
   pullPairTokens: parseAbiItem("function pullPairTokens(uint16 bps)"),
-  operatorRedeemLp: parseAbiItem("function operatorRedeemLp(address user, uint256 lpAmount)"),
+  operatorRedeemLp: parseAbiItem(
+    "function operatorRedeemLp(address user, uint256 lpAmount, uint256 minTokenOut, uint256 minBnbOut, uint256 deadline)",
+  ),
   addLiquidityETH: parseAbiItem(
     "function addLiquidityETH(address token, uint256 amountTokenDesired, uint256 amountTokenMin, uint256 amountETHMin, address to, uint256 deadline)",
   ),
@@ -153,7 +202,7 @@ const ABI = {
 } as const;
 
 const ABI_DEPOSIT_BATCH = parseAbiItem(
-  "function depositBatch((address user,uint128 amount,uint128 lpBnb,uint128 lpTokenValueBnb,uint128 minLpTokenOut,uint128 builderBnb,uint128 minBuilderTokenOut,uint128 vaultBnb,address directReferrer,uint128 directBnb,(address to,uint128 amount)[] nodePayouts) params)",
+  "function depositBatch((address user,uint128 amount,uint128 lpBnb,uint128 lpTokenValueBnb,uint128 minLpTokenOut,uint128 minLpAddToken,uint128 minLpAddBnb,uint128 minLpLiquidityOut,uint128 builderBnb,uint128 minBuilderTokenOut,uint128 vaultBnb,address directReferrer,uint128 directBnb,uint256 deadline,(address to,uint128 amount)[] nodePayouts) params)",
 );
 
 const SELECTORS = {
@@ -163,6 +212,7 @@ const SELECTORS = {
     "function getReserves() view returns (uint112,uint112,uint32)",
   ),
   balanceOf: "function balanceOf(address) view returns (uint256)",
+  totalSupply: "function totalSupply() view returns (uint256)",
   weth: toFunctionSelector("function WETH() view returns (address)"),
 } as const;
 
@@ -291,6 +341,14 @@ export class BscTransactionClient {
       abi: [parseAbiItem(SELECTORS.balanceOf)],
       functionName: "balanceOf",
       args: [normalizeAddress(account)],
+    });
+    return this.parseU128Word(await this.ethCall(token, data), 0);
+  }
+
+  private async erc20TotalSupply(token: string): Promise<bigint> {
+    const data = encodeFunctionData({
+      abi: [parseAbiItem(SELECTORS.totalSupply)],
+      functionName: "totalSupply",
     });
     return this.parseU128Word(await this.ethCall(token, data), 0);
   }
@@ -459,8 +517,13 @@ export class BscTransactionClient {
   }): Promise<string> {
     await this.detectFee();
     const reserves = await this.pairReserves();
+    const pair = await this.pairAddress();
+    const pairTotalSupply = await this.erc20TotalSupply(pair);
     let projectedReserves = reserves;
     let minLpTokenOut = 0n;
+    let minLpAddToken = 0n;
+    let minLpAddBnb = 0n;
+    let minLpLiquidityOut = 0n;
     if (this.lpAmountsValid(b.lpBnb, b.lpTokenValueBnb)) {
       const buyOut = v2AmountOut(b.lpTokenValueBnb, reserves.bnbReserve, reserves.tokenReserve, this.feeBps);
       minLpTokenOut = applySlippage(buyOut, this.ctx.slippageBps);
@@ -470,11 +533,16 @@ export class BscTransactionClient {
         bnbReserve: reserves.bnbReserve + b.lpTokenValueBnb,
         tokenReserve: reserves.tokenReserve - buyOut,
       };
-      const tokenForLp = quoteTokenAmount(b.lpBnb, postBuy);
-      const tokenConsumed = tokenForLp < buyOut ? tokenForLp : buyOut;
+      const addQuote = quoteAddLiquidity(b.lpBnb, buyOut, postBuy, pairTotalSupply);
+      minLpAddToken = applySlippage(addQuote.tokenUsed, this.ctx.slippageBps);
+      minLpAddBnb = applySlippage(addQuote.bnbUsed, this.ctx.slippageBps);
+      minLpLiquidityOut = applySlippage(addQuote.liquidity, this.ctx.slippageBps);
+      if (minLpAddToken === 0n || minLpAddBnb === 0n || minLpLiquidityOut === 0n) {
+        throw new ChainError("InvalidAmount");
+      }
       projectedReserves = {
-        bnbReserve: postBuy.bnbReserve + b.lpBnb,
-        tokenReserve: postBuy.tokenReserve + tokenConsumed,
+        bnbReserve: postBuy.bnbReserve + addQuote.bnbUsed,
+        tokenReserve: postBuy.tokenReserve + addQuote.tokenUsed,
       };
     }
 
@@ -515,12 +583,16 @@ export class BscTransactionClient {
           amount: u256ToU128(b.amount),
           lpBnb: u256ToU128(b.lpBnb),
           lpTokenValueBnb: u256ToU128(b.lpTokenValueBnb),
-          minLpTokenOut,
+          minLpTokenOut: u256ToU128(minLpTokenOut),
+          minLpAddToken: u256ToU128(minLpAddToken),
+          minLpAddBnb: u256ToU128(minLpAddBnb),
+          minLpLiquidityOut: u256ToU128(minLpLiquidityOut),
           builderBnb: u256ToU128(b.builderBnb),
-          minBuilderTokenOut,
+          minBuilderTokenOut: u256ToU128(minBuilderTokenOut),
           vaultBnb: u256ToU128(b.vaultBnb),
           directReferrer,
           directBnb: u256ToU128(b.directBnb),
+          deadline: this.deadline(),
           nodePayouts,
         },
       ],
@@ -800,10 +872,24 @@ export class BscTransactionClient {
     const pair = await this.pairAddress();
     const lpCustody = await this.erc20BalanceOf(pair, this.token);
     if (lpTokenAmount > lpCustody) throw new ChainError("token contract has insufficient LP custody");
+    const [reserves, totalSupply] = await Promise.all([
+      this.pairReserves(),
+      this.erc20TotalSupply(pair),
+    ]);
+    const redeemQuote = quoteRemoveLiquidity(lpTokenAmount, reserves, totalSupply);
+    const minTokenOut = applySlippage(redeemQuote.tokenOut, this.ctx.slippageBps);
+    const minBnbOut = applySlippage(redeemQuote.bnbOut, this.ctx.slippageBps);
+    if (minTokenOut === 0n || minBnbOut === 0n) throw new ChainError("InvalidAmount");
     const redeem = encodeFunctionData({
       abi: [ABI.operatorRedeemLp],
       functionName: "operatorRedeemLp",
-      args: [normalizeAddress(user), u256ToU128(lpTokenAmount)],
+      args: [
+        normalizeAddress(user),
+        u256ToU128(lpTokenAmount),
+        minTokenOut,
+        minBnbOut,
+        this.deadline(),
+      ],
     });
     return this.submitEvmCall({ target: this.token, value: 0n, data: redeem });
   }

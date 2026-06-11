@@ -37,6 +37,7 @@ const LOCAL_RPC_URL = process.env.LOCALTEST_RPC_URL || "http://127.0.0.1:8545";
 const WORKER_PORT = Number(process.env.LOCALTEST_WORKER_PORT || "8787");
 const INITIAL_LP_BNB = process.env.LOCALTEST_INITIAL_LP_BNB || "10";
 const SEED_USCAME = process.env.LOCALTEST_SEED_USCAME || "10000";
+const LOCALTEST_CRON_INTERVAL_MS = Number(process.env.LOCALTEST_CRON_INTERVAL_MS || "60000");
 const forkUrl = process.env.LOCALTEST_FORK_URL || process.env.BSC_RPC_URL || DEFAULT_BSC_FORK_URL;
 
 const bscLocal = {
@@ -50,6 +51,7 @@ const accounts = Array.from({ length: 20 }, (_, i) => accountAt(i));
 const owner = accounts[0];
 const operator = accounts[19];
 const children = [];
+const timers = new Set();
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
@@ -137,6 +139,7 @@ async function main() {
     forkBlock,
   });
   injectAdminLocaltestWallet();
+  resetLocalWorkerState();
 
   await run(
     "pnpm",
@@ -181,8 +184,10 @@ async function main() {
   );
   children.push(wrangler);
 
-  await waitForHttp(`http://127.0.0.1:${WORKER_PORT}/api/health`);
-  log(`worker ready: http://127.0.0.1:${WORKER_PORT}/api/health`);
+  const workerUrl = `http://127.0.0.1:${WORKER_PORT}`;
+  await waitForHttp(`${workerUrl}/api/health`);
+  log(`worker ready: ${workerUrl}/api/health`);
+  startLocalCron(workerUrl);
   log("wallet tool: pnpm run localtest:wallet");
   log(`token=${tokenAddress} vault=${vaultAddress} pair=${pairAddress}`);
 
@@ -286,6 +291,7 @@ function writeLocaltestFiles({ tokenAddress, vaultAddress, pairAddress, deployme
           RPC_RESERVES_TTL_SECS: "30",
           RPC_VAULT_BALANCE_TTL_SECS: "30",
           AMM_FEE_BPS: "9975",
+          PUBLIC_RPC_URL: LOCAL_RPC_URL,
           CHAIN_NAME: "BSC Local Fork",
           EXPLORER_URL: LOCAL_RPC_URL,
           NATIVE_CURRENCY_NAME: "BNB",
@@ -329,6 +335,36 @@ function prepareLocaltestAdminDist() {
   rmSync(LOCALTEST_ADMIN_DIST, { recursive: true, force: true });
   mkdirSync(LOCALTEST_ADMIN_DIST, { recursive: true });
   cpSync(source, LOCALTEST_ADMIN_DIST, { recursive: true });
+}
+
+function resetLocalWorkerState() {
+  log("resetting local worker/D1 state");
+  rmSync(WORKER_LOCAL_DIR, { recursive: true, force: true });
+}
+
+function startLocalCron(workerUrl) {
+  if (!Number.isFinite(LOCALTEST_CRON_INTERVAL_MS) || LOCALTEST_CRON_INTERVAL_MS <= 0) {
+    log("local cron auto-trigger disabled");
+    return;
+  }
+  const scheduledUrl = `${workerUrl}/__scheduled?cron=*+*+*+*+*`;
+  log(`auto-triggering local cron every ${LOCALTEST_CRON_INTERVAL_MS}ms`);
+
+  const schedule = (delayMs) => {
+    const timer = setTimeout(async () => {
+      timers.delete(timer);
+      try {
+        const res = await fetch(scheduledUrl);
+        if (!res.ok) log(`local cron trigger failed: HTTP ${res.status}`);
+      } catch (err) {
+        log(`local cron trigger failed: ${err.message}`);
+      }
+      schedule(LOCALTEST_CRON_INTERVAL_MS);
+    }, delayMs);
+    timers.add(timer);
+  };
+
+  schedule(1_000);
 }
 
 async function resolveForkBlockNumber() {
@@ -421,6 +457,7 @@ function loadDotEnv(path) {
 }
 
 function shutdown() {
+  for (const timer of timers) clearTimeout(timer);
   for (const child of children) child.kill("SIGTERM");
   process.exit(0);
 }

@@ -14,7 +14,11 @@ export function getInjectedProvider(): BrowserProvider {
 
 export function getReadProvider(): JsonRpcProvider {
   const settings = loadSettings();
-  return new JsonRpcProvider(settings.chainConfig.rpcUrl, settings.chainConfig.id);
+  const rpcUrl = settings.chainConfig.rpcUrl.trim();
+  if (!rpcUrl) {
+    throw new Error("未配置公开 RPC URL，请检查 Worker 的 PUBLIC_RPC_URL 配置并刷新页面");
+  }
+  return new JsonRpcProvider(rpcUrl, settings.chainConfig.id);
 }
 
 interface AddEthereumChainParams {
