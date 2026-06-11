@@ -44,15 +44,25 @@ function json(data: unknown, status = 200): Response {
 
 const READ_RPC_METHODS = new Set(["eth_call", "eth_chainId", "eth_blockNumber", "eth_getBalance", "eth_getCode"]);
 
+function rpcPayloadAllowed(payload: unknown): boolean {
+  const requests = Array.isArray(payload) ? payload : [payload];
+  if (requests.length === 0) return false;
+  return requests.every((item) => {
+    if (item == null || typeof item !== "object") return false;
+    const method = (item as { method?: unknown }).method;
+    return typeof method === "string" && READ_RPC_METHODS.has(method);
+  });
+}
+
 async function rpcProxy(req: Request, ctx: AdminContext): Promise<Response> {
   if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
-  let payload: { method?: unknown };
+  let payload: unknown;
   try {
-    payload = (await req.json()) as { method?: unknown };
+    payload = await req.json();
   } catch {
     return json({ error: "invalid json-rpc body" }, 400);
   }
-  if (typeof payload.method !== "string" || !READ_RPC_METHODS.has(payload.method)) {
+  if (!rpcPayloadAllowed(payload)) {
     return json({ error: "json-rpc method not allowed" }, 403);
   }
   const upstream = await fetch(ctx.settings.rpcUrl, {
