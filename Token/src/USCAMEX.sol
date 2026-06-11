@@ -7,7 +7,7 @@ import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.s
 import { BuybackVault } from "./BuybackVault.sol";
 import { IPancakeFactory, IPancakePair, IPancakeRouter, IWETH } from "./interfaces/IPancake.sol";
 
-contract USCAME is ERC20, Ownable, ReentrancyGuard {
+contract USCAMEX is ERC20, Ownable, ReentrancyGuard {
     uint256 public constant BPS = 10_000;
     address public constant BURN_ADDRESS = 0x000000000000000000000000000000000000dEaD;
 
@@ -152,7 +152,7 @@ contract USCAME is ERC20, Ownable, ReentrancyGuard {
         address owner_,
         address operator_
     )
-        ERC20("USCAMEX", "USCAME")
+        ERC20("USCAMEX", "USCAMEX")
         Ownable(owner_)
     {
         require(router_ != address(0), "ROUTER");

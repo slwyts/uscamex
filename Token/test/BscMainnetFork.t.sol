@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity =0.8.35;
 
-import { USCAME } from "../src/USCAME.sol";
+import { USCAMEX } from "../src/USCAMEX.sol";
 import { BuybackVault } from "../src/BuybackVault.sol";
 
 interface ForkVm {
@@ -62,7 +62,7 @@ contract BscMainnetForkFlow {
     function testBscMainnetForkBootstrapDepositOperatorFlow() public {
         if (!forkBsc()) return;
 
-        USCAME token = deployInitializedToken();
+        USCAMEX token = deployInitializedToken();
         require(token.initialized(), "not-initialized");
         require(token.pair() != address(0), "no-pair");
         require(token.balanceOf(token.pair()) == token.totalSupply(), "lp-token-supply");
@@ -87,7 +87,7 @@ contract BscMainnetForkFlow {
     function testBscMainnetForkReferralDepositConfigAndPermissions() public {
         if (!forkBsc()) return;
 
-        USCAME fresh = new USCAME(PANCAKE_V2_ROUTER, address(this), OPERATOR);
+        USCAMEX fresh = new USCAMEX(PANCAKE_V2_ROUTER, address(this), OPERATOR);
         vm.deal(USER, 1 ether);
         vm.prank(USER);
         (bool ok,) = payable(address(fresh)).call{ value: 0.1 ether }("");
@@ -112,7 +112,7 @@ contract BscMainnetForkFlow {
         require(ok, "rebinding-zero-transfer-should-not-revert");
         require(fresh.referrer(USER) == REFERRER, "referrer-immutable");
 
-        USCAME.ProtocolConfigInput memory config = fresh.getProtocolConfig();
+        USCAMEX.ProtocolConfigInput memory config = fresh.getProtocolConfig();
         config.operator = OPERATOR;
         config.buyTaxBps = 300;
         config.sellTaxBps = 1000;
@@ -167,7 +167,7 @@ contract BscMainnetForkFlow {
     function testBscMainnetForkRealRouterBuySellTaxesAndSwitches() public {
         if (!forkBsc()) return;
 
-        USCAME token = deployInitializedToken();
+        USCAMEX token = deployInitializedToken();
         IPancakeRouterFork router = IPancakeRouterFork(PANCAKE_V2_ROUTER);
         address[] memory buyPath = new address[](2);
         buyPath[0] = router.WETH();
@@ -215,7 +215,7 @@ contract BscMainnetForkFlow {
     function testBscMainnetForkDeflationAndVaultBuybackThroughOperator() public {
         if (!forkBsc()) return;
 
-        USCAME token = deployInitializedToken();
+        USCAMEX token = deployInitializedToken();
         configureToken(token, OPERATOR, 300, 1000, uint128(0.1 ether), uint128(5 ether), true);
         vm.deal(USER, 2 ether);
         bind(token, USER, address(this));
@@ -259,7 +259,7 @@ contract BscMainnetForkFlow {
     function testBscMainnetForkLaunchLifecycleDefaultConfigAndDepositBatch() public {
         if (!forkBsc()) return;
 
-        USCAME token = new USCAME(PANCAKE_V2_ROUTER, address(this), OPERATOR);
+        USCAMEX token = new USCAMEX(PANCAKE_V2_ROUTER, address(this), OPERATOR);
         token.operatorCall(
             address(token),
             0,
@@ -274,7 +274,7 @@ contract BscMainnetForkFlow {
         require(tokenReserve == token.totalSupply() - ADMIN_RESERVE_TOKENS, "reserve-token");
         require(bnbReserve == INITIAL_LP_BNB, "reserve-bnb");
 
-        USCAME.ProtocolConfigInput memory config = token.getProtocolConfig();
+        USCAMEX.ProtocolConfigInput memory config = token.getProtocolConfig();
         require(!config.buyEnabled, "buy-default-off");
         require(config.lpBuildBps == 6000, "lp-bps");
         require(config.nodeBps == 1000, "node-bps");
@@ -309,9 +309,9 @@ contract BscMainnetForkFlow {
         uint256 nodeBefore = GENESIS_NODE.balance;
         uint256 rootBefore = address(this).balance;
 
-        USCAME.NodePayout[] memory payouts = new USCAME.NodePayout[](1);
-        payouts[0] = USCAME.NodePayout({ to: GENESIS_NODE, amount: uint128(0.1 ether) });
-        USCAME.DepositBatchParams memory params = USCAME.DepositBatchParams({
+        USCAMEX.NodePayout[] memory payouts = new USCAMEX.NodePayout[](1);
+        payouts[0] = USCAMEX.NodePayout({ to: GENESIS_NODE, amount: uint128(0.1 ether) });
+        USCAMEX.DepositBatchParams memory params = USCAMEX.DepositBatchParams({
             user: USER,
             amount: uint128(1 ether),
             lpBnb: uint128(0.3 ether),
@@ -349,26 +349,26 @@ contract BscMainnetForkFlow {
         return true;
     }
 
-    function deployInitializedToken() internal returns (USCAME token) {
-        token = new USCAME(PANCAKE_V2_ROUTER, address(this), OPERATOR);
+    function deployInitializedToken() internal returns (USCAMEX token) {
+        token = new USCAMEX(PANCAKE_V2_ROUTER, address(this), OPERATOR);
         tokenSeedAndInitialize(token);
     }
 
-    function tokenSeedAndInitialize(USCAME token) internal {
+    function tokenSeedAndInitialize(USCAMEX token) internal {
         vm.deal(address(this), 100 ether);
         (bool ok,) = payable(address(token)).call{ value: INITIAL_LP_BNB }("");
         require(ok, "seed-bnb");
         token.initializeLP();
     }
 
-    function giveTokens(USCAME token, address to, uint256 amount) internal {
+    function giveTokens(USCAMEX token, address to, uint256 amount) internal {
         token.pullPairTokensExact(amount);
         token.operatorCall(
             address(token), 0, abi.encodeWithSignature("transfer(address,uint256)", to, amount)
         );
     }
 
-    function bind(USCAME token, address user, address upline) internal {
+    function bind(USCAMEX token, address user, address upline) internal {
         uint256 cost = token.bindCost();
         if (token.balanceOf(user) < cost) giveTokens(token, user, cost - token.balanceOf(user));
         vm.prank(user);
@@ -376,7 +376,7 @@ contract BscMainnetForkFlow {
     }
 
     function configureToken(
-        USCAME token,
+        USCAMEX token,
         address nextOperator,
         uint16 nextBuyTaxBps,
         uint16 nextSellTaxBps,
@@ -386,7 +386,7 @@ contract BscMainnetForkFlow {
     )
         internal
     {
-        USCAME.ProtocolConfigInput memory config = token.getProtocolConfig();
+        USCAMEX.ProtocolConfigInput memory config = token.getProtocolConfig();
         config.operator = nextOperator;
         config.buyTaxBps = nextBuyTaxBps;
         config.sellTaxBps = nextSellTaxBps;
@@ -396,7 +396,7 @@ contract BscMainnetForkFlow {
         token.setProtocolConfig(config);
     }
 
-    function pairReserves(USCAME token)
+    function pairReserves(USCAMEX token)
         internal
         view
         returns (uint256 tokenReserve, uint256 bnbReserve)

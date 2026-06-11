@@ -36,7 +36,7 @@ loadDotEnv(join(TOKEN_DIR, ".env.localtest"));
 const LOCAL_RPC_URL = process.env.LOCALTEST_RPC_URL || "http://127.0.0.1:8545";
 const WORKER_PORT = Number(process.env.LOCALTEST_WORKER_PORT || "8787");
 const INITIAL_LP_BNB = process.env.LOCALTEST_INITIAL_LP_BNB || "10";
-const SEED_USCAME = process.env.LOCALTEST_SEED_USCAME || "10000";
+const SEED_USCAMEX = process.env.LOCALTEST_SEED_USCAMEX || "10000";
 const LOCALTEST_CRON_INTERVAL_MS = Number(process.env.LOCALTEST_CRON_INTERVAL_MS || "60000");
 const forkUrl = process.env.LOCALTEST_FORK_URL || process.env.BSC_RPC_URL || DEFAULT_BSC_FORK_URL;
 
@@ -79,7 +79,7 @@ async function main() {
 
   log(`owner #1    ${owner.address}`);
   log(`operator #20 ${operator.address}`);
-  log(`deploying USCAME to BSC fork via ${LOCAL_RPC_URL}`);
+  log(`deploying USCAMEX to BSC fork via ${LOCAL_RPC_URL}`);
 
   const deployHash = await walletClient.deployContract({
     abi: artifact.abi,
@@ -88,12 +88,12 @@ async function main() {
   });
   const deployReceipt = await publicClient.waitForTransactionReceipt({ hash: deployHash });
   const tokenAddress = deployReceipt.contractAddress;
-  if (!tokenAddress) fail("USCAME deploy receipt did not contain a contract address");
-  log(`USCAME deployed ${tokenAddress} at block ${deployReceipt.blockNumber}`);
+  if (!tokenAddress) fail("USCAMEX deploy receipt did not contain a contract address");
+  log(`USCAMEX deployed ${tokenAddress} at block ${deployReceipt.blockNumber}`);
 
-  const seedAmount = parseEther(SEED_USCAME);
+  const seedAmount = parseEther(SEED_USCAMEX);
   if (seedAmount > 0n) {
-    log(`seeding ${SEED_USCAME} USCAME to each of the 20 local accounts`);
+    log(`seeding ${SEED_USCAMEX} USCAMEX to each of the 20 local accounts`);
     const targets = accounts.map(() => tokenAddress);
     const values = accounts.map(() => 0n);
     const datas = accounts.map((account) =>
@@ -243,7 +243,7 @@ function writeLocaltestFiles({ tokenAddress, vaultAddress, pairAddress, deployme
     currentBlock: currentBlock.toString(),
     workerUrl: `http://127.0.0.1:${WORKER_PORT}`,
     initialLpBnb: INITIAL_LP_BNB,
-    seedUscamePerAccount: SEED_USCAME,
+    seedUscamexPerAccount: SEED_USCAMEX,
     generatedAt: new Date().toISOString(),
   };
   writeFileSync(MANIFEST_PATH, `${JSON.stringify(manifest, null, 2)}\n`);
@@ -386,9 +386,9 @@ async function rawRpc(url, method, params) {
 }
 
 function readArtifact() {
-  const raw = JSON.parse(readFileSync(join(TOKEN_DIR, "out/USCAME.sol/USCAME.json"), "utf8"));
+  const raw = JSON.parse(readFileSync(join(TOKEN_DIR, "out/USCAMEX.sol/USCAMEX.json"), "utf8"));
   const bytecode = raw.bytecode?.object || raw.bytecode;
-  if (!bytecode || bytecode === "0x") fail("USCAME artifact bytecode is empty; forge build likely failed");
+  if (!bytecode || bytecode === "0x") fail("USCAMEX artifact bytecode is empty; forge build likely failed");
   return { abi: raw.abi, bytecode: bytecode.startsWith("0x") ? bytecode : `0x${bytecode}` };
 }
 

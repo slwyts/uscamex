@@ -19,7 +19,7 @@ const pkey = envText.match(/^PKEY=(.+)$/m)?.[1]?.trim();
 if (!pkey) throw new Error("PKEY missing");
 
 const artifact = JSON.parse(
-  fs.readFileSync(path.join(root, "Token/out/USCAME.sol/USCAME.json"), "utf8"),
+  fs.readFileSync(path.join(root, "Token/out/USCAMEX.sol/USCAMEX.json"), "utf8"),
 );
 
 const RPC_URL = process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com";

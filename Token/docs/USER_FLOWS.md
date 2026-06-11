@@ -6,9 +6,9 @@ rules are the same.
 
 ## Launch Bootstrap
 
-1. Deploy `USCAME(router, owner, operator)`.
+1. Deploy `USCAMEX(router, owner, operator)`.
 2. Optionally transfer an admin reserve from the token contract before LP seeding,
-   for example `10,000,000 USCAME`, using `operatorCall(token, 0, transfer(owner, amount))`.
+   for example `10,000,000 USCAMEX`, using `operatorCall(token, 0, transfer(owner, amount))`.
 3. Send the initial native seed, for example `10 BNB`, to the token contract from
    the owner while `initialized == false`.
 4. Call `initializeLP()` once. The token contract receives all LP tokens.
@@ -22,7 +22,7 @@ rules are the same.
 ## Referral Binding
 
 Users bind by transferring exactly `bindCost` project tokens to a bound upline.
-The default is `11 USCAME`.
+The default is `11 USCAMEX`.
 
 Acceptance checks:
 

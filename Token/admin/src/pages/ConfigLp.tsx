@@ -96,7 +96,7 @@ export default function ConfigLp() {
   const callInit = () => {
     modal.confirm({
       title: "确认初始化流动性池？",
-      content: "该操作不可撤销，合约将使用其当前持有的全部 USCAME 与 BNB 在 PancakeSwap 上建仓。请确认资金到位后再提交。",
+      content: "该操作不可撤销，合约将使用其当前持有的全部 USCAMEX 与 BNB 在 PancakeSwap 上建仓。请确认资金到位后再提交。",
       okText: "签名并上链",
       okButtonProps: { danger: true },
       onOk: async () => {
@@ -140,7 +140,7 @@ export default function ConfigLp() {
           <Space direction="vertical" size="large" style={{ width: "100%" }}>
             <Row gutter={[16, 16]}>
               <Col xs={12} md={6}>
-                <Statistic title="合约持有 USCAME" value={formatBnb(snap.contractTokenBalance, 4)} />
+                <Statistic title="合约持有 USCAMEX" value={formatBnb(snap.contractTokenBalance, 4)} />
               </Col>
               <Col xs={12} md={6}>
                 <Statistic title="合约持有 BNB" value={formatBnb(snap.contractBnbBalance, 4)} />
@@ -198,17 +198,17 @@ export default function ConfigLp() {
                 <Statistic title="池内 BNB" value={formatBnb(snap.lpPool.bnbReserve, 6)} />
               </Col>
               <Col xs={24} md={6}>
-                <Statistic title="池内 USCAME" value={formatBnb(snap.lpPool.uscamexReserve, 4)} />
+                <Statistic title="池内 USCAMEX" value={formatBnb(snap.lpPool.uscamexReserve, 4)} />
               </Col>
               <Col xs={24} md={6}>
                 <Statistic
-                  title="价格（BNB / USCAME）"
+                  title="价格（BNB / USCAMEX）"
                   value={formatRatio(snap.lpPool.bnbReserve, snap.lpPool.uscamexReserve, 12)}
                 />
               </Col>
               <Col xs={24} md={6}>
                 <Statistic
-                  title="价格（USCAME / BNB）"
+                  title="价格（USCAMEX / BNB）"
                   value={formatRatio(snap.lpPool.uscamexReserve, snap.lpPool.bnbReserve, 4)}
                 />
               </Col>

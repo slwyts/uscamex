@@ -14,7 +14,7 @@
 - Confirm router address for the target chain.
 - Confirm owner address.
 - Confirm operator address derived from the Worker private key.
-- Deploy `USCAME(router, owner, operator)`.
+- Deploy `USCAMEX(router, owner, operator)`.
 - Record deploy transaction, block, token address, vault address, and pair after init.
 - If using admin reserve, withdraw it before `initializeLP()`.
 - Send initial native seed to the token contract.
@@ -35,7 +35,7 @@
 
 - `/api/health` returns the new token and correct chain metadata.
 - `/api/admin/stats?force=1` has non-null `last_indexed_block` after scan.
-- A test user can bind by transferring `11 USCAME` to root.
+- A test user can bind by transferring `11 USCAMEX` to root.
 - The test user can deposit a small valid native amount.
 - Journal shows one confirmed `deposit-batch`.
 - No failed commands remain.

@@ -19,7 +19,7 @@ const HARDHAT_MNEMONIC = "test test test test test test test test test test test
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const TOKEN_DIR = join(ROOT, "Token");
 const MANIFEST_PATH = join(TOKEN_DIR, "localtest/manifest.json");
-const ARTIFACT_PATH = join(TOKEN_DIR, "out/USCAME.sol/USCAME.json");
+const ARTIFACT_PATH = join(TOKEN_DIR, "out/USCAMEX.sol/USCAMEX.json");
 
 if (!existsSync(MANIFEST_PATH)) {
   console.error("localtest manifest not found. Run `pnpm run localtest` first.");
@@ -41,7 +41,7 @@ const rl = createInterface({ input, output });
 await main();
 
 async function main() {
-  console.log(`USCAME localtest wallet`);
+  console.log(`USCAMEX localtest wallet`);
   console.log(`RPC   ${manifest.rpcUrl}`);
   console.log(`Token ${manifest.tokenAddress}`);
   console.log(`Vault ${manifest.vaultAddress}`);
@@ -92,7 +92,7 @@ async function showBalances(index) {
   ]);
   console.log(`#${index + 1} ${address}`);
   console.log(`BNB:    ${formatEther(bnb)}`);
-  console.log(`USCAME: ${formatUnits(token, 18)}`);
+  console.log(`USCAMEX: ${formatUnits(token, 18)}`);
   console.log(`Vault BNB:          ${formatEther(vaultBnb)}`);
   console.log(`Token contract BNB: ${formatEther(contractBnb)}`);
 }
@@ -100,7 +100,7 @@ async function showBalances(index) {
 async function transfer(index) {
   const source = accounts[index];
   const walletClient = createWalletClient({ account: source, chain, transport: http(manifest.rpcUrl) });
-  const asset = (await ask("asset [bnb/uscmex]: ")).trim().toLowerCase();
+  const asset = (await ask("asset [bnb/uscamex]: ")).trim().toLowerCase();
   const to = await chooseDestination();
   const rawAmount = await ask("amount: ");
   if (asset === "bnb") {
@@ -109,7 +109,7 @@ async function transfer(index) {
     console.log(`BNB transfer confirmed: ${receipt.transactionHash}`);
     return;
   }
-  if (asset === "uscmex" || asset === "uscame" || asset === "token") {
+  if (asset === "uscamex" || asset === "token") {
     const amount = parseUnits(rawAmount, 18);
     const hash = await walletClient.writeContract({
       address: manifest.tokenAddress,
@@ -118,10 +118,10 @@ async function transfer(index) {
       args: [to, amount],
     });
     const receipt = await publicClient.waitForTransactionReceipt({ hash });
-    console.log(`USCAME transfer confirmed: ${receipt.transactionHash}`);
+    console.log(`USCAMEX transfer confirmed: ${receipt.transactionHash}`);
     return;
   }
-  throw new Error("asset must be bnb or uscmex");
+  throw new Error("asset must be bnb or uscamex");
 }
 
 async function chooseDestination() {

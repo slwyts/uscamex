@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity =0.8.35;
 
-import { USCAME } from "../src/USCAME.sol";
+import { USCAMEX } from "../src/USCAMEX.sol";
 import { BuybackVault } from "../src/BuybackVault.sol";
 
 interface Vm {
@@ -46,12 +46,12 @@ contract MockPair {
     receive() external payable { }
 
     function buy(address to, uint256 amount) external {
-        require(USCAME(payable(token)).transfer(to, amount), "transfer");
+        require(USCAMEX(payable(token)).transfer(to, amount), "transfer");
         sync();
     }
 
     function sync() public {
-        reserveToken = uint112(USCAME(payable(token)).balanceOf(address(this)));
+        reserveToken = uint112(USCAMEX(payable(token)).balanceOf(address(this)));
         reserveBnb = uint112(address(this).balance);
     }
 
@@ -99,12 +99,12 @@ contract MockPair {
     {
         require(balanceOf[address(this)] >= lpAmount, "LP");
         uint256 share = (lpAmount * 1e18) / totalSupply;
-        tokenOut = (USCAME(payable(token)).balanceOf(address(this)) * share) / 1e18;
+        tokenOut = (USCAMEX(payable(token)).balanceOf(address(this)) * share) / 1e18;
         bnbOut = (address(this).balance * share) / 1e18;
         balanceOf[address(this)] -= lpAmount;
         totalSupply -= lpAmount;
         if (tokenOut != 0) {
-            require(USCAME(payable(token)).transfer(tokenTo, tokenOut), "tokenOut");
+            require(USCAMEX(payable(token)).transfer(tokenTo, tokenOut), "tokenOut");
         }
         if (bnbOut != 0) {
             (bool ok,) = payable(bnbTo).call{ value: bnbOut }("");
@@ -174,7 +174,7 @@ contract MockRouter {
         address pair = factory.pair();
         if (pair == address(0)) pair = factory.createPair(token, WETH);
         require(
-            USCAME(payable(token)).transferFrom(msg.sender, pair, amountTokenDesired),
+            USCAMEX(payable(token)).transferFrom(msg.sender, pair, amountTokenDesired),
             "transferFrom"
         );
         (bool ok,) = payable(pair).call{ value: msg.value }("");
@@ -208,8 +208,8 @@ contract MockRouter {
     }
 }
 
-contract USCAMETest is MiniTest {
-    USCAME private token;
+contract USCAMEXTest is MiniTest {
+    USCAMEX private token;
     MockRouter private router;
     address private operator = address(0xA11CE);
     address private alice = address(0xA1);
@@ -222,7 +222,7 @@ contract USCAMETest is MiniTest {
 
     function setUp() public {
         router = new MockRouter();
-        token = new USCAME(address(router), address(this), operator);
+        token = new USCAMEX(address(router), address(this), operator);
         vm.deal(address(this), 100 ether);
         (bool ok,) = payable(address(token)).call{ value: 10 ether }("");
         require(ok, "seed bnb");
@@ -239,7 +239,7 @@ contract USCAMETest is MiniTest {
     )
         internal
     {
-        USCAME.ProtocolConfigInput memory config = token.getProtocolConfig();
+        USCAMEX.ProtocolConfigInput memory config = token.getProtocolConfig();
         config.operator = nextOperator;
         config.buyTaxBps = nextBuyTaxBps;
         config.sellTaxBps = nextSellTaxBps;
@@ -340,7 +340,7 @@ contract USCAMETest is MiniTest {
 
     function testRejectsUnboundDepositAndPreInitUserBnb() public {
         MockRouter freshRouter = new MockRouter();
-        USCAME freshToken = new USCAME(address(freshRouter), address(this), operator);
+        USCAMEX freshToken = new USCAMEX(address(freshRouter), address(this), operator);
 
         vm.deal(alice, 1 ether);
         vm.prank(alice);
@@ -386,7 +386,7 @@ contract USCAMETest is MiniTest {
     }
 
     function testSetProtocolConfigGuardsAndOperatorRotation() public {
-        USCAME.ProtocolConfigInput memory config = token.getProtocolConfig();
+        USCAMEX.ProtocolConfigInput memory config = token.getProtocolConfig();
         config.operator = operator;
         config.buyTaxBps = 300;
         config.sellTaxBps = 1000;
@@ -398,14 +398,14 @@ contract USCAMETest is MiniTest {
         (bool nonOwnerOk,) = address(token).call(configCall);
         assertTrue(!nonOwnerOk);
 
-        USCAME.ProtocolConfigInput memory badTax = token.getProtocolConfig();
+        USCAMEX.ProtocolConfigInput memory badTax = token.getProtocolConfig();
         badTax.operator = operator;
         badTax.buyTaxBps = 2501;
         (bool badTaxOk,) =
             address(token).call(abi.encodeWithSelector(token.setProtocolConfig.selector, badTax));
         assertTrue(!badTaxOk);
 
-        USCAME.ProtocolConfigInput memory badDeposit = token.getProtocolConfig();
+        USCAMEX.ProtocolConfigInput memory badDeposit = token.getProtocolConfig();
         badDeposit.operator = operator;
         badDeposit.minDeposit = uint128(5 ether);
         badDeposit.maxDeposit = uint128(0.1 ether);
@@ -428,7 +428,7 @@ contract USCAMETest is MiniTest {
     }
 
     function testFullProtocolConfigAndNodesAreStoredOnChain() public {
-        USCAME.ProtocolConfigInput memory config = token.getProtocolConfig();
+        USCAMEX.ProtocolConfigInput memory config = token.getProtocolConfig();
         assertEq(uint256(config.lpBuildBps), 6000);
         assertEq(uint256(config.nodeBps), 1000);
         assertEq(uint256(config.teamRewardBps[0]), 1000);
@@ -764,21 +764,21 @@ contract USCAMETest is MiniTest {
     // --------------------------------------------------------------------
 
     function testProtocolConfigValidationCoversAllBranches() public {
-        USCAME.ProtocolConfigInput memory base = token.getProtocolConfig();
+        USCAMEX.ProtocolConfigInput memory base = token.getProtocolConfig();
 
-        USCAME.ProtocolConfigInput memory zeroOp = base;
+        USCAMEX.ProtocolConfigInput memory zeroOp = base;
         zeroOp.operator = address(0);
         (bool a,) =
             address(token).call(abi.encodeWithSelector(token.setProtocolConfig.selector, zeroOp));
         assertTrue(!a);
 
-        USCAME.ProtocolConfigInput memory highSell = base;
+        USCAMEX.ProtocolConfigInput memory highSell = base;
         highSell.sellTaxBps = 2501;
         (bool b,) =
             address(token).call(abi.encodeWithSelector(token.setProtocolConfig.selector, highSell));
         assertTrue(!b);
 
-        USCAME.ProtocolConfigInput memory badDist = base;
+        USCAMEX.ProtocolConfigInput memory badDist = base;
         badDist.lpBuildBps = 5000;
         badDist.nodeBps = 5000;
         badDist.builderBuyBps = 5000; // sum > BPS
@@ -786,33 +786,33 @@ contract USCAMETest is MiniTest {
             address(token).call(abi.encodeWithSelector(token.setProtocolConfig.selector, badDist));
         assertTrue(!c);
 
-        USCAME.ProtocolConfigInput memory directRewardTooHigh = base;
+        USCAMEX.ProtocolConfigInput memory directRewardTooHigh = base;
         directRewardTooHigh.directPoolBps = 1000;
         directRewardTooHigh.directRewardBps = 2000;
         (bool d,) = address(token)
             .call(abi.encodeWithSelector(token.setProtocolConfig.selector, directRewardTooHigh));
         assertTrue(!d);
 
-        USCAME.ProtocolConfigInput memory zeroPeriods = base;
+        USCAMEX.ProtocolConfigInput memory zeroPeriods = base;
         zeroPeriods.settlementPeriodsPerDay = 0;
         (bool e,) = address(token)
             .call(abi.encodeWithSelector(token.setProtocolConfig.selector, zeroPeriods));
         assertTrue(!e);
 
-        USCAME.ProtocolConfigInput memory zeroExit = base;
+        USCAMEX.ProtocolConfigInput memory zeroExit = base;
         zeroExit.exitMultipleBps = 0;
         (bool f,) =
             address(token).call(abi.encodeWithSelector(token.setProtocolConfig.selector, zeroExit));
         assertTrue(!f);
 
-        USCAME.ProtocolConfigInput memory deflationBad = base;
+        USCAMEX.ProtocolConfigInput memory deflationBad = base;
         deflationBad.deflationHourlyBps = 500;
         deflationBad.deflationDailyCapBps = 100; // hourly > daily
         (bool g,) = address(token)
             .call(abi.encodeWithSelector(token.setProtocolConfig.selector, deflationBad));
         assertTrue(!g);
 
-        USCAME.ProtocolConfigInput memory buySplitBad = base;
+        USCAMEX.ProtocolConfigInput memory buySplitBad = base;
         buySplitBad.buyTaxBps = 300;
         buySplitBad.buyTaxBuilderBps = 200;
         buySplitBad.buyTaxVaultBps = 200; // 400 > 300
@@ -820,7 +820,7 @@ contract USCAMETest is MiniTest {
             .call(abi.encodeWithSelector(token.setProtocolConfig.selector, buySplitBad));
         assertTrue(!h);
 
-        USCAME.ProtocolConfigInput memory sellSplitBad = base;
+        USCAMEX.ProtocolConfigInput memory sellSplitBad = base;
         sellSplitBad.sellTaxBps = 1000;
         sellSplitBad.sellTaxBuilderBps = 400;
         sellSplitBad.sellTaxOwnerBps = 400;
@@ -829,7 +829,7 @@ contract USCAMETest is MiniTest {
             .call(abi.encodeWithSelector(token.setProtocolConfig.selector, sellSplitBad));
         assertTrue(!i);
 
-        USCAME.ProtocolConfigInput memory teamBad = base;
+        USCAMEX.ProtocolConfigInput memory teamBad = base;
         teamBad.teamRewardBps[0] = 10_001; // > BPS
         (bool j,) =
             address(token).call(abi.encodeWithSelector(token.setProtocolConfig.selector, teamBad));
@@ -1110,9 +1110,9 @@ contract USCAMETest is MiniTest {
         uint256 contractTokenBefore = token.balanceOf(address(token));
         uint256 rootBnbBefore = address(this).balance;
 
-        USCAME.NodePayout[] memory payouts = new USCAME.NodePayout[](1);
-        payouts[0] = USCAME.NodePayout({ to: carol, amount: uint128(0.1 ether) });
-        USCAME.DepositBatchParams memory params = USCAME.DepositBatchParams({
+        USCAMEX.NodePayout[] memory payouts = new USCAMEX.NodePayout[](1);
+        payouts[0] = USCAMEX.NodePayout({ to: carol, amount: uint128(0.1 ether) });
+        USCAMEX.DepositBatchParams memory params = USCAMEX.DepositBatchParams({
             user: alice,
             amount: uint128(1 ether),
             lpBnb: uint128(0.3 ether),
@@ -1156,9 +1156,9 @@ contract USCAMETest is MiniTest {
         uint256 contractBnbBefore = address(token).balance;
         uint256 vaultBefore = token.vault().balance;
 
-        USCAME.NodePayout[] memory payouts = new USCAME.NodePayout[](1);
-        payouts[0] = USCAME.NodePayout({ to: carol, amount: uint128(0.1 ether) });
-        USCAME.DepositBatchParams memory params = USCAME.DepositBatchParams({
+        USCAMEX.NodePayout[] memory payouts = new USCAMEX.NodePayout[](1);
+        payouts[0] = USCAMEX.NodePayout({ to: carol, amount: uint128(0.1 ether) });
+        USCAMEX.DepositBatchParams memory params = USCAMEX.DepositBatchParams({
             user: alice,
             amount: uint128(1 ether),
             lpBnb: uint128(0.3 ether),

@@ -5,7 +5,7 @@ This folder contains the token-side implementation for the USCAMEX protocol. The
 ## Architecture
 
 - Chain: BSC-compatible EVM, planned for PancakeSwap V2 Router.
-- Solidity: minimal trusted execution surface in `src/USCAME.sol`.
+- Solidity: minimal trusted execution surface in `src/USCAMEX.sol`.
 - Offchain: a Cloudflare Worker operator (`worker/`, TypeScript) owns the complex protocol accounting and timed execution. It runs the BSC indexer, deterministic engine, on-chain executor, and owner-authed admin API on Workers + Durable Objects + D1 + Cron Triggers.
 - Database: Cloudflare D1 (SQLite) persists events, indexed blocks, protocol config snapshots, and node history. The engine `ProtocolState` and command journal live in the `OperatorDO` Durable Object storage.
 - Binding: users bind an upline by transferring exactly `bindCost` tokens (default 11) to the upline via `transfer(referrer, bindCost)`. The tokens are delivered to the upline; a zero-value transfer no longer binds.
@@ -51,9 +51,9 @@ The current workspace does not include Foundry binaries. Install `forge` and `an
 - `docs/BSC_MAINNET_FORK.md` - BSC mainnet fork validation runbook.
 - `docs/LAUNCH_CHECKLIST.md` - production launch blockers, monitoring, and rollout order.
 - `admin/` - static owner admin panel for chain and offchain operation.
-- `src/USCAME.sol` - minimal ERC20 token, LP initialization, binding, tax, deposits, and operator execution.
+- `src/USCAMEX.sol` - minimal ERC20 token, LP initialization, binding, tax, deposits, and operator execution.
 - `src/interfaces/IPancake.sol` - Pancake V2 interfaces.
-- `test/USCAME.t.sol` - Foundry unit tests with local Pancake-style mocks.
+- `test/USCAMEX.t.sol` - Foundry unit tests with local Pancake-style mocks.
 - `test/BscMainnetFork.t.sol` - optional BSC mainnet fork bootstrap test.
 - `worker/` - Cloudflare Worker operator (TypeScript). See `worker/README.md` for the module map.
 - `worker/src/engine.ts` - deterministic protocol accounting.

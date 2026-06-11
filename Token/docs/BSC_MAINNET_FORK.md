@@ -41,11 +41,11 @@ The fork suite covers:
 anvil --fork-url "$BSC_RPC_URL" --chain-id 56
 ```
 
-2. Deploy `USCAME` to the fork with Pancake V2 router:
+2. Deploy `USCAMEX` to the fork with Pancake V2 router:
 
 ```bash
 cd Token
-forge create src/USCAME.sol:USCAME \
+forge create src/USCAMEX.sol:USCAMEX \
   --rpc-url http://127.0.0.1:8545 \
   --private-key <owner-private-key> \
   --constructor-args \

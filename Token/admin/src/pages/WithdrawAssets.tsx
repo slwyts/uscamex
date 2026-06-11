@@ -80,7 +80,7 @@ const ASSET_META: Array<{
   precision: number;
 }> = [
   { key: "bnb", title: "BNB", unit: "BNB", precision: 6 },
-  { key: "uscamex", title: "USCAME", unit: "USCAME", precision: 4 },
+  { key: "uscamex", title: "USCAMEX", unit: "USCAMEX", precision: 4 },
   { key: "lpToken", title: "LP Token", unit: "LP", precision: 6 },
 ];
 

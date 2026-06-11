@@ -1,6 +1,6 @@
 # USCAMEX Admin Panel
 
-> 链上写、链下读：所有“配置修改”都直接走 owner 钱包对 USCAME 合约发交易；所有“数据查询”都来自 Rust operator 暴露的 `/api/admin/*`。
+> 链上写、链下读：所有“配置修改”都直接走 owner 钱包对 USCAMEX 合约发交易；所有“数据查询”都来自 Rust operator 暴露的 `/api/admin/*`。
 
 ## 技术栈
 

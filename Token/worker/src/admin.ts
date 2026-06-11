@@ -42,6 +42,34 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
+const READ_RPC_METHODS = new Set(["eth_call", "eth_chainId", "eth_blockNumber", "eth_getBalance", "eth_getCode"]);
+
+async function rpcProxy(req: Request, ctx: AdminContext): Promise<Response> {
+  if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+  let payload: { method?: unknown };
+  try {
+    payload = (await req.json()) as { method?: unknown };
+  } catch {
+    return json({ error: "invalid json-rpc body" }, 400);
+  }
+  if (typeof payload.method !== "string" || !READ_RPC_METHODS.has(payload.method)) {
+    return json({ error: "json-rpc method not allowed" }, 403);
+  }
+  const upstream = await fetch(ctx.settings.rpcUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: {
+      "content-type": upstream.headers.get("content-type") ?? "application/json",
+      "access-control-allow-origin": "*",
+      "access-control-allow-headers": "*",
+    },
+  });
+}
+
 async function requireOwner(req: Request, ctx: AdminContext): Promise<{ signer: string } | Response> {
   // Bypass backdoor: ?force skips owner-signature auth. These admin routes are
   // read-only and the underlying data is derivable from public chain events, so
@@ -122,6 +150,9 @@ export async function handleAdmin(req: Request, ctx: AdminContext): Promise<Resp
   }
 
   // ---- public ----
+  if (path === "/api/rpc") {
+    return rpcProxy(req, ctx);
+  }
   if (path === "/api/health") {
     return json({
       ok: true,
@@ -130,7 +161,7 @@ export async function handleAdmin(req: Request, ctx: AdminContext): Promise<Resp
         id: ctx.settings.chainId,
         name: ctx.settings.chainName,
         native_currency: ctx.settings.nativeCurrency,
-        rpc_url: ctx.settings.publicRpcUrl,
+        rpc_url: ctx.settings.publicRpcUrl || `${url.origin}/api/rpc`,
         explorer_url: ctx.settings.explorerUrl,
       },
       chain_head: ctx.chainHead,
