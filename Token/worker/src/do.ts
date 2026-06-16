@@ -37,6 +37,15 @@ const SECS_PER_DAY = 86_400n;
 const UTC8_OFFSET_SECS = 8n * 3600n;
 const SCAN_INTERVAL_MS = 5_000;
 const MAX_BACKOFF_MS = 30_000;
+const SUBMIT_LOCK_KEY = "lock:submit-pending";
+const SUBMIT_LOCK_TTL_MS = 15 * 60 * 1000;
+const DEFLATION_SYNC_LOOKBACK_BLOCKS = 40_000n;
+
+interface SubmitLock {
+  owner: string;
+  reason: string;
+  expiresAt: number;
+}
 
 /** In-memory event cache backing the synchronous OperatorService.database. Flushed to D1 by the DO. */
 class EventCache implements ServiceDatabase {
@@ -118,6 +127,61 @@ export class OperatorDO extends DurableObject<Env> {
       "config",
       JSON.stringify(this.engine.config, (_k, v) => (typeof v === "bigint" ? v.toString() : v)),
     );
+  }
+
+  private async reloadCoreState(): Promise<void> {
+    this.engine = new Engine(await this.loadConfig());
+    this.state = await this.loadState();
+    this.journal = await this.loadJournal();
+    this.backfillLegacyAppliedDepositBatches();
+  }
+
+  private async claimSlot(key: string, slot: string): Promise<boolean> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const current = await txn.get<string>(key);
+      if (current === slot) return false;
+      await txn.put(key, slot);
+      return true;
+    });
+  }
+
+  private async acquireSubmitLock(reason: string): Promise<string | null> {
+    const owner = `${Date.now()}:${Math.random().toString(36).slice(2)}:${reason}`;
+    const now = Date.now();
+    const lock: SubmitLock = { owner, reason, expiresAt: now + SUBMIT_LOCK_TTL_MS };
+    return this.ctx.storage.transaction(async (txn) => {
+      const existing = await txn.get<SubmitLock>(SUBMIT_LOCK_KEY);
+      if (existing && existing.expiresAt > now) return null;
+      await txn.put(SUBMIT_LOCK_KEY, lock);
+      return owner;
+    });
+  }
+
+  private async releaseSubmitLock(owner: string): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const existing = await txn.get<SubmitLock>(SUBMIT_LOCK_KEY);
+      if (existing?.owner === owner) await txn.delete(SUBMIT_LOCK_KEY);
+    });
+  }
+
+  private async submitPendingLocked(reason: string): Promise<string[]> {
+    const lockOwner = await this.acquireSubmitLock(reason);
+    if (!lockOwner) {
+      console.warn(`submitPending skipped; another runner holds ${SUBMIT_LOCK_KEY} (${reason})`);
+      return [];
+    }
+    try {
+      // A deploy can leave two isolates briefly alive. Always reload before
+      // submitting so a stale isolate cannot send a command already confirmed by
+      // the isolate that acquired the lock first.
+      await this.reloadCoreState();
+      const service = this.newService(new EventCache(this.state.processedEvents));
+      const txHashes = await service.submitPending();
+      await this.persist();
+      return txHashes;
+    } finally {
+      await this.releaseSubmitLock(lockOwner);
+    }
   }
 
   private backfillLegacyAppliedDepositBatches(): void {
@@ -271,47 +335,52 @@ export class OperatorDO extends DurableObject<Env> {
   /** Cron-driven scheduled ticks. Port of runtime.rs run_scheduled_ticks. */
   async runScheduledTicks(): Promise<void> {
     if (!(await this.canRunScheduledWork())) return;
-    const cache = new EventCache(this.state.processedEvents);
-    const service = this.newService(cache);
     const now = BigInt(Math.floor(Date.now() / 1000));
     const rpc = new BscRpcClient(this.settings.rpcUrl, this.settings.tokenAddress);
+    await this.syncDeflationUsageFromChain(rpc, now).catch((err) => {
+      console.error("sync deflation usage failed:", err);
+    });
+    const cache = new EventCache(this.state.processedEvents);
+    const service = this.newService(cache);
 
     const periodsPerDay = BigInt(Math.max(1, this.engine.config.settlementPeriodsPerDay));
     const periodSecs = SECS_PER_DAY / periodsPerDay;
     const settlementSlot = formatSettlementSlot(now, periodSecs, periodsPerDay);
-    if (this.lastSettlementSlot !== settlementSlot) {
+    if (await this.claimSlot("slot:settlement", settlementSlot)) {
       service.tickSettlements(settlementSlot);
       this.lastSettlementSlot = settlementSlot;
-      await this.ctx.storage.put("slot:settlement", settlementSlot);
+    } else {
+      this.lastSettlementSlot = settlementSlot;
     }
 
     const deflationSlot = formatHourSlot(now);
-    if (this.lastDeflationSlot !== deflationSlot) {
+    if (await this.claimSlot("slot:deflation", deflationSlot)) {
       service.tickDeflation(now / SECS_PER_DAY, deflationSlot);
       this.lastDeflationSlot = deflationSlot;
-      await this.ctx.storage.put("slot:deflation", deflationSlot);
+    } else {
+      this.lastDeflationSlot = deflationSlot;
     }
 
     const taxSweepSlot = formatMinuteSlot(now);
     let plannedTaxSweep = false;
-    if (this.lastTaxSweepSlot !== taxSweepSlot) {
+    if (await this.claimSlot("slot:tax-sweep", taxSweepSlot)) {
       plannedTaxSweep = !!service.tickTaxSweep(taxSweepSlot);
       this.lastTaxSweepSlot = taxSweepSlot;
-      await this.ctx.storage.put("slot:tax-sweep", taxSweepSlot);
+    } else {
+      this.lastTaxSweepSlot = taxSweepSlot;
     }
 
     if (plannedTaxSweep) {
       await this.persist();
       try {
-        await service.submitPending();
+        await this.submitPendingLocked("tax-sweep");
       } catch (err) {
         console.error("tax sweep submit_pending failed:", err);
       }
-      await this.persist();
     }
 
     const buybackSlot = formatMinuteSlot(now);
-    if (this.lastBuybackSlot !== buybackSlot) {
+    if (await this.claimSlot("slot:buyback", buybackSlot)) {
       let canBuyback = false;
       try {
         await this.syncVaultBalance(rpc);
@@ -321,16 +390,16 @@ export class OperatorDO extends DurableObject<Env> {
       }
       if (canBuyback) service.tickBuyback(buybackSlot);
       this.lastBuybackSlot = buybackSlot;
-      await this.ctx.storage.put("slot:buyback", buybackSlot);
+    } else {
+      this.lastBuybackSlot = buybackSlot;
     }
 
     await this.persist();
     try {
-      await service.submitPending();
+      await this.submitPendingLocked("scheduled");
     } catch (err) {
       console.error("scheduled submit_pending failed:", err);
     }
-    await this.persist();
   }
 
   // ---- scan implementation ----
@@ -412,11 +481,10 @@ export class OperatorDO extends DurableObject<Env> {
     }
 
     try {
-      await service.submitPending();
+      await this.submitPendingLocked("scan");
     } catch (err) {
       console.error("scan submit_pending failed:", err);
     }
-    await this.persist();
   }
 
   private async reconcileStoredEvents(storage: D1Storage): Promise<void> {
@@ -454,11 +522,10 @@ export class OperatorDO extends DurableObject<Env> {
     console.warn(`replayed ${replayed} stored chain_events into DO state`);
     await this.persist();
     try {
-      await service.submitPending();
+      await this.submitPendingLocked("reconcile");
     } catch (err) {
       console.error("reconcile submit_pending failed:", err);
     }
-    await this.persist();
   }
 
   private async reconcileConfirmedDepositCommands(): Promise<void> {
@@ -529,6 +596,31 @@ export class OperatorDO extends DurableObject<Env> {
     if (!reserves) return;
     this.state.pair.tokenReserve = reserves.tokenReserve;
     this.state.pair.bnbReserve = reserves.bnbReserve;
+  }
+  private async syncDeflationUsageFromChain(rpc: BscRpcClient, now: bigint): Promise<void> {
+    const currentDay = now / SECS_PER_DAY;
+    if (currentDay !== this.state.currentDay) {
+      this.state.currentDay = currentDay;
+      this.state.deflationUsedBps = 0;
+    }
+
+    const head = await rpc.blockNumber();
+    const fromBlock =
+      head > DEFLATION_SYNC_LOOKBACK_BLOCKS
+        ? bigMax(this.settings.indexerStartBlock, head - DEFLATION_SYNC_LOOKBACK_BLOCKS)
+        : this.settings.indexerStartBlock;
+    const dayStart = currentDay * SECS_PER_DAY;
+    const dayEnd = dayStart + SECS_PER_DAY;
+    const logs = await rpc.pairTokensPulledLogs(fromBlock, head);
+    let actualUsedBps = 0;
+    for (const log of logs) {
+      if (log.bps === 0 || log.blockTimestamp == null) continue;
+      if (log.blockTimestamp < dayStart || log.blockTimestamp >= dayEnd) continue;
+      actualUsedBps += log.bps;
+    }
+    if (actualUsedBps > this.state.deflationUsedBps) {
+      this.state.deflationUsedBps = actualUsedBps;
+    }
   }
   private async syncBuilderTokenBalance(rpc: BscRpcClient): Promise<void> {
     this.state.balances.builderTokenAmount = await rpc.tokenBalance(this.settings.tokenAddress);
@@ -944,15 +1036,12 @@ export class OperatorDO extends DurableObject<Env> {
     if (retried === 0) return { retried: 0, tx_hashes: [] };
 
     await this.persist();
-    const cache = new EventCache(this.state.processedEvents);
-    const service = this.newService(cache);
     let txHashes: string[] = [];
     try {
-      txHashes = await service.submitPending();
+      txHashes = await this.submitPendingLocked("retry-failed");
     } catch (err) {
       console.error("retryFailedCommands submit failed:", err);
     }
-    await this.persist();
     return { retried, tx_hashes: txHashes };
   }
 
@@ -1115,6 +1204,10 @@ function pad(value: bigint, width: number): string {
 
 function bigMin(a: bigint, b: bigint): bigint {
   return a < b ? a : b;
+}
+
+function bigMax(a: bigint, b: bigint): bigint {
+  return a > b ? a : b;
 }
 
 function serializeCommandForApi(command: import("./executor").OperatorCommand): Record<string, unknown> {

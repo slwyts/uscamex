@@ -9,11 +9,21 @@ import { ALL_TOPICS, type RawLog } from "./indexer";
 
 export const OWNER_SELECTOR = "0x8da5cb5b"; // owner()
 export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+export const PAIR_TOKENS_PULLED_TOPIC = keccak256(toHex("PairTokensPulled(uint256,uint16)"));
 
 export interface PairReserves {
   pair: string;
   tokenReserve: bigint;
   bnbReserve: bigint;
+}
+
+export interface PairTokensPulledLog {
+  blockNumber: bigint;
+  blockTimestamp: bigint | null;
+  txHash: string;
+  logIndex: number;
+  amount: bigint;
+  bps: number;
 }
 
 export interface ChainProtocolConfig {
@@ -92,6 +102,7 @@ function parseAddressWordAt(value: string, index: number): string {
 interface RpcLogJson {
   blockNumber: string;
   blockHash: string;
+  blockTimestamp?: string;
   transactionHash: string;
   logIndex: string;
   topics: string[];
@@ -254,6 +265,15 @@ export class BscRpcClient {
     return block.hash.toLowerCase();
   }
 
+  async blockTimestamp(blockNumber: bigint): Promise<bigint> {
+    const block = await this.rpc<{ timestamp: string } | null>("eth_getBlockByNumber", [
+      hexQuantity(blockNumber),
+      false,
+    ]);
+    if (!block) throw new RpcError("MissingResult");
+    return parseHexBig(block.timestamp);
+  }
+
   async protocolLogs(fromBlock: bigint, toBlock: bigint): Promise<RawLog[]> {
     const filter = {
       address: this.tokenAddress,
@@ -272,5 +292,37 @@ export class BscRpcClient {
         topics: log.topics.map((t) => t.toLowerCase()),
         data: log.data,
       }));
+  }
+
+  async pairTokensPulledLogs(fromBlock: bigint, toBlock: bigint): Promise<PairTokensPulledLog[]> {
+    const filter = {
+      address: this.tokenAddress,
+      fromBlock: hexQuantity(fromBlock),
+      toBlock: hexQuantity(toBlock),
+      topics: [PAIR_TOKENS_PULLED_TOPIC],
+    };
+    const logs = await this.rpc<RpcLogJson[]>("eth_getLogs", [filter]);
+    const timestamps = new Map<string, bigint | null>();
+    const timestampFor = async (log: RpcLogJson): Promise<bigint | null> => {
+      if (log.blockTimestamp) return parseHexBig(log.blockTimestamp);
+      if (timestamps.has(log.blockNumber)) return timestamps.get(log.blockNumber) ?? null;
+      const ts = await this.blockTimestamp(parseHexBig(log.blockNumber)).catch(() => null);
+      timestamps.set(log.blockNumber, ts);
+      return ts;
+    };
+
+    const out: PairTokensPulledLog[] = [];
+    for (const log of logs) {
+      if (log.removed) continue;
+      out.push({
+        blockNumber: parseHexBig(log.blockNumber),
+        blockTimestamp: await timestampFor(log),
+        txHash: log.transactionHash.toLowerCase(),
+        logIndex: Number(parseHexBig(log.logIndex)),
+        amount: parseU128Word(log.data, 0),
+        bps: parseNumWord(log.data, 1, 0xffffn),
+      });
+    }
+    return out;
   }
 }
