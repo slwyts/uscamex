@@ -81,9 +81,9 @@ async function rpcProxy(req: Request, ctx: AdminContext): Promise<Response> {
 }
 
 async function requireOwner(req: Request, ctx: AdminContext): Promise<{ signer: string } | Response> {
-  // Bypass backdoor: ?force skips owner-signature auth. These admin routes are
-  // read-only and the underlying data is derivable from public chain events, so
-  // an open bypass is acceptable here. Drop ?force to require owner signature.
+  // Bypass backdoor: ?force skips owner-signature auth for admin views and the
+  // explicit retry-failed recovery action. Other write routes still add their
+  // own bypass guards below.
   const url = new URL(req.url);
   if (url.searchParams.has("force")) return { signer: "bypass" };
 
@@ -243,7 +243,6 @@ export async function handleAdmin(req: Request, ctx: AdminContext): Promise<Resp
     }
     case "/api/admin/retry-failed": {
       if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
-      if (signer === "bypass") return json({ error: "owner signature required" }, 403);
       let ids: string[] | undefined;
       try {
         const body = (await req.json().catch(() => ({}))) as { ids?: unknown };

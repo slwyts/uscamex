@@ -73,7 +73,7 @@ export function api(): AxiosInstance {
   });
   instance.interceptors.request.use((config) => {
     if (isBypassActive()) {
-      // Read-only bypass: backend skips owner auth when ?force is present.
+      // Force bypass: backend skips owner auth when ?force is present.
       config.params = { ...(config.params ?? {}), force: 1 };
       return config;
     }
@@ -299,7 +299,7 @@ export interface RetryFailedResponse {
 
 /**
  * 手动重试失败的链下命令：将其尝试次数清零并重新入队立即提交。
- * 不传 ids 则重试全部失败命令。需 owner 签名（不支持只读旁路）。
+ * 不传 ids 则重试全部失败命令。owner 签名或 ?force 旁路均可用。
  */
 export async function retryFailedCommands(ids?: string[]): Promise<RetryFailedResponse> {
   const res = await api().post<RetryFailedResponse>("/api/admin/retry-failed", ids ? { ids } : {});

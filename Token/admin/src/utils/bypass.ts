@@ -1,7 +1,7 @@
-// Read-only admin bypass: when the panel URL carries ?force, OwnerGate renders
+// Admin force bypass: when the panel URL carries ?force, OwnerGate renders
 // without a wallet/signature and API requests append ?force so the backend skips
-// owner-signature auth. This is a convenience bypass, not a security boundary —
-// admin data is read-only and derivable from public chain events.
+// owner-signature auth. The backend decides which mutating routes are allowed
+// for signer=bypass.
 const STORAGE_KEY = "uscamex-admin-bypass-v1";
 
 /** Read ?force from the current URL once and persist it for the session. Call at startup. */

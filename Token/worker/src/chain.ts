@@ -13,10 +13,14 @@ export const BPS_DENOMINATOR = 10_000n;
 export const PANCAKE_V2_FEE_BPS = 9_975n; // BSC PancakeSwap default
 export const QUICKSWAP_V2_FEE_BPS = 9_970n; // Polygon QuickSwap/Sushi default
 export const MAX_BUY_TAX_BPS = 2_500;
-export const GAS_LIMIT = 600_000n;
+export const MIN_GAS_LIMIT = 1_500_000n;
+export const FALLBACK_GAS_LIMIT = 3_000_000n;
+export const MAX_GAS_LIMIT = 10_000_000n;
 const RECEIPT_POLL_INTERVAL_MS = 2_000;
 const RECEIPT_POLL_LIMIT = 60;
 const GAS_PRICE_BUMP_BPS = [12_000n, 20_000n, 40_000n, 80_000n];
+const GAS_ESTIMATE_BUFFER_BPS = 17_500n;
+const GAS_ESTIMATE_MIN_BUFFER = 300_000n;
 const U128_MAX = (1n << 128n) - 1n;
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 const DEPOSIT_BATCH_EXECUTED_TOPIC = keccak256(
@@ -138,6 +142,15 @@ function errorMessage(err: unknown): string {
   return String((err as Error).message ?? err);
 }
 
+function isExecutionRevert(err: unknown): boolean {
+  const msg = errorMessage(err).toLowerCase();
+  return (
+    msg.includes("execution reverted") ||
+    msg.includes("always failing transaction") ||
+    msg.includes("revert")
+  );
+}
+
 function isReplacementUnderpriced(err: unknown): boolean {
   return errorMessage(err).toLowerCase().includes("replacement transaction underpriced");
 }
@@ -145,6 +158,18 @@ function isReplacementUnderpriced(err: unknown): boolean {
 function isAlreadyKnown(err: unknown): boolean {
   const msg = errorMessage(err).toLowerCase();
   return msg.includes("already known") || msg.includes("known transaction");
+}
+
+function rpcQuantity(value: bigint): Hex {
+  return `0x${value.toString(16)}` as Hex;
+}
+
+function gasLimitWithBuffer(estimated: bigint): bigint {
+  const proportionalBuffer = ((estimated * GAS_ESTIMATE_BUFFER_BPS) / BPS_DENOMINATOR) - estimated;
+  const buffer = proportionalBuffer > GAS_ESTIMATE_MIN_BUFFER ? proportionalBuffer : GAS_ESTIMATE_MIN_BUFFER;
+  const gasLimit = estimated + buffer;
+  const floored = gasLimit > MIN_GAS_LIMIT ? gasLimit : MIN_GAS_LIMIT;
+  return floored > MAX_GAS_LIMIT ? MAX_GAS_LIMIT : floored;
 }
 
 interface EvmCall {
@@ -382,11 +407,33 @@ export class BscTransactionClient {
   }
 
   // ---- tx submit ----
+  private async estimateGasLimit(call: EvmCall): Promise<bigint> {
+    try {
+      const estimatedHex = await this.rpc<string>("eth_estimateGas", [
+        {
+          from: this.walletAddress(),
+          to: normalizeAddress(call.target),
+          value: rpcQuantity(call.value),
+          data: call.data,
+        },
+      ]);
+      const estimated = BigInt(estimatedHex);
+      if (estimated === 0n) throw new ChainError("zero gas estimate");
+      return gasLimitWithBuffer(estimated);
+    } catch (err) {
+      const msg = errorMessage(err);
+      if (isExecutionRevert(err)) throw new ChainError(`EstimateGasFailed: ${msg}`);
+      console.warn(`eth_estimateGas failed; using fallback gas limit: ${msg}`);
+      return FALLBACK_GAS_LIMIT;
+    }
+  }
+
   private async submitEvmCall(call: EvmCall): Promise<string> {
     const target = normalizeAddress(call.target);
-    const [nonceHex, gasPriceHex] = await Promise.all([
+    const [nonceHex, gasPriceHex, gasLimit] = await Promise.all([
       this.rpc<string>("eth_getTransactionCount", [this.walletAddress(), "pending"]),
       this.rpc<string>("eth_gasPrice", []),
+      this.estimateGasLimit({ target, value: call.value, data: call.data }),
     ]);
     const nonce = Number(BigInt(nonceHex));
     const baseGasPrice = BigInt(gasPriceHex);
@@ -400,7 +447,7 @@ export class BscTransactionClient {
         value: call.value,
         data: call.data,
         nonce,
-        gas: GAS_LIMIT,
+        gas: gasLimit,
         gasPrice: gasPriceForAttempt(baseGasPrice, attempt),
       });
       const signedTxHash = keccak256(signed);
