@@ -253,6 +253,26 @@ export async function handleAdmin(req: Request, ctx: AdminContext): Promise<Resp
       // @ts-expect-error DO RPC
       return json({ signer, ...(await stub.retryFailedCommands(ids)) });
     }
+    case "/api/admin/repair-static-journal": {
+      if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+      if (signer === "bypass") {
+        return json({ error: "owner signature required to repair static journal" }, 403);
+      }
+      let slots: string[] | undefined;
+      let submit = false;
+      try {
+        const body = (await req.json().catch(() => ({}))) as {
+          slots?: unknown;
+          submit?: unknown;
+        };
+        if (Array.isArray(body.slots)) slots = body.slots.filter((x): x is string => typeof x === "string");
+        submit = body.submit === true;
+      } catch {
+        // empty/invalid body => repair all missing slots without immediate submit
+      }
+      // @ts-expect-error DO RPC
+      return json({ signer, ...(await stub.repairMissingStaticJournals(slots, submit)) });
+    }
     case "/api/admin/stop-operator-instance": {
       const name = url.searchParams.get("name") ?? "";
       if (!name) return json({ error: "name is required" }, 400);

@@ -6,8 +6,9 @@
  */
 import { DurableObject } from "cloudflare:workers";
 import { BscTransactionClient, type ChainExecutionContext } from "./chain";
-import { defaultProtocolConfig, type ProtocolConfig } from "./config";
+import { bps, defaultProtocolConfig, type ProtocolConfig } from "./config";
 import { Engine } from "./engine";
+import type { OperatorCommand } from "./executor";
 import { loadSettings, type Env, type OperatorSettings } from "./env";
 import { ExecutionJournal, type CommandRecord } from "./journal";
 import {
@@ -40,6 +41,10 @@ const MAX_BACKOFF_MS = 30_000;
 const SUBMIT_LOCK_KEY = "lock:submit-pending";
 const SUBMIT_LOCK_TTL_MS = 15 * 60 * 1000;
 const DEFLATION_SYNC_LOOKBACK_BLOCKS = 40_000n;
+const JOURNAL_LEGACY_KEY = "journal";
+const JOURNAL_CHUNK_INDEX_KEY = "journal:chunks";
+const JOURNAL_CHUNK_PREFIX = "journal:chunk:";
+const JOURNAL_CHUNK_RECORDS = 250;
 
 interface SubmitLock {
   owner: string;
@@ -117,16 +122,46 @@ export class OperatorDO extends DurableObject<Env> {
     return raw ? deserializeState(raw) : new ProtocolState(this.settings.tokenAddress);
   }
   private async loadJournal(): Promise<ExecutionJournal> {
-    const raw = await this.ctx.storage.get<{ records: never[] }>("journal");
+    const chunkKeys = await this.ctx.storage.get<string[]>(JOURNAL_CHUNK_INDEX_KEY);
+    if (chunkKeys && chunkKeys.length > 0) {
+      const chunks = await this.ctx.storage.get<{ records: never[] }>(chunkKeys);
+      const records: never[] = [];
+      for (const key of chunkKeys) {
+        const chunk = chunks.get(key);
+        if (!chunk) throw new Error(`missing journal chunk ${key}`);
+        records.push(...chunk.records);
+      }
+      return ExecutionJournal.fromJSON({ records });
+    }
+    const raw = await this.ctx.storage.get<{ records: never[] }>(JOURNAL_LEGACY_KEY);
     return raw ? ExecutionJournal.fromJSON(raw) : new ExecutionJournal();
   }
   private async persist(): Promise<void> {
+    await this.persistJournal();
     await this.ctx.storage.put("state", serializeState(this.state));
-    await this.ctx.storage.put("journal", this.journal.toJSON());
     await this.ctx.storage.put(
       "config",
       JSON.stringify(this.engine.config, (_k, v) => (typeof v === "bigint" ? v.toString() : v)),
     );
+  }
+  private async persistJournal(): Promise<void> {
+    const serialized = this.journal.toJSON() as { records: unknown[] };
+    const nextKeys: string[] = [];
+    for (let offset = 0; offset < serialized.records.length; offset += JOURNAL_CHUNK_RECORDS) {
+      const index = offset / JOURNAL_CHUNK_RECORDS;
+      const key = `${JOURNAL_CHUNK_PREFIX}${index.toString().padStart(5, "0")}`;
+      nextKeys.push(key);
+      await this.ctx.storage.put(key, {
+        records: serialized.records.slice(offset, offset + JOURNAL_CHUNK_RECORDS),
+      });
+    }
+
+    const oldKeys = (await this.ctx.storage.get<string[]>(JOURNAL_CHUNK_INDEX_KEY)) ?? [];
+    await this.ctx.storage.put(JOURNAL_CHUNK_INDEX_KEY, nextKeys);
+
+    const staleKeys = oldKeys.filter((key) => !nextKeys.includes(key));
+    if (staleKeys.length > 0) await this.ctx.storage.delete(staleKeys);
+    await this.ctx.storage.delete(JOURNAL_LEGACY_KEY);
   }
 
   private async reloadCoreState(): Promise<void> {
@@ -1045,6 +1080,81 @@ export class OperatorDO extends DurableObject<Env> {
     return { retried, tx_hashes: txHashes };
   }
 
+  async repairMissingStaticJournals(
+    slots?: string[],
+    submit = false,
+  ): Promise<{ repaired_settlements: number; planned_commands: number; tx_hashes: string[] }> {
+    rebuildInvestedDirectCounts(this.state);
+    const wantedSlots = slots && slots.length > 0 ? new Set(slots) : null;
+    let repairedSettlements = 0;
+    let plannedCommands = 0;
+
+    const ids = [...this.state.processedSettlements].sort();
+    for (const id of ids) {
+      const parsed = parseStaticSettlementId(id);
+      if (!parsed) continue;
+      if (wantedSlots && !wantedSlots.has(parsed.slot)) continue;
+      if (this.journalHasBatch(id)) continue;
+
+      const commands = this.rebuildStaticCommands(parsed.user);
+      if (commands.length === 0) continue;
+      this.journal.planBatch(id, commands);
+      repairedSettlements += 1;
+      plannedCommands += commands.length;
+    }
+
+    if (plannedCommands === 0) {
+      return { repaired_settlements: 0, planned_commands: 0, tx_hashes: [] };
+    }
+
+    await this.persist();
+    let txHashes: string[] = [];
+    if (submit) {
+      try {
+        txHashes = await this.submitPendingLocked("repair-static-journal");
+      } catch (err) {
+        console.error("repairMissingStaticJournals submit failed:", err);
+      }
+    }
+    return { repaired_settlements: repairedSettlements, planned_commands: plannedCommands, tx_hashes: txHashes };
+  }
+
+  private journalHasBatch(batchKey: string): boolean {
+    const prefix = `${batchKey}:`;
+    for (const id of this.journal.records.keys()) {
+      if (id.startsWith(prefix)) return true;
+    }
+    return false;
+  }
+
+  private rebuildStaticCommands(user: string): OperatorCommand[] {
+    const account = this.state.user(user);
+    if (!account || !account.active || account.principalBnb === 0n) return [];
+    const periods = Math.max(1, this.engine.config.settlementPeriodsPerDay);
+    const staticBnb = bps(account.principalBnb, this.engine.config.dailyStaticBps) / BigInt(periods);
+    const commands: OperatorCommand[] = [];
+    if (staticBnb !== 0n) {
+      commands.push({ kind: "PayRewardTokenByBnbValue", to: user, amount: staticBnb });
+    }
+
+    const ancestors = staticAncestors(this.state, user, 10);
+    ancestors.forEach((ancestor, index) => {
+      const rewardRate = this.engine.config.teamRewardBps[index] ?? 0;
+      if (rewardRate === 0) return;
+      const acct = this.state.user(ancestor);
+      const generation = index + 1;
+      const eligible =
+        !!acct && acct.active && acct.principalBnb > 0n && acct.investedDirectCount >= generation;
+      if (!eligible) return;
+      const amount = bps(staticBnb, rewardRate);
+      if (amount !== 0n) {
+        commands.push({ kind: "PayRewardTokenByBnbValue", to: ancestor, amount });
+      }
+    });
+
+    return commands;
+  }
+
 }
 
 interface JournalEventSortKey {
@@ -1151,6 +1261,23 @@ function parseSlotMs(slot: string): number | null {
     return Date.UTC(Number(utc8[1]), Number(utc8[2]) - 1, Number(utc8[3]), Number(utc8[4]) - 8, Number(utc8[5]));
   }
   return null;
+}
+
+function parseStaticSettlementId(id: string): { user: string; slot: string } | null {
+  const match = /^static:(0x[0-9a-f]{40}):(.+)$/.exec(id);
+  return match ? { user: match[1].toLowerCase(), slot: match[2] } : null;
+}
+
+function staticAncestors(state: ProtocolState, user: string, maxDepth: number): string[] {
+  const out: string[] = [];
+  let cursor = user;
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    const referrer = state.user(cursor)?.referrer;
+    if (!referrer || referrer === cursor) break;
+    out.push(referrer);
+    cursor = referrer;
+  }
+  return out;
 }
 
 function parseSqliteUtcMs(value: string): number | null {
