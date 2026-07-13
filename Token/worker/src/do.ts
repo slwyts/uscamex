@@ -19,6 +19,7 @@ import {
 } from "./indexer";
 import { BscRpcClient } from "./rpc";
 import {
+  type BeforeCommandSubmit,
   depositAllocationFromCommand,
   OperatorService,
   type ChainClient,
@@ -199,6 +200,32 @@ export class OperatorDO extends DurableObject<Env> {
     });
   }
 
+  /**
+   * Extend the submission lease while and only while this runner still owns it.
+   * A full settlement contains hundreds of transactions and routinely takes
+   * longer than SUBMIT_LOCK_TTL_MS. Without renewal, a second request can take
+   * the expired lock while the first request continues draining its stale
+   * pending snapshot, paying the same rewards twice.
+   */
+  private async renewSubmitLock(owner: string): Promise<boolean> {
+    const now = Date.now();
+    return this.ctx.storage.transaction(async (txn) => {
+      const existing = await txn.get<SubmitLock>(SUBMIT_LOCK_KEY);
+      if (existing?.owner !== owner) return false;
+      await txn.put(SUBMIT_LOCK_KEY, {
+        ...existing,
+        expiresAt: now + SUBMIT_LOCK_TTL_MS,
+      });
+      return true;
+    });
+  }
+
+  private async assertAndRenewSubmitLock(owner: string): Promise<void> {
+    if (!(await this.renewSubmitLock(owner))) {
+      throw new Error(`submission lease lost: ${owner}`);
+    }
+  }
+
   private async submitPendingLocked(reason: string): Promise<string[]> {
     const lockOwner = await this.acquireSubmitLock(reason);
     if (!lockOwner) {
@@ -210,7 +237,10 @@ export class OperatorDO extends DurableObject<Env> {
       // submitting so a stale isolate cannot send a command already confirmed by
       // the isolate that acquired the lock first.
       await this.reloadCoreState();
-      const service = this.newService(new EventCache(this.state.processedEvents));
+      const service = this.newService(
+        new EventCache(this.state.processedEvents),
+        async () => this.assertAndRenewSubmitLock(lockOwner),
+      );
       const txHashes = await service.submitPending();
       await this.persist();
       return txHashes;
@@ -226,9 +256,17 @@ export class OperatorDO extends DurableObject<Env> {
     }
   }
 
-  private newService(cache: EventCache): OperatorService {
+  private newService(cache: EventCache, beforeCommandSubmit?: BeforeCommandSubmit): OperatorService {
     const chain = this.newChain();
-    return new OperatorService(this.engine, this.state, this.journal, cache, chain, () => this.persist());
+    return new OperatorService(
+      this.engine,
+      this.state,
+      this.journal,
+      cache,
+      chain,
+      () => this.persist(),
+      beforeCommandSubmit,
+    );
   }
 
   private chainContext(): ChainExecutionContext {

@@ -36,13 +36,20 @@ function depositCommand(user: string, directReferrer: string | null): Extract<Op
   };
 }
 
-function serviceWith(chain: ChainClient, journal: ExecutionJournal, state = new ProtocolState("root")): OperatorService {
+function serviceWith(
+  chain: ChainClient,
+  journal: ExecutionJournal,
+  state = new ProtocolState("root"),
+  beforeCommandSubmit?: (id: string, command: OperatorCommand) => Promise<void>,
+): OperatorService {
   return new OperatorService(
     new Engine(defaultProtocolConfig()),
     state,
     journal,
     { containsEvent: () => false, insertEvent: () => undefined },
     chain,
+    undefined,
+    beforeCommandSubmit,
   );
 }
 
@@ -95,6 +102,64 @@ describe("service: submit reconciliation", () => {
     expect(txHashes).toEqual([TX_HASH]);
     expect(submitted).toBe(0);
     expect(record.status).toEqual({ state: "Confirmed", txHash: TX_HASH });
+  });
+
+  it("stops immediately when the submission lease is lost without failing untouched commands", async () => {
+    const journal = new ExecutionJournal();
+    const ids = journal.planBatch("static:0xuser:slot", [
+      { kind: "PayRewardTokenByBnbValue", to: "alice", amount: 1n },
+      { kind: "PayRewardTokenByBnbValue", to: "bob", amount: 2n },
+    ]);
+    const submitted: string[] = [];
+    let leaseChecks = 0;
+    const service = serviceWith(
+      {
+        async submit(command) {
+          submitted.push(command.kind === "PayRewardTokenByBnbValue" ? command.to : command.kind);
+          return TX_HASH;
+        },
+      },
+      journal,
+      new ProtocolState("root"),
+      async () => {
+        leaseChecks += 1;
+        if (leaseChecks === 2) throw new Error("submission lease lost");
+      },
+    );
+
+    await expect(service.submitPending()).rejects.toThrow("submission lease lost");
+    expect(submitted).toEqual(["alice"]);
+    expect(journal.records.get(ids[0])!.status.state).toBe("Confirmed");
+    expect(journal.records.get(ids[1])!.status.state).toBe("Pending");
+    expect(journal.records.get(ids[1])!.attempts).toBe(0);
+  });
+
+  it("skips a stale pending snapshot entry that another runner already confirmed", async () => {
+    const journal = new ExecutionJournal();
+    const ids = journal.planBatch("static:0xuser:slot", [
+      { kind: "PayRewardTokenByBnbValue", to: "alice", amount: 1n },
+      { kind: "PayRewardTokenByBnbValue", to: "bob", amount: 2n },
+    ]);
+    const submitted: string[] = [];
+    let leaseChecks = 0;
+    const service = serviceWith(
+      {
+        async submit(command) {
+          submitted.push(command.kind === "PayRewardTokenByBnbValue" ? command.to : command.kind);
+          return TX_HASH;
+        },
+      },
+      journal,
+      new ProtocolState("root"),
+      async () => {
+        leaseChecks += 1;
+        if (leaseChecks === 2) journal.markConfirmed(ids[1], TX_HASH);
+      },
+    );
+
+    await expect(service.submitPending()).resolves.toEqual([TX_HASH]);
+    expect(submitted).toEqual(["alice"]);
+    expect(journal.records.get(ids[1])!.status).toEqual({ state: "Confirmed", txHash: TX_HASH });
   });
 });
 

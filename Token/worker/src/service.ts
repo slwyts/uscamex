@@ -33,6 +33,8 @@ export interface ChainClient {
   findConfirmedCommand?(id: string, command: OperatorCommand): Promise<string | null>;
 }
 
+export type BeforeCommandSubmit = (id: string, command: OperatorCommand) => Promise<void>;
+
 export class OperatorService {
   private planningState: ProtocolState;
 
@@ -43,6 +45,7 @@ export class OperatorService {
     public eventCache: ServiceDatabase,
     public chain: ChainClient,
     private onPersist?: () => Promise<void>,
+    private beforeCommandSubmit?: BeforeCommandSubmit,
   ) {
     this.planningState = buildPlanningState(engine, state, journal);
   }
@@ -166,6 +169,17 @@ export class OperatorService {
     const txHashes: string[] = [];
     this.journal.retryFailed();
     for (const [id, command] of this.journal.pendingCommands()) {
+      // The pending list is a snapshot. A long settlement drain can outlive a
+      // submission lease, so validate/renew that lease before every command.
+      // Keep this outside the command try/catch: losing the lease must stop the
+      // old runner without marking an untouched command as Failed.
+      await this.beforeCommandSubmit?.(id, command);
+
+      // Another request in the same isolate may have confirmed an item from the
+      // snapshot while this runner was awaiting storage/RPC. Never resubmit a
+      // record whose live journal status is no longer Pending.
+      if (this.journal.records.get(id)?.status.state !== "Pending") continue;
+
       try {
         // Idempotency guard: before (re)submitting, check whether this exact command
         // already landed on-chain (e.g. a prior attempt that we lost the receipt for).
