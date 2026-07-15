@@ -16,6 +16,7 @@ export const MAX_BUY_TAX_BPS = 2_500;
 export const MIN_GAS_LIMIT = 1_500_000n;
 export const FALLBACK_GAS_LIMIT = 3_000_000n;
 export const MAX_GAS_LIMIT = 10_000_000n;
+export const MAX_RECONCILIATION_BLOCKS = 40_000n;
 const RECEIPT_POLL_INTERVAL_MS = 2_000;
 const RECEIPT_POLL_LIMIT = 60;
 const GAS_PRICE_BUMP_BPS = [12_000n, 20_000n, 40_000n, 80_000n];
@@ -164,6 +165,28 @@ function rpcQuantity(value: bigint): Hex {
   return `0x${value.toString(16)}` as Hex;
 }
 
+export interface BlockRange {
+  fromBlock: bigint;
+  toBlock: bigint;
+}
+
+/** Build inclusive ranges that stay below common RPC eth_getLogs limits. */
+export function reconciliationBlockRanges(
+  fromBlock: bigint,
+  toBlock: bigint,
+  maxBlocks: bigint = MAX_RECONCILIATION_BLOCKS,
+): BlockRange[] {
+  if (maxBlocks <= 0n) throw new ChainError("InvalidBlockRange");
+  if (fromBlock > toBlock) return [];
+  const ranges: BlockRange[] = [];
+  for (let start = fromBlock; start <= toBlock; ) {
+    const end = minBigint(start + maxBlocks - 1n, toBlock);
+    ranges.push({ fromBlock: start, toBlock: end });
+    start = end + 1n;
+  }
+  return ranges;
+}
+
 function gasLimitWithBuffer(estimated: bigint): bigint {
   const proportionalBuffer = ((estimated * GAS_ESTIMATE_BUFFER_BPS) / BPS_DENOMINATOR) - estimated;
   const buffer = proportionalBuffer > GAS_ESTIMATE_MIN_BUFFER ? proportionalBuffer : GAS_ESTIMATE_MIN_BUFFER;
@@ -200,6 +223,14 @@ export interface DepositBatchExecution {
   directReferrer: string | null;
   directBnb: bigint;
   nodeBnb: bigint;
+}
+
+export interface RedeemExecution {
+  txHash: string;
+  user: string;
+  lpTokenAmount: bigint;
+  bnbReturned: bigint;
+  tokenBurned: bigint;
 }
 
 // ABI item definitions for encodeFunctionData
@@ -647,9 +678,13 @@ export class BscTransactionClient {
     return this.submitEvmCall({ target: this.token, value: 0n, data });
   }
 
-  async findConfirmedCommand(id: string, command: OperatorCommand): Promise<string | null> {
+  async findConfirmedCommand(
+    id: string,
+    command: OperatorCommand,
+    anchorTxHash?: string,
+  ): Promise<string | null> {
     if (command.kind === "DepositBatch") return this.findConfirmedDepositBatch(id, command);
-    if (command.kind === "RedeemUserLp") return this.findConfirmedRedeemUserLp(command);
+    if (command.kind === "RedeemUserLp") return this.findConfirmedRedeemUserLp(command, anchorTxHash);
     return null;
   }
 
@@ -663,23 +698,21 @@ export class BscTransactionClient {
       .catch(() => null);
     if (!depositReceipt || depositReceipt.status !== "0x1") return null;
 
-    const logs = await this.rpc<RpcLogJson[]>("eth_getLogs", [
-      {
-        address: this.token,
-        fromBlock: depositReceipt.blockNumber,
-        toBlock: "latest",
-        topics: [DEPOSIT_BATCH_EXECUTED_TOPIC],
-      },
-    ]);
-    for (const log of logs) {
-      if (log.removed || !this.depositBatchLogMatches(log, command)) continue;
-      return log.transactionHash.toLowerCase();
+    const fromBlock = BigInt(depositReceipt.blockNumber);
+    const toBlock = await this.reconciliationSafeHead();
+    let recoveryTxHash: string | null = null;
+    for (const range of reconciliationBlockRanges(fromBlock, toBlock)) {
+      const logs = await this.reconciliationLogs(range, [DEPOSIT_BATCH_EXECUTED_TOPIC]);
+      for (const log of logs) {
+        if (log.removed || !this.depositBatchLogMatches(log, command)) continue;
+        return log.transactionHash.toLowerCase();
+      }
+      if (!recoveryTxHash) {
+        const recovery = logs.find((log) => !log.removed && this.depositBatchLogRecoveryMatches(log, command));
+        recoveryTxHash = recovery?.transactionHash.toLowerCase() ?? null;
+      }
     }
-    for (const log of logs) {
-      if (log.removed || !this.depositBatchLogRecoveryMatches(log, command)) continue;
-      return log.transactionHash.toLowerCase();
-    }
-    return null;
+    return recoveryTxHash;
   }
 
   private depositTxHashFromJournalId(id: string): Hex | null {
@@ -775,26 +808,86 @@ export class BscTransactionClient {
 
   private async findConfirmedRedeemUserLp(
     command: Extract<OperatorCommand, { kind: "RedeemUserLp" }>,
+    anchorTxHash?: string,
   ): Promise<string | null> {
+    const fromBlock = anchorTxHash
+      ? await this.confirmedTransactionBlock(anchorTxHash)
+      : this.ctx.indexerStartBlock;
+    const toBlock = await this.reconciliationSafeHead();
+    for (const range of reconciliationBlockRanges(fromBlock, toBlock)) {
+      const logs = await this.reconciliationLogs(range, [LP_REDEEMED_TOPIC, addressTopic(command.user)]);
+      for (const log of logs) {
+        if (log.removed) continue;
+        try {
+          if (this.parseU128Word(log.data, 0) === command.lpTokenAmount) {
+            return log.transactionHash.toLowerCase();
+          }
+        } catch {
+          continue;
+        }
+      }
+    }
+    return null;
+  }
+
+  async redeemExecution(
+    txHash: string,
+    command: Extract<OperatorCommand, { kind: "RedeemUserLp" }>,
+  ): Promise<RedeemExecution | null> {
+    const receipt = await this.rpc<RpcReceiptJson | null>("eth_getTransactionReceipt", [txHash]).catch(() => null);
+    if (!receipt || receipt.status !== "0x1") return null;
     const logs = await this.rpc<RpcLogJson[]>("eth_getLogs", [
       {
         address: this.token,
-        fromBlock: `0x${this.ctx.indexerStartBlock.toString(16)}`,
-        toBlock: "latest",
+        fromBlock: receipt.blockNumber,
+        toBlock: receipt.blockNumber,
         topics: [LP_REDEEMED_TOPIC, addressTopic(command.user)],
       },
     ]);
+    const normalizedTxHash = txHash.toLowerCase();
     for (const log of logs) {
-      if (log.removed) continue;
+      if (log.removed || log.transactionHash.toLowerCase() !== normalizedTxHash) continue;
       try {
-        if (this.parseU128Word(log.data, 0) === command.lpTokenAmount) {
-          return log.transactionHash.toLowerCase();
-        }
+        const lpTokenAmount = this.parseU128Word(log.data, 0);
+        const bnbReturned = this.parseU128Word(log.data, 1);
+        const tokenBurned = this.parseU128Word(log.data, 2);
+        if (lpTokenAmount !== command.lpTokenAmount || bnbReturned === 0n || tokenBurned === 0n) continue;
+        return {
+          txHash: normalizedTxHash,
+          user: normalizeAddress(command.user),
+          lpTokenAmount,
+          bnbReturned,
+          tokenBurned,
+        };
       } catch {
         continue;
       }
     }
     return null;
+  }
+
+  private async reconciliationSafeHead(): Promise<bigint> {
+    const head = BigInt(await this.rpc<string>("eth_blockNumber", []));
+    const confirmationLag = BigInt(Math.max(1, this.confirmations) - 1);
+    return head >= confirmationLag ? head - confirmationLag : 0n;
+  }
+
+  private async confirmedTransactionBlock(txHash: string): Promise<bigint> {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) throw new ChainError("InvalidTransactionHash");
+    const receipt = await this.rpc<RpcReceiptJson>("eth_getTransactionReceipt", [txHash]);
+    if (receipt.status !== "0x1") throw new ChainError("ReconciliationAnchorNotConfirmed");
+    return BigInt(receipt.blockNumber);
+  }
+
+  private reconciliationLogs(range: BlockRange, topics: string[]): Promise<RpcLogJson[]> {
+    return this.rpc<RpcLogJson[]>("eth_getLogs", [
+      {
+        address: this.token,
+        fromBlock: rpcQuantity(range.fromBlock),
+        toBlock: rpcQuantity(range.toBlock),
+        topics,
+      },
+    ]);
   }
 
   private lpAmountsValid(lpBnb: bigint, lpTokenValueBnb: bigint): boolean {

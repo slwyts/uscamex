@@ -104,6 +104,53 @@ describe("service: submit reconciliation", () => {
     expect(record.status).toEqual({ state: "Confirmed", txHash: TX_HASH });
   });
 
+  it("anchors redemption reconciliation at the latest confirmed prerequisite", async () => {
+    const journal = new ExecutionJournal();
+    const ids = journal.planBatch("static:0xuser:slot", [
+      { kind: "PayRewardTokenByBnbValue", to: "alice", amount: 1n },
+      { kind: "RedeemUserLp", user: "0xabc", lpTokenAmount: 123n },
+    ]);
+    const anchorHash = `0x${"b".repeat(64)}`;
+    journal.markSubmitted(ids[0], anchorHash);
+    journal.markConfirmed(ids[0]);
+
+    let receivedAnchor: string | undefined;
+    const chain: ChainClient = {
+      async findConfirmedCommand(_id, _command, anchorTxHash) {
+        receivedAnchor = anchorTxHash;
+        return null;
+      },
+      async submit() {
+        return TX_HASH;
+      },
+    };
+
+    await expect(serviceWith(chain, journal).submitPending()).resolves.toEqual([TX_HASH]);
+    expect(receivedAnchor).toBe(anchorHash);
+    expect(journal.records.get(ids[1])!.status).toEqual({ state: "Confirmed", txHash: TX_HASH });
+  });
+
+  it("does not redeem LP when an earlier command in the same batch failed", async () => {
+    const journal = new ExecutionJournal();
+    const ids = journal.planBatch("static:0xuser:slot", [
+      { kind: "PayRewardTokenByBnbValue", to: "alice", amount: 1n },
+      { kind: "RedeemUserLp", user: "0xabc", lpTokenAmount: 123n },
+    ]);
+    const submitted: string[] = [];
+    const chain: ChainClient = {
+      async submit(command) {
+        submitted.push(command.kind);
+        throw new Error("reward submission failed");
+      },
+    };
+
+    await expect(serviceWith(chain, journal).submitPending()).resolves.toEqual([]);
+    expect(submitted).toEqual(["PayRewardTokenByBnbValue"]);
+    expect(journal.records.get(ids[0])!.status.state).toBe("Pending");
+    expect(journal.records.get(ids[1])!.status.state).toBe("Pending");
+    expect(journal.records.get(ids[1])!.attempts).toBe(0);
+  });
+
   it("stops immediately when the submission lease is lost without failing untouched commands", async () => {
     const journal = new ExecutionJournal();
     const ids = journal.planBatch("static:0xuser:slot", [

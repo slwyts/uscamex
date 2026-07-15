@@ -111,4 +111,28 @@ describe("journal idempotency", () => {
     expect(restored.records.get(firstId)!.order).toEqual({ blockNumber: 11n, logIndex: 1, sequence: 0 });
     expect(restored.pendingCommands().map(([id]) => id)).toEqual([firstId, secondId]);
   });
+
+  it("requires earlier batch commands before redemption and exposes the latest confirmed anchor", () => {
+    const journal = new ExecutionJournal();
+    const ids = journal.planBatch("static:0xuser:slot", [
+      { kind: "PayRewardTokenByBnbValue", to: "alice", amount: 1n },
+      { kind: "PayRewardTokenByBnbValue", to: "bob", amount: 2n },
+      { kind: "RedeemUserLp", user: "0xabc", lpTokenAmount: 3n },
+    ]);
+    const firstHash = `0x${"a".repeat(64)}`;
+    const secondHash = `0x${"b".repeat(64)}`;
+
+    expect(journal.priorBatchCommandsConfirmed(ids[2])).toBe(false);
+    expect(journal.priorBatchConfirmedTxHash(ids[2])).toBe(null);
+
+    journal.markSubmitted(ids[0], firstHash);
+    journal.markConfirmed(ids[0]);
+    expect(journal.priorBatchCommandsConfirmed(ids[2])).toBe(false);
+    expect(journal.priorBatchConfirmedTxHash(ids[2])).toBe(firstHash);
+
+    journal.markSubmitted(ids[1], secondHash);
+    journal.markConfirmed(ids[1]);
+    expect(journal.priorBatchCommandsConfirmed(ids[2])).toBe(true);
+    expect(journal.priorBatchConfirmedTxHash(ids[2])).toBe(secondHash);
+  });
 });

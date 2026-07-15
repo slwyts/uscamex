@@ -297,8 +297,13 @@ export class OperatorDO extends DurableObject<Env> {
     const client = this.newTransactionClient();
     return {
       submit: (command) => client.submit(command),
-      findConfirmedCommand: (id, command) => client.findConfirmedCommand(id, command),
+      findConfirmedCommand: (id, command, anchorTxHash) => client.findConfirmedCommand(id, command, anchorTxHash),
       afterConfirmed: async (id, command, txHash) => {
+        if (command.kind === "RedeemUserLp") {
+          const executed = await client.redeemExecution(txHash, command);
+          if (!executed) throw new Error("LP redemption execution event missing");
+          return;
+        }
         if (command.kind !== "DepositBatch") return;
         if (this.state.appliedDepositBatches.has(id)) return;
         const executed = await client.depositBatchExecution(txHash, command);

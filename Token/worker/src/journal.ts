@@ -73,6 +73,42 @@ export class ExecutionJournal {
       .map((r) => [r.id, r.command]);
   }
 
+  /**
+   * RedeemUserLp is the final command in a deposit/settlement batch and depends
+   * on the payouts before it. A failed prerequisite must never be skipped over:
+   * otherwise LP could be redeemed even though the reward that triggered the
+   * exit never reached the user.
+   */
+  priorBatchCommandsConfirmed(id: string): boolean {
+    const target = parseRecordId(id);
+    if (!target) return true;
+    for (const record of this.records.values()) {
+      const parsed = parseRecordId(record.id);
+      if (!parsed || parsed.batchKey !== target.batchKey || parsed.index >= target.index) continue;
+      if (record.status.state !== "Confirmed") return false;
+    }
+    return true;
+  }
+
+  /**
+   * The latest confirmed transaction earlier in the same batch is a safe lower
+   * bound for redeem-event reconciliation: this command cannot have executed
+   * before its prerequisites. Keeping the search window tight also avoids RPC
+   * providers' historical eth_getLogs range limits.
+   */
+  priorBatchConfirmedTxHash(id: string): string | null {
+    const target = parseRecordId(id);
+    if (!target) return null;
+    let best: { index: number; txHash: string } | null = null;
+    for (const record of this.records.values()) {
+      const parsed = parseRecordId(record.id);
+      if (!parsed || parsed.batchKey !== target.batchKey || parsed.index >= target.index) continue;
+      if (record.status.state !== "Confirmed" || !/^0x[0-9a-fA-F]{64}$/.test(record.status.txHash)) continue;
+      if (!best || parsed.index > best.index) best = { index: parsed.index, txHash: record.status.txHash };
+    }
+    return best?.txHash.toLowerCase() ?? null;
+  }
+
   markSubmitted(id: string, txHash: string): void {
     const record = this.records.get(id);
     if (!record) throw new JournalError("MissingCommand");
@@ -188,6 +224,13 @@ function compareRecords(a: CommandRecord, b: CommandRecord): number {
     if (a.order.sequence !== b.order.sequence) return a.order.sequence - b.order.sequence;
   }
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+function parseRecordId(id: string): { batchKey: string; index: number } | null {
+  const match = /^(.*):(\d+):[^:]+$/.exec(id);
+  if (!match) return null;
+  const index = Number(match[2]);
+  return Number.isSafeInteger(index) ? { batchKey: match[1], index } : null;
 }
 
 function maxAttempts(error?: string): number {

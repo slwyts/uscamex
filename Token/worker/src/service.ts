@@ -30,7 +30,7 @@ export interface ServiceDatabase {
 export interface ChainClient {
   submit(command: OperatorCommand): Promise<string>;
   afterConfirmed?(id: string, command: OperatorCommand, txHash: string): Promise<void>;
-  findConfirmedCommand?(id: string, command: OperatorCommand): Promise<string | null>;
+  findConfirmedCommand?(id: string, command: OperatorCommand, anchorTxHash?: string): Promise<string | null>;
 }
 
 export type BeforeCommandSubmit = (id: string, command: OperatorCommand) => Promise<void>;
@@ -180,12 +180,19 @@ export class OperatorService {
       // record whose live journal status is no longer Pending.
       if (this.journal.records.get(id)?.status.state !== "Pending") continue;
 
+      // LP redemption is dependent on the earlier payout/deposit commands in
+      // the same batch. Keep it pending until every prerequisite is confirmed;
+      // independent batches continue draining normally.
+      if (command.kind === "RedeemUserLp" && !this.journal.priorBatchCommandsConfirmed(id)) continue;
+
       try {
         // Idempotency guard: before (re)submitting, check whether this exact command
         // already landed on-chain (e.g. a prior attempt that we lost the receipt for).
         // This is only done for the pending set, NOT a full-journal sweep every tick,
         // so a backlog can never explode RPC usage and time out the DO.
-        const existingTxHash = await this.chain.findConfirmedCommand?.(id, command);
+        const anchorTxHash =
+          command.kind === "RedeemUserLp" ? this.journal.priorBatchConfirmedTxHash(id) ?? undefined : undefined;
+        const existingTxHash = await this.chain.findConfirmedCommand?.(id, command, anchorTxHash);
         if (existingTxHash) {
           await this.chain.afterConfirmed?.(id, command, existingTxHash);
           this.journal.markConfirmed(id, existingTxHash);
