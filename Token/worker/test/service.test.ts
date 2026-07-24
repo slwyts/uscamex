@@ -365,4 +365,47 @@ describe("service: settlement derived counters", () => {
       .filter((command) => command.kind === "PayRewardTokenByBnbValue" && command.to === "alice");
     expect(aliceRewards.some((command) => command.kind === "PayRewardTokenByBnbValue" && command.amount === BNB / 5000n)).toBe(true);
   });
+
+  it("applies a fixed historical settlement exactly once", () => {
+    const state = new ProtocolState("root");
+    const setupEngine = new Engine(defaultProtocolConfig());
+    setupEngine.bind(state, "alice", "root");
+    setupEngine.deposit(state, "alice", BNB);
+    setupEngine.bind(state, "bob", "alice");
+    setupEngine.deposit(state, "bob", BNB);
+
+    const journal = new ExecutionJournal();
+    const service = serviceWith({ async submit() { return TX_HASH; } }, journal, state);
+    const beforeBobStatic = state.user("bob")!.staticPaidBnb;
+    const beforeAliceDynamic = state.user("alice")!.dynamicPaidBnb;
+    const payments = [
+      { to: "bob", amount: 123n },
+      { to: "alice", amount: 45n },
+    ];
+
+    expect(service.settleFixedOnce("bob", "missing-slot", payments)).toHaveLength(2);
+    expect(service.settleFixedOnce("bob", "missing-slot", payments)).toBe(null);
+    expect(state.user("bob")!.staticPaidBnb).toBe(beforeBobStatic + 123n);
+    expect(state.user("alice")!.dynamicPaidBnb).toBe(beforeAliceDynamic + 45n);
+    expect(state.processedSettlements.has("static:bob:missing-slot")).toBe(true);
+    expect(journal.pendingCommands()).toHaveLength(2);
+  });
+});
+
+describe("service: scheduled tick idempotency", () => {
+  it("does not apply deflation twice for the same journal slot", () => {
+    const state = new ProtocolState("root");
+    state.pair.tokenReserve = 1_000_000n;
+    state.pair.bnbReserve = 1_000_000n;
+    const journal = new ExecutionJournal();
+    const service = serviceWith({ async submit() { return TX_HASH; } }, journal, state);
+
+    expect(service.tickDeflation(1n, "2026-07-24T10Z")).not.toBe(null);
+    const reserveAfterFirst = state.pair.tokenReserve;
+    const usedAfterFirst = state.deflationUsedBps;
+    expect(service.tickDeflation(1n, "2026-07-24T10Z")).toBe(null);
+    expect(state.pair.tokenReserve).toBe(reserveAfterFirst);
+    expect(state.deflationUsedBps).toBe(usedAfterFirst);
+    expect(journal.pendingCommands()).toHaveLength(1);
+  });
 });

@@ -24,6 +24,14 @@ export interface CommandRecord {
   order?: CommandOrder;
 }
 
+export interface SerializedCommandRecord {
+  id: string;
+  command: unknown;
+  attempts: number;
+  status: CommandStatus;
+  order?: SerializedCommandOrder;
+}
+
 export interface CommandOrder {
   blockNumber: bigint;
   logIndex: number;
@@ -45,6 +53,7 @@ export class JournalError extends Error {
 
 export class ExecutionJournal {
   records = new Map<string, CommandRecord>();
+  private dirtyIds = new Set<string>();
 
   recordsInExecutionOrder(): CommandRecord[] {
     return [...this.records.values()].sort(compareRecords);
@@ -62,6 +71,7 @@ export class ExecutionJournal {
           status: { state: "Pending" },
           order: order ? { ...order, sequence: index } : undefined,
         });
+        this.dirtyIds.add(id);
       }
       return id;
     });
@@ -115,6 +125,7 @@ export class ExecutionJournal {
     if (record.status.state === "Confirmed") throw new JournalError("AlreadyConfirmed");
     record.attempts += 1;
     record.status = { state: "Submitted", txHash };
+    this.dirtyIds.add(id);
   }
 
   markConfirmed(id: string, txHashOverride?: string): void {
@@ -125,6 +136,7 @@ export class ExecutionJournal {
       txHash = record.status.txHash;
     }
     record.status = { state: "Confirmed", txHash };
+    this.dirtyIds.add(id);
   }
 
   markFailed(id: string, error: string): void {
@@ -133,6 +145,7 @@ export class ExecutionJournal {
     if (record.status.state === "Confirmed") throw new JournalError("AlreadyConfirmed");
     record.attempts += 1;
     record.status = { state: "Failed", error };
+    this.dirtyIds.add(id);
   }
 
   canRetry(id: string, error?: string): boolean {
@@ -145,6 +158,7 @@ export class ExecutionJournal {
     const record = this.records.get(id);
     if (!record) throw new JournalError("MissingCommand");
     record.status = { state: "Pending" };
+    this.dirtyIds.add(id);
   }
 
   /** Retry all Failed commands that haven't exceeded MAX_ATTEMPTS. */
@@ -153,10 +167,36 @@ export class ExecutionJournal {
     for (const r of this.records.values()) {
       if (r.status.state === "Failed" && r.attempts < maxAttempts(r.status.error)) {
         r.status = { state: "Pending" };
+        this.dirtyIds.add(r.id);
         count += 1;
       }
     }
     return count;
+  }
+
+  touch(id: string): void {
+    if (!this.records.has(id)) throw new JournalError("MissingCommand");
+    this.dirtyIds.add(id);
+  }
+
+  markAllDirty(): void {
+    for (const id of this.records.keys()) this.dirtyIds.add(id);
+  }
+
+  dirtyRecordIds(): string[] {
+    return [...this.dirtyIds];
+  }
+
+  markPersisted(ids: Iterable<string>): void {
+    for (const id of ids) this.dirtyIds.delete(id);
+  }
+
+  hasSubmitWork(): boolean {
+    for (const record of this.records.values()) {
+      if (record.status.state === "Pending") return true;
+      if (record.status.state === "Failed" && record.attempts < maxAttempts(record.status.error)) return true;
+    }
+    return false;
   }
 
   confirmedCount(): number {
@@ -167,18 +207,12 @@ export class ExecutionJournal {
 
   toJSON(): unknown {
     return {
-      records: this.recordsInExecutionOrder().map((r) => ({
-        id: r.id,
-        command: serializeCommand(r.command),
-        attempts: r.attempts,
-        status: r.status,
-        order: r.order ? serializeOrder(r.order) : undefined,
-      })),
+      records: this.recordsInExecutionOrder().map(serializeRecord),
     };
   }
 
   static fromJSON(data: {
-    records: { id: string; command: unknown; attempts: number; status: CommandStatus; order?: SerializedCommandOrder }[];
+    records: SerializedCommandRecord[];
   }): ExecutionJournal {
     const journal = new ExecutionJournal();
     for (const r of data.records) {
@@ -192,13 +226,32 @@ export class ExecutionJournal {
     }
     return journal;
   }
+
+  serializedRecords(ids: Iterable<string>): SerializedCommandRecord[] {
+    const records: SerializedCommandRecord[] = [];
+    for (const id of ids) {
+      const record = this.records.get(id);
+      if (record) records.push(serializeRecord(record));
+    }
+    return records;
+  }
 }
 
-interface SerializedCommandOrder {
+export interface SerializedCommandOrder {
   blockNumber: string;
   logIndex: number;
   sequence?: number;
   commandIndex?: number;
+}
+
+function serializeRecord(record: CommandRecord): SerializedCommandRecord {
+  return {
+    id: record.id,
+    command: serializeCommand(record.command),
+    attempts: record.attempts,
+    status: record.status,
+    order: record.order ? serializeOrder(record.order) : undefined,
+  };
 }
 
 function serializeOrder(order: CommandOrder): SerializedCommandOrder {

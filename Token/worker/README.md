@@ -51,7 +51,7 @@ The Worker also serves the admin SPA (`Token/admin`) via Workers Static Assets:
 - `pnpm deploy` runs `predeploy` → `build:admin`, which installs + builds the
   admin app into `Token/admin/dist` before deploying. One command ships both.
 - After deploy, the admin panel is at the Worker root URL (`https://<worker>/`).
-  Append `?force` to skip the owner-signature gate (read-only bypass).
+  Append `?force` to use the intentional operator bypass.
 
 Local development has two options:
 - **Worker-served (production-like):** `cd Token/admin && pnpm build`, then
@@ -73,7 +73,7 @@ Full logic port complete. All Rust modules are ported to TypeScript:
 | `rpc.ts` | rpc.rs | BSC JSON-RPC reads, getProtocolConfig word map |
 | `executor.ts` | executor.rs | OperatorCommand union + command builders |
 | `chain.ts` | chain.rs | tx build/sign/send (viem), operatorCall, AMM math |
-| `journal.ts` | journal.rs | idempotent command journal + JSON round-trip |
+| `journal.ts` | journal.rs | idempotent command journal + dirty-record tracking |
 | `service.ts` | service.rs | event→engine→journal orchestration, tax sweep planning |
 | `storage.ts` | storage.rs | D1 adapter (events/blocks/config+node history) |
 | `health.ts` | health.rs | operational health alerts |
@@ -81,7 +81,18 @@ Full logic port complete. All Rust modules are ported to TypeScript:
 | `admin.ts` | admin_api.rs | owner-authed routes, EIP-191 auth |
 | `index.ts` | main.rs | Worker fetch + scheduled entry |
 
-Tests: `test/{config,engine,indexer,journal}.test.ts` (21 cases, ported from the Rust unit tests).
+The DO persists only journal chunks containing changed records. Scheduled slot claims use
+`pending`/`completed` markers; the completed marker, protocol state, and planned commands
+commit in one transaction. An expired `pending` marker is retried before a newer slot.
+
+Recovery routes:
+
+- `POST /api/admin/backfill-missing-settlement` proves a missing slot against two
+  identical confirmed reference slots before planning fixed historical BNB-value payouts.
+- `POST /api/admin/backfill-missing-deflation` plans explicitly named missing hourly
+  deflation slots while respecting the current daily cap.
+
+Tests: `test/*.test.ts` (54 cases).
 Run with `pnpm test` (plain Node/vitest — pure logic, no workerd needed).
 
 ### Fidelity invariants (must not drift from the original Rust)
@@ -90,6 +101,6 @@ Run with `pnpm test` (plain Node/vitest — pure logic, no workerd needed).
 - `getProtocolConfig()` ABI word index map (0–34) in `rpc.ts` `CONFIG_WORD_INDEX`.
 - `owner()` selector `0x8da5cb5b`; event topic set in `indexer.ts` `ALL_TOPICS`.
 - Idempotency: `processed_events`, `processed_settlements`, journal batch-key dedupe,
-  cron slot tags, confirmed-survives-restart.
+  recoverable cron slot claims, confirmed-survives-restart.
 - Settlement aligned to UTC+8 with `periods_per_day` embedded in the slot key.
 - Admin auth: `x-uscamex-admin-message-b64` + `x-uscamex-admin-signature`, EIP-191 recover == on-chain `owner()`.

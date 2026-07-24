@@ -328,6 +328,50 @@ export class Engine {
     };
   }
 
+  /**
+   * Apply a missing historical settlement using reward amounts proven by two
+   * adjacent confirmed slots. The amounts are fixed because recalculating with
+   * today's principal/config would change the original business result.
+   */
+  applyFixedStaticSettlement(
+    state: ProtocolState,
+    user: Address,
+    staticBnb: bigint,
+    teamRewards: RewardPayout[],
+  ): StaticSettlement {
+    const account = state.user(user);
+    if (!account) throw new EngineError("UserNotBound");
+    if (!account.active || account.principalBnb === 0n) throw new EngineError("InactivePosition");
+
+    state.ensureUserMut(user).staticPaidBnb += staticBnb;
+    const appliedTeamRewards: RewardPayout[] = [];
+    const lpRedeems: LpRedeem[] = [];
+    for (const reward of teamRewards) {
+      const recipient = state.user(reward.user);
+      if (!recipient || !recipient.active || recipient.principalBnb === 0n) continue;
+      state.ensureUserMut(reward.user).dynamicPaidBnb += reward.amount;
+      appliedTeamRewards.push(reward);
+      const redeem = this.exitIfCapReached(state, reward.user);
+      if (redeem) lpRedeems.push(redeem);
+    }
+
+    const userRedeem = this.exitIfCapReached(state, user);
+    if (userRedeem) lpRedeems.push(userRedeem);
+    const current = state.user(user);
+    const exited = !!current && !current.active && current.exited;
+
+    return {
+      user,
+      staticBnb,
+      teamRewards: appliedTeamRewards,
+      exited,
+      exitRefundBnb: exited ? current?.principalBnb ?? null : null,
+      lpRedeemBnbShare: null,
+      totalActiveLpPrincipalBnb: state.balances.totalActiveLpPrincipalBnb,
+      lpRedeems,
+    };
+  }
+
   /** engine.rs:350 — voluntary exit. Returns [principal, lpShare]. */
   withdrawLp(state: ProtocolState, user: Address): [bigint, bigint] {
     const account = state.ensureUserMut(user);

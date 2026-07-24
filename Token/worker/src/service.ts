@@ -4,7 +4,7 @@
  * Designed to run inside the OperatorDO (which owns state + journal + D1 mirror).
  */
 import { BPS_DENOMINATOR } from "./config";
-import { Engine, EngineError, type TaxSide } from "./engine";
+import { Engine, EngineError, type RewardPayout, type TaxSide } from "./engine";
 import {
   commandsForDeposit,
   commandsForSettlement,
@@ -34,6 +34,11 @@ export interface ChainClient {
 }
 
 export type BeforeCommandSubmit = (id: string, command: OperatorCommand) => Promise<void>;
+
+export interface FixedSettlementPayment {
+  to: string;
+  amount: bigint;
+}
 
 export class OperatorService {
   private planningState: ProtocolState;
@@ -100,6 +105,40 @@ export class OperatorService {
     return commands;
   }
 
+  /**
+   * Backfill one missing settlement from an independently verified list of
+   * historical payouts. The first payment is the user's static reward; the
+   * remaining payments are team rewards in their original order.
+   */
+  settleFixedOnce(
+    user: string,
+    periodKey: string,
+    payments: FixedSettlementPayment[],
+  ): OperatorCommand[] | null {
+    const id = `static:${user}:${periodKey}`;
+    if (this.state.processedSettlements.has(id)) return null;
+    const [staticPayment, ...teamPayments] = payments;
+    if (!staticPayment || staticPayment.to !== user) {
+      throw new ServiceError(`invalid fixed settlement for ${user}: first payment must be static`);
+    }
+
+    const teamRewards: RewardPayout[] = teamPayments.map((payment, index) => ({
+      user: payment.to,
+      amount: payment.amount,
+      generation: index + 1,
+    }));
+    const settlement = this.engine.applyFixedStaticSettlement(
+      this.state,
+      user,
+      staticPayment.amount,
+      teamRewards,
+    );
+    this.state.processedSettlements.add(id);
+    const commands = commandsForSettlement(settlement);
+    this.journal.planBatch(id, commands);
+    return commands;
+  }
+
   /** service.rs:143 — uplines settled before downlines. */
   tickSettlements(periodKey: string): number {
     rebuildInvestedDirectCounts(this.state);
@@ -125,6 +164,7 @@ export class OperatorService {
 
   /** service.rs:171 */
   tickDeflation(day: bigint, slotKey: string): bigint | null {
+    if (this.journal.records.has(`deflation:${slotKey}:0:pull-pair-tokens`)) return null;
     const amount = this.engine.applyDeflation(this.state, day);
     if (amount === 0n) return null;
     this.journal.planBatch(`deflation:${slotKey}`, [
@@ -135,6 +175,7 @@ export class OperatorService {
 
   /** service.rs:197 */
   tickBuyback(slotKey: string): bigint | null {
+    if (this.journal.records.has(`buyback:${slotKey}:0:buyback`)) return null;
     const vaultBefore = this.state.balances.vaultBnb;
     const burned = this.engine.buybackTick(this.state);
     if (burned === 0n) return null;

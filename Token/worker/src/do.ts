@@ -10,7 +10,11 @@ import { bps, defaultProtocolConfig, type ProtocolConfig } from "./config";
 import { Engine } from "./engine";
 import type { OperatorCommand } from "./executor";
 import { loadSettings, type Env, type OperatorSettings } from "./env";
-import { ExecutionJournal, type CommandRecord } from "./journal";
+import {
+  ExecutionJournal,
+  type CommandRecord,
+  type SerializedCommandRecord,
+} from "./journal";
 import {
   classifySystemLog,
   decodeProtocolLog,
@@ -23,6 +27,7 @@ import {
   depositAllocationFromCommand,
   OperatorService,
   type ChainClient,
+  type FixedSettlementPayment,
   type ServiceDatabase,
 } from "./service";
 import {
@@ -41,6 +46,7 @@ const SCAN_INTERVAL_MS = 5_000;
 const MAX_BACKOFF_MS = 30_000;
 const SUBMIT_LOCK_KEY = "lock:submit-pending";
 const SUBMIT_LOCK_TTL_MS = 15 * 60 * 1000;
+const SLOT_CLAIM_TTL_MS = 2 * 60 * 1000;
 const DEFLATION_SYNC_LOOKBACK_BLOCKS = 40_000n;
 const JOURNAL_LEGACY_KEY = "journal";
 const JOURNAL_CHUNK_INDEX_KEY = "journal:chunks";
@@ -51,6 +57,19 @@ interface SubmitLock {
   owner: string;
   reason: string;
   expiresAt: number;
+}
+
+interface SlotClaim {
+  slot: string;
+  status: "pending" | "completed";
+  owner: string;
+  expiresAt: number;
+}
+
+interface ClaimedSlot {
+  key: string;
+  slot: string;
+  owner: string;
 }
 
 /** In-memory event cache backing the synchronous OperatorService.database. Flushed to D1 by the DO. */
@@ -90,6 +109,11 @@ export class OperatorDO extends DurableObject<Env> {
   private disabled = false;
   private instanceName: string | null = null;
   private instanceTokenAddress: string | null = null;
+  private journalChunkKeys: string[] = [];
+  private journalChunkRecordIds = new Map<string, string[]>();
+  private journalChunkByRecord = new Map<string, string>();
+  private journalIndexDirty = false;
+  private journalNeedsLegacyDelete = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -99,10 +123,10 @@ export class OperatorDO extends DurableObject<Env> {
       this.state = await this.loadState();
       this.journal = await this.loadJournal();
       this.backfillLegacyAppliedDepositBatches();
-      this.lastSettlementSlot = (await this.ctx.storage.get<string>("slot:settlement")) ?? null;
-      this.lastDeflationSlot = (await this.ctx.storage.get<string>("slot:deflation")) ?? null;
-      this.lastTaxSweepSlot = (await this.ctx.storage.get<string>("slot:tax-sweep")) ?? null;
-      this.lastBuybackSlot = (await this.ctx.storage.get<string>("slot:buyback")) ?? null;
+      this.lastSettlementSlot = slotValue(await this.ctx.storage.get("slot:settlement"));
+      this.lastDeflationSlot = slotValue(await this.ctx.storage.get("slot:deflation"));
+      this.lastTaxSweepSlot = slotValue(await this.ctx.storage.get("slot:tax-sweep"));
+      this.lastBuybackSlot = slotValue(await this.ctx.storage.get("slot:buyback"));
       this.vaultAddress = (await this.ctx.storage.get<string>("vault")) ?? null;
       this.disabled = (await this.ctx.storage.get<boolean>("disabled")) ?? false;
       this.instanceName = (await this.ctx.storage.get<string>("instance:name")) ?? null;
@@ -123,46 +147,99 @@ export class OperatorDO extends DurableObject<Env> {
     return raw ? deserializeState(raw) : new ProtocolState(this.settings.tokenAddress);
   }
   private async loadJournal(): Promise<ExecutionJournal> {
+    this.journalChunkKeys = [];
+    this.journalChunkRecordIds.clear();
+    this.journalChunkByRecord.clear();
+    this.journalIndexDirty = false;
+    this.journalNeedsLegacyDelete = false;
+
     const chunkKeys = await this.ctx.storage.get<string[]>(JOURNAL_CHUNK_INDEX_KEY);
     if (chunkKeys && chunkKeys.length > 0) {
-      const chunks = await this.ctx.storage.get<{ records: never[] }>(chunkKeys);
-      const records: never[] = [];
-      for (const key of chunkKeys) {
-        const chunk = chunks.get(key);
-        if (!chunk) throw new Error(`missing journal chunk ${key}`);
-        records.push(...chunk.records);
+      const records: SerializedCommandRecord[] = [];
+      this.journalChunkKeys = [...chunkKeys];
+      for (let offset = 0; offset < chunkKeys.length; offset += 128) {
+        const keyBatch = chunkKeys.slice(offset, offset + 128);
+        const chunks = await this.ctx.storage.get<{ records: SerializedCommandRecord[] }>(keyBatch);
+        for (const key of keyBatch) {
+          const chunk = chunks.get(key);
+          if (!chunk) throw new Error(`missing journal chunk ${key}`);
+          const ids = chunk.records.map((record) => record.id);
+          this.journalChunkRecordIds.set(key, ids);
+          for (const id of ids) this.journalChunkByRecord.set(id, key);
+          records.push(...chunk.records);
+        }
       }
       return ExecutionJournal.fromJSON({ records });
     }
-    const raw = await this.ctx.storage.get<{ records: never[] }>(JOURNAL_LEGACY_KEY);
-    return raw ? ExecutionJournal.fromJSON(raw) : new ExecutionJournal();
+    const raw = await this.ctx.storage.get<{ records: SerializedCommandRecord[] }>(JOURNAL_LEGACY_KEY);
+    if (!raw) return new ExecutionJournal();
+
+    const journal = ExecutionJournal.fromJSON(raw);
+    journal.markAllDirty();
+    this.journalNeedsLegacyDelete = true;
+    return journal;
   }
-  private async persist(): Promise<void> {
-    await this.persistJournal();
-    await this.ctx.storage.put("state", serializeState(this.state));
-    await this.ctx.storage.put(
-      "config",
-      JSON.stringify(this.engine.config, (_k, v) => (typeof v === "bigint" ? v.toString() : v)),
-    );
-  }
-  private async persistJournal(): Promise<void> {
-    const serialized = this.journal.toJSON() as { records: unknown[] };
-    const nextKeys: string[] = [];
-    for (let offset = 0; offset < serialized.records.length; offset += JOURNAL_CHUNK_RECORDS) {
-      const index = offset / JOURNAL_CHUNK_RECORDS;
-      const key = `${JOURNAL_CHUNK_PREFIX}${index.toString().padStart(5, "0")}`;
-      nextKeys.push(key);
-      await this.ctx.storage.put(key, {
-        records: serialized.records.slice(offset, offset + JOURNAL_CHUNK_RECORDS),
-      });
+
+  private async persist(completedSlots: ClaimedSlot[] = []): Promise<void> {
+    const dirtyIds = this.journal.dirtyRecordIds();
+    const { writes: journalWrites, indexChanged } = this.prepareJournalWrites(dirtyIds);
+    const writes: Record<string, unknown> = {
+      state: serializeState(this.state),
+      config: JSON.stringify(this.engine.config, (_k, v) => (typeof v === "bigint" ? v.toString() : v)),
+      ...journalWrites,
+    };
+    if (indexChanged) writes[JOURNAL_CHUNK_INDEX_KEY] = [...this.journalChunkKeys];
+    for (const claim of completedSlots) {
+      writes[claim.key] = {
+        slot: claim.slot,
+        status: "completed",
+        owner: claim.owner,
+        expiresAt: 0,
+      } satisfies SlotClaim;
     }
 
-    const oldKeys = (await this.ctx.storage.get<string[]>(JOURNAL_CHUNK_INDEX_KEY)) ?? [];
-    await this.ctx.storage.put(JOURNAL_CHUNK_INDEX_KEY, nextKeys);
+    await this.ctx.storage.transaction(async (txn) => {
+      const entries = Object.entries(writes);
+      for (let offset = 0; offset < entries.length; offset += 128) {
+        await txn.put(Object.fromEntries(entries.slice(offset, offset + 128)));
+      }
+      if (this.journalNeedsLegacyDelete) await txn.delete(JOURNAL_LEGACY_KEY);
+    });
 
-    const staleKeys = oldKeys.filter((key) => !nextKeys.includes(key));
-    if (staleKeys.length > 0) await this.ctx.storage.delete(staleKeys);
-    await this.ctx.storage.delete(JOURNAL_LEGACY_KEY);
+    this.journal.markPersisted(dirtyIds);
+    this.journalIndexDirty = false;
+    this.journalNeedsLegacyDelete = false;
+  }
+
+  private prepareJournalWrites(
+    dirtyIds: string[],
+  ): { writes: Record<string, unknown>; indexChanged: boolean } {
+    const dirtyChunks = new Set<string>();
+    for (const id of dirtyIds) {
+      let key = this.journalChunkByRecord.get(id);
+      if (!key) {
+        key = this.journalChunkKeys[this.journalChunkKeys.length - 1];
+        let ids = key ? this.journalChunkRecordIds.get(key) : undefined;
+        if (!key || !ids || ids.length >= JOURNAL_CHUNK_RECORDS) {
+          key = `${JOURNAL_CHUNK_PREFIX}${this.journalChunkKeys.length.toString().padStart(5, "0")}`;
+          ids = [];
+          this.journalChunkKeys.push(key);
+          this.journalChunkRecordIds.set(key, ids);
+          this.journalIndexDirty = true;
+        }
+        ids.push(id);
+        this.journalChunkByRecord.set(id, key);
+      }
+      dirtyChunks.add(key);
+    }
+
+    const writes: Record<string, unknown> = {};
+    for (const key of dirtyChunks) {
+      const ids = this.journalChunkRecordIds.get(key);
+      if (!ids) throw new Error(`missing journal chunk layout ${key}`);
+      writes[key] = { records: this.journal.serializedRecords(ids) };
+    }
+    return { writes, indexChanged: this.journalIndexDirty };
   }
 
   private async reloadCoreState(): Promise<void> {
@@ -172,17 +249,55 @@ export class OperatorDO extends DurableObject<Env> {
     this.backfillLegacyAppliedDepositBatches();
   }
 
-  private async claimSlot(key: string, slot: string): Promise<boolean> {
+  private async claimSlots(requested: { key: string; slot: string }[]): Promise<ClaimedSlot[]> {
+    const now = Date.now();
     return this.ctx.storage.transaction(async (txn) => {
-      const current = await txn.get<string>(key);
-      if (current === slot) return false;
-      await txn.put(key, slot);
-      return true;
+      const claimed: ClaimedSlot[] = [];
+      for (const request of requested) {
+        const current = await txn.get<string | SlotClaim>(request.key);
+        if (typeof current === "string" && current === request.slot) continue;
+        if (isSlotClaim(current) && current.slot === request.slot) {
+          if (current.status === "completed") continue;
+          if (current.expiresAt > now) continue;
+        }
+        if (isSlotClaim(current) && current.status === "pending" && current.expiresAt > now) continue;
+        const slot =
+          isSlotClaim(current) && current.status === "pending" && current.expiresAt <= now
+            ? current.slot
+            : request.slot;
+        const owner = crypto.randomUUID();
+        const claim: SlotClaim = {
+          slot,
+          status: "pending",
+          owner,
+          expiresAt: now + SLOT_CLAIM_TTL_MS,
+        };
+        await txn.put(request.key, claim);
+        claimed.push({ key: request.key, slot, owner });
+      }
+      return claimed;
+    });
+  }
+
+  private async releaseSlotClaims(claims: ClaimedSlot[]): Promise<void> {
+    if (claims.length === 0) return;
+    await this.ctx.storage.transaction(async (txn) => {
+      for (const claim of claims) {
+        const current = await txn.get<SlotClaim>(claim.key);
+        if (
+          isSlotClaim(current) &&
+          current.status === "pending" &&
+          current.slot === claim.slot &&
+          current.owner === claim.owner
+        ) {
+          await txn.put(claim.key, { ...current, expiresAt: 0 });
+        }
+      }
     });
   }
 
   private async acquireSubmitLock(reason: string): Promise<string | null> {
-    const owner = `${Date.now()}:${Math.random().toString(36).slice(2)}:${reason}`;
+    const owner = `${Date.now()}:${crypto.randomUUID()}:${reason}`;
     const now = Date.now();
     const lock: SubmitLock = { owner, reason, expiresAt: now + SUBMIT_LOCK_TTL_MS };
     return this.ctx.storage.transaction(async (txn) => {
@@ -227,6 +342,7 @@ export class OperatorDO extends DurableObject<Env> {
   }
 
   private async submitPendingLocked(reason: string): Promise<string[]> {
+    if (!this.journal.hasSubmitWork()) return [];
     const lockOwner = await this.acquireSubmitLock(reason);
     if (!lockOwner) {
       console.warn(`submitPending skipped; another runner holds ${SUBMIT_LOCK_KEY} (${reason})`);
@@ -237,6 +353,7 @@ export class OperatorDO extends DurableObject<Env> {
       // submitting so a stale isolate cannot send a command already confirmed by
       // the isolate that acquired the lock first.
       await this.reloadCoreState();
+      if (!this.journal.hasSubmitWork()) return [];
       const service = this.newService(
         new EventCache(this.state.processedEvents),
         async () => this.assertAndRenewSubmitLock(lockOwner),
@@ -321,7 +438,10 @@ export class OperatorDO extends DurableObject<Env> {
           directBnb: executed.directBnb,
         };
         const record = this.journal.records.get(id);
-        if (record?.command.kind === "DepositBatch") record.command = actualCommand;
+        if (record?.command.kind === "DepositBatch") {
+          record.command = actualCommand;
+          this.journal.touch(id);
+        }
         this.engine.applyDeposit(
           this.state,
           depositAllocationFromCommand(actualCommand),
@@ -415,64 +535,63 @@ export class OperatorDO extends DurableObject<Env> {
     if (!(await this.canRunScheduledWork())) return;
     const now = BigInt(Math.floor(Date.now() / 1000));
     const rpc = new BscRpcClient(this.settings.rpcUrl, this.settings.tokenAddress);
-    await this.syncDeflationUsageFromChain(rpc, now).catch((err) => {
+    let canDeflate = false;
+    await this.syncDeflationUsageFromChain(rpc, now).then(() => {
+      canDeflate = true;
+    }).catch((err) => {
       console.error("sync deflation usage failed:", err);
     });
+    let canBuyback = false;
+    try {
+      await this.syncVaultBalance(rpc);
+      canBuyback = true;
+    } catch (err) {
+      console.error("sync vault before buyback failed:", err);
+    }
+
     const cache = new EventCache(this.state.processedEvents);
     const service = this.newService(cache);
 
     const periodsPerDay = BigInt(Math.max(1, this.engine.config.settlementPeriodsPerDay));
     const periodSecs = SECS_PER_DAY / periodsPerDay;
     const settlementSlot = formatSettlementSlot(now, periodSecs, periodsPerDay);
-    if (await this.claimSlot("slot:settlement", settlementSlot)) {
-      service.tickSettlements(settlementSlot);
-      this.lastSettlementSlot = settlementSlot;
-    } else {
-      this.lastSettlementSlot = settlementSlot;
-    }
-
     const deflationSlot = formatHourSlot(now);
-    if (await this.claimSlot("slot:deflation", deflationSlot)) {
-      service.tickDeflation(now / SECS_PER_DAY, deflationSlot);
-      this.lastDeflationSlot = deflationSlot;
-    } else {
-      this.lastDeflationSlot = deflationSlot;
-    }
-
     const taxSweepSlot = formatMinuteSlot(now);
-    let plannedTaxSweep = false;
-    if (await this.claimSlot("slot:tax-sweep", taxSweepSlot)) {
-      plannedTaxSweep = !!service.tickTaxSweep(taxSweepSlot);
-      this.lastTaxSweepSlot = taxSweepSlot;
-    } else {
-      this.lastTaxSweepSlot = taxSweepSlot;
-    }
-
-    if (plannedTaxSweep) {
-      await this.persist();
-      try {
-        await this.submitPendingLocked("tax-sweep");
-      } catch (err) {
-        console.error("tax sweep submit_pending failed:", err);
-      }
-    }
-
     const buybackSlot = formatMinuteSlot(now);
-    if (await this.claimSlot("slot:buyback", buybackSlot)) {
-      let canBuyback = false;
-      try {
-        await this.syncVaultBalance(rpc);
-        canBuyback = true;
-      } catch (err) {
-        console.error("sync vault before buyback failed:", err);
-      }
-      if (canBuyback) service.tickBuyback(buybackSlot);
-      this.lastBuybackSlot = buybackSlot;
-    } else {
-      this.lastBuybackSlot = buybackSlot;
+
+    const requestedSlots = [
+      { key: "slot:settlement", slot: settlementSlot },
+      { key: "slot:tax-sweep", slot: taxSweepSlot },
+    ];
+    if (canDeflate) requestedSlots.push({ key: "slot:deflation", slot: deflationSlot });
+    if (canBuyback) requestedSlots.push({ key: "slot:buyback", slot: buybackSlot });
+    const claims = await this.claimSlots(requestedSlots);
+    const claimsByKey = new Map(claims.map((claim) => [claim.key, claim]));
+
+    try {
+      const settlementClaim = claimsByKey.get("slot:settlement");
+      const deflationClaim = claimsByKey.get("slot:deflation");
+      const taxSweepClaim = claimsByKey.get("slot:tax-sweep");
+      const buybackClaim = claimsByKey.get("slot:buyback");
+      if (settlementClaim) service.tickSettlements(settlementClaim.slot);
+      if (deflationClaim) service.tickDeflation(now / SECS_PER_DAY, deflationClaim.slot);
+      if (taxSweepClaim) service.tickTaxSweep(taxSweepClaim.slot);
+      if (buybackClaim && canBuyback) service.tickBuyback(buybackClaim.slot);
+      await this.persist(claims);
+    } catch (err) {
+      await this.releaseSlotClaims(claims).catch((releaseErr) => {
+        console.error("release scheduled slot claims failed:", releaseErr);
+      });
+      await this.reloadCoreState().catch((reloadErr) => {
+        console.error("reload after scheduled tick failure failed:", reloadErr);
+      });
+      throw err;
     }
 
-    await this.persist();
+    this.lastSettlementSlot = claimsByKey.get("slot:settlement")?.slot ?? this.lastSettlementSlot;
+    this.lastDeflationSlot = claimsByKey.get("slot:deflation")?.slot ?? this.lastDeflationSlot;
+    this.lastTaxSweepSlot = claimsByKey.get("slot:tax-sweep")?.slot ?? this.lastTaxSweepSlot;
+    this.lastBuybackSlot = claimsByKey.get("slot:buyback")?.slot ?? this.lastBuybackSlot;
     try {
       await this.submitPendingLocked("scheduled");
     } catch (err) {
@@ -635,6 +754,7 @@ export class OperatorDO extends DurableObject<Env> {
         record.command.directBnb !== actualCommand.directBnb
       ) {
         record.command = actualCommand;
+        this.journal.touch(record.id);
         changed += 1;
       }
     }
@@ -1109,6 +1229,7 @@ export class OperatorDO extends DurableObject<Env> {
       if (want && !want.has(r.id)) continue;
       r.attempts = 0;
       r.status = { state: "Pending" };
+      this.journal.touch(r.id);
       retried += 1;
     }
     if (retried === 0) return { retried: 0, tx_hashes: [] };
@@ -1121,6 +1242,165 @@ export class OperatorDO extends DurableObject<Env> {
       console.error("retryFailedCommands submit failed:", err);
     }
     return { retried, tx_hashes: txHashes };
+  }
+
+  async backfillMissingSettlementSlot(
+    slot: string,
+    referenceBefore: string,
+    referenceAfter: string,
+    submit = false,
+  ): Promise<{
+    reference_users: number;
+    backfilled_settlements: number;
+    skipped_inactive: number;
+    planned_commands: number;
+    tx_hashes: string[];
+  }> {
+    const targetMs = parseSlotMs(slot);
+    const beforeMs = parseSlotMs(referenceBefore);
+    const afterMs = parseSlotMs(referenceAfter);
+    if (targetMs == null || beforeMs == null || afterMs == null || !(beforeMs < targetMs && targetMs < afterMs)) {
+      throw new Error("invalid settlement slot/reference order");
+    }
+
+    const before = this.fixedSettlementBatches(referenceBefore);
+    const after = this.fixedSettlementBatches(referenceAfter);
+    if (before.size === 0 || after.size === 0) throw new Error("reference settlement slot is empty");
+    if (before.size !== after.size) throw new Error("reference settlement user sets differ");
+
+    for (const [user, payments] of before) {
+      const comparison = after.get(user);
+      if (!comparison || fixedPaymentsFingerprint(payments) !== fixedPaymentsFingerprint(comparison)) {
+        throw new Error(`reference settlement mismatch for ${user}`);
+      }
+    }
+
+    const users = [...before.keys()].sort((left, right) => {
+      const depthDelta = staticReferralDepth(this.state, left) - staticReferralDepth(this.state, right);
+      return depthDelta !== 0 ? depthDelta : left < right ? -1 : left > right ? 1 : 0;
+    });
+    const service = this.newService(new EventCache(this.state.processedEvents));
+    let backfilledSettlements = 0;
+    let skippedInactive = 0;
+    let plannedCommands = 0;
+
+    for (const user of users) {
+      const batchKey = `static:${user}:${slot}`;
+      if (this.state.processedSettlements.has(batchKey)) continue;
+      if (this.journalHasBatch(batchKey)) {
+        throw new Error(`target settlement has journal without state marker: ${batchKey}`);
+      }
+      const account = this.state.user(user);
+      if (!account || !account.active || account.principalBnb === 0n) {
+        skippedInactive += 1;
+        continue;
+      }
+      const commands = service.settleFixedOnce(user, slot, before.get(user)!);
+      if (!commands) continue;
+      backfilledSettlements += 1;
+      plannedCommands += commands.length;
+    }
+
+    if (plannedCommands === 0) {
+      return {
+        reference_users: users.length,
+        backfilled_settlements: 0,
+        skipped_inactive: skippedInactive,
+        planned_commands: 0,
+        tx_hashes: [],
+      };
+    }
+
+    await this.persist();
+    let txHashes: string[] = [];
+    if (submit) {
+      try {
+        txHashes = await this.submitPendingLocked("backfill-missing-settlement");
+      } catch (err) {
+        console.error("backfillMissingSettlementSlot submit failed:", err);
+      }
+    }
+    return {
+      reference_users: users.length,
+      backfilled_settlements: backfilledSettlements,
+      skipped_inactive: skippedInactive,
+      planned_commands: plannedCommands,
+      tx_hashes: txHashes,
+    };
+  }
+
+  async backfillMissingDeflationSlots(
+    slots: string[],
+    submit = false,
+  ): Promise<{ requested: number; planned: number; skipped: string[]; tx_hashes: string[] }> {
+    const uniqueSlots = [...new Set(slots)].sort();
+    if (uniqueSlots.length === 0) throw new Error("at least one deflation slot is required");
+    for (const slot of uniqueSlots) {
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}Z$/.test(slot)) throw new Error(`invalid deflation slot: ${slot}`);
+    }
+
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    const rpc = new BscRpcClient(this.settings.rpcUrl, this.settings.tokenAddress);
+    await this.syncDeflationUsageFromChain(rpc, now);
+    await this.syncPairReserves(rpc);
+    const service = this.newService(new EventCache(this.state.processedEvents));
+    let planned = 0;
+    const skipped: string[] = [];
+    for (const slot of uniqueSlots) {
+      if (this.journalHasBatch(`deflation:${slot}`)) {
+        skipped.push(slot);
+        continue;
+      }
+      if (service.tickDeflation(now / SECS_PER_DAY, slot) == null) {
+        skipped.push(slot);
+        continue;
+      }
+      planned += 1;
+    }
+
+    if (planned === 0) return { requested: uniqueSlots.length, planned: 0, skipped, tx_hashes: [] };
+    await this.persist();
+    let txHashes: string[] = [];
+    if (submit) {
+      try {
+        txHashes = await this.submitPendingLocked("backfill-missing-deflation");
+      } catch (err) {
+        console.error("backfillMissingDeflationSlots submit failed:", err);
+      }
+    }
+    return { requested: uniqueSlots.length, planned, skipped, tx_hashes: txHashes };
+  }
+
+  private fixedSettlementBatches(slot: string): Map<string, FixedSettlementPayment[]> {
+    const records = new Map<string, { index: number; payment: FixedSettlementPayment }[]>();
+    for (const record of this.journal.records.values()) {
+      const parsed = parseStaticJournalRecordId(record.id);
+      if (!parsed || parsed.slot !== slot) continue;
+      if (record.status.state !== "Confirmed") throw new Error(`reference command is not confirmed: ${record.id}`);
+      if (record.command.kind !== "PayRewardTokenByBnbValue") {
+        throw new Error(`reference slot contains non-payment command: ${record.id}`);
+      }
+      let batch = records.get(parsed.user);
+      if (!batch) {
+        batch = [];
+        records.set(parsed.user, batch);
+      }
+      batch.push({
+        index: parsed.index,
+        payment: { to: record.command.to, amount: record.command.amount },
+      });
+    }
+
+    const result = new Map<string, FixedSettlementPayment[]>();
+    for (const [user, batch] of records) {
+      batch.sort((left, right) => left.index - right.index);
+      for (let index = 0; index < batch.length; index += 1) {
+        if (batch[index].index !== index) throw new Error(`reference settlement command gap for ${user}`);
+      }
+      if (batch[0]?.payment.to !== user) throw new Error(`reference settlement has invalid static payment for ${user}`);
+      result.set(user, batch.map((entry) => entry.payment));
+    }
+    return result;
   }
 
   async repairMissingStaticJournals(
@@ -1204,6 +1484,22 @@ interface JournalEventSortKey {
   timestampMs: number | null;
   blockNumber: bigint;
   logIndex: number;
+}
+
+function isSlotClaim(value: unknown): value is SlotClaim {
+  if (value == null || typeof value !== "object") return false;
+  const claim = value as Partial<SlotClaim>;
+  return (
+    typeof claim.slot === "string" &&
+    (claim.status === "pending" || claim.status === "completed") &&
+    typeof claim.owner === "string" &&
+    typeof claim.expiresAt === "number"
+  );
+}
+
+function slotValue(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  return isSlotClaim(value) ? value.slot : null;
 }
 
 interface JournalDisplaySortKey {
@@ -1309,6 +1605,32 @@ function parseSlotMs(slot: string): number | null {
 function parseStaticSettlementId(id: string): { user: string; slot: string } | null {
   const match = /^static:(0x[0-9a-f]{40}):(.+)$/.exec(id);
   return match ? { user: match[1].toLowerCase(), slot: match[2] } : null;
+}
+
+function parseStaticJournalRecordId(
+  id: string,
+): { user: string; slot: string; index: number } | null {
+  const match = /^static:(0x[0-9a-f]{40}):(.+):(\d+):[^:]+$/.exec(id);
+  if (!match) return null;
+  const index = Number(match[3]);
+  if (!Number.isSafeInteger(index)) return null;
+  return { user: match[1].toLowerCase(), slot: match[2], index };
+}
+
+function fixedPaymentsFingerprint(payments: FixedSettlementPayment[]): string {
+  return JSON.stringify(payments, (_key, value) => (typeof value === "bigint" ? value.toString() : value));
+}
+
+function staticReferralDepth(state: ProtocolState, user: string): number {
+  let depth = 0;
+  let cursor = user;
+  while (depth < 1024) {
+    const next = state.user(cursor)?.referrer;
+    if (!next || next === cursor) break;
+    depth += 1;
+    cursor = next;
+  }
+  return depth;
 }
 
 function staticAncestors(state: ProtocolState, user: string, maxDepth: number): string[] {

@@ -8,6 +8,26 @@ const commands: OperatorCommand[] = [
 ];
 
 describe("journal idempotency", () => {
+  it("tracks only records changed since the last durable flush", () => {
+    const journal = new ExecutionJournal();
+    const ids = journal.planBatch("static:0xuser:slot", commands);
+    expect(new Set(journal.dirtyRecordIds())).toEqual(new Set(ids));
+
+    journal.markPersisted(ids);
+    expect(journal.dirtyRecordIds()).toEqual([]);
+
+    journal.markSubmitted(ids[0], "0xaaa");
+    expect(journal.dirtyRecordIds()).toEqual([ids[0]]);
+    expect(journal.serializedRecords(journal.dirtyRecordIds())).toHaveLength(1);
+  });
+
+  it("loads persisted records as clean", () => {
+    const journal = new ExecutionJournal();
+    journal.planBatch("static:0xuser:slot", commands);
+    const restored = ExecutionJournal.fromJSON(journal.toJSON() as never);
+    expect(restored.dirtyRecordIds()).toEqual([]);
+  });
+
   it("batch planning is idempotent; failed commands are manual", () => {
     const journal = new ExecutionJournal();
     const first = journal.planBatch("deposit:tx1:0", commands);

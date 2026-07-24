@@ -273,6 +273,44 @@ export async function handleAdmin(req: Request, ctx: AdminContext): Promise<Resp
       // @ts-expect-error DO RPC
       return json({ signer, ...(await stub.repairMissingStaticJournals(slots, submit)) });
     }
+    case "/api/admin/backfill-missing-settlement": {
+      if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+      const body = (await req.json().catch(() => ({}))) as {
+        slot?: unknown;
+        referenceBefore?: unknown;
+        referenceAfter?: unknown;
+        submit?: unknown;
+      };
+      if (
+        typeof body.slot !== "string" ||
+        typeof body.referenceBefore !== "string" ||
+        typeof body.referenceAfter !== "string"
+      ) {
+        return json({ error: "slot, referenceBefore and referenceAfter are required" }, 400);
+      }
+      // @ts-expect-error DO RPC
+      const result = await stub.backfillMissingSettlementSlot(
+        body.slot,
+        body.referenceBefore,
+        body.referenceAfter,
+        body.submit === true,
+      );
+      return json({ signer, ...result });
+    }
+    case "/api/admin/backfill-missing-deflation": {
+      if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+      const body = (await req.json().catch(() => ({}))) as {
+        slots?: unknown;
+        submit?: unknown;
+      };
+      const slots = Array.isArray(body.slots)
+        ? body.slots.filter((value): value is string => typeof value === "string")
+        : [];
+      if (slots.length === 0) return json({ error: "slots[] is required" }, 400);
+      // @ts-expect-error DO RPC
+      const result = await stub.backfillMissingDeflationSlots(slots, body.submit === true);
+      return json({ signer, ...result });
+    }
     case "/api/admin/stop-operator-instance": {
       const name = url.searchParams.get("name") ?? "";
       if (!name) return json({ error: "name is required" }, 400);

@@ -118,4 +118,5 @@ After user A binds to root and sends `1 BNB` to the token contract:
 
 - A failed `deposit-batch` must leave pair reserves, vault, and payouts unchanged.
 - Re-triggering scan must not create duplicate journal records for the same event.
-- `POST /api/admin/retry-failed` requires owner signature; `?force` is read-only only.
+- `?force` is the intentional operator bypass used by admin views and explicit
+  recovery actions such as `retry-failed` and missing-slot backfills.
