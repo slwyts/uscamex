@@ -233,6 +233,19 @@ export function serializeState(s: ProtocolState): SerializedState {
   };
 }
 
+/**
+ * Compact snapshot for Durable Object storage. The three idempotency sets grow
+ * forever, so OperatorDO persists them separately in bounded chunks.
+ */
+export function serializeStateForStorage(s: ProtocolState): SerializedState {
+  return {
+    ...serializeState(s),
+    processedEvents: [],
+    processedSettlements: [],
+    appliedDepositBatches: [],
+  };
+}
+
 export function deserializeState(d: SerializedState): ProtocolState {
   const s = new ProtocolState(d.root);
   let needsInvestedDirectRebuild = false;

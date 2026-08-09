@@ -35,6 +35,7 @@ import {
   ProtocolState,
   rebuildInvestedDirectCounts,
   serializeState,
+  serializeStateForStorage,
   type SerializedState,
   type UserAccount,
 } from "./state";
@@ -52,6 +53,23 @@ const JOURNAL_LEGACY_KEY = "journal";
 const JOURNAL_CHUNK_INDEX_KEY = "journal:chunks";
 const JOURNAL_CHUNK_PREFIX = "journal:chunk:";
 const JOURNAL_CHUNK_RECORDS = 250;
+const STATE_SET_CHUNK_MAX_BYTES = 96 * 1024;
+
+type StateSetName = "processed-events" | "processed-settlements" | "applied-deposit-batches";
+
+interface StateSetLayout {
+  name: StateSetName;
+  indexKey: string;
+  chunkPrefix: string;
+  chunkKeys: string[];
+  chunkIds: Map<string, string[]>;
+  persistedIds: Set<string>;
+}
+
+interface PreparedStateSetWrites {
+  writes: Record<string, unknown>;
+  commit: () => void;
+}
 
 interface SubmitLock {
   owner: string;
@@ -114,6 +132,7 @@ export class OperatorDO extends DurableObject<Env> {
   private journalChunkByRecord = new Map<string, string>();
   private journalIndexDirty = false;
   private journalNeedsLegacyDelete = false;
+  private stateSetLayouts = new Map<StateSetName, StateSetLayout>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -122,6 +141,7 @@ export class OperatorDO extends DurableObject<Env> {
       this.engine = new Engine(await this.loadConfig());
       this.state = await this.loadState();
       this.journal = await this.loadJournal();
+      await this.loadStateSetChunks();
       this.backfillLegacyAppliedDepositBatches();
       this.lastSettlementSlot = slotValue(await this.ctx.storage.get("slot:settlement"));
       this.lastDeflationSlot = slotValue(await this.ctx.storage.get("slot:deflation"));
@@ -180,13 +200,59 @@ export class OperatorDO extends DurableObject<Env> {
     return journal;
   }
 
+  private async loadStateSetChunks(): Promise<void> {
+    this.stateSetLayouts.clear();
+    for (const name of stateSetNames()) {
+      const indexKey = `state:set:${name}:chunks`;
+      const chunkPrefix = `state:set:${name}:chunk:`;
+      const chunkKeys = (await this.ctx.storage.get<string[]>(indexKey)) ?? [];
+      const layout: StateSetLayout = {
+        name,
+        indexKey,
+        chunkPrefix,
+        chunkKeys: [...chunkKeys],
+        chunkIds: new Map(),
+        persistedIds: new Set(),
+      };
+      const target = this.stateSet(name);
+      for (let offset = 0; offset < chunkKeys.length; offset += 128) {
+        const keyBatch = chunkKeys.slice(offset, offset + 128);
+        const chunks = await this.ctx.storage.get<{ ids: string[] }>(keyBatch);
+        for (const key of keyBatch) {
+          const chunk = chunks.get(key);
+          if (!chunk) throw new Error(`missing state-set chunk ${key}`);
+          const ids = [...chunk.ids];
+          layout.chunkIds.set(key, ids);
+          for (const id of ids) {
+            layout.persistedIds.add(id);
+            target.add(id);
+          }
+        }
+      }
+      this.stateSetLayouts.set(name, layout);
+    }
+  }
+
+  private stateSet(name: StateSetName): Set<string> {
+    switch (name) {
+      case "processed-events":
+        return this.state.processedEvents;
+      case "processed-settlements":
+        return this.state.processedSettlements;
+      case "applied-deposit-batches":
+        return this.state.appliedDepositBatches;
+    }
+  }
+
   private async persist(completedSlots: ClaimedSlot[] = []): Promise<void> {
     const dirtyIds = this.journal.dirtyRecordIds();
     const { writes: journalWrites, indexChanged } = this.prepareJournalWrites(dirtyIds);
+    const stateSetWrites = this.prepareStateSetWrites();
     const writes: Record<string, unknown> = {
-      state: serializeState(this.state),
+      state: serializeStateForStorage(this.state),
       config: JSON.stringify(this.engine.config, (_k, v) => (typeof v === "bigint" ? v.toString() : v)),
       ...journalWrites,
+      ...stateSetWrites.writes,
     };
     if (indexChanged) writes[JOURNAL_CHUNK_INDEX_KEY] = [...this.journalChunkKeys];
     for (const claim of completedSlots) {
@@ -207,6 +273,7 @@ export class OperatorDO extends DurableObject<Env> {
     });
 
     this.journal.markPersisted(dirtyIds);
+    stateSetWrites.commit();
     this.journalIndexDirty = false;
     this.journalNeedsLegacyDelete = false;
   }
@@ -242,10 +309,70 @@ export class OperatorDO extends DurableObject<Env> {
     return { writes, indexChanged: this.journalIndexDirty };
   }
 
+  private prepareStateSetWrites(): PreparedStateSetWrites {
+    const writes: Record<string, unknown> = {};
+    const commits: (() => void)[] = [];
+
+    for (const name of stateSetNames()) {
+      const layout = this.stateSetLayouts.get(name);
+      if (!layout) throw new Error(`missing state-set layout ${name}`);
+      const stateSet = this.stateSet(name);
+      const nextChunkKeys = [...layout.chunkKeys];
+      const nextChunkIds = new Map(layout.chunkIds);
+      const nextPersistedIds = new Set(layout.persistedIds);
+      const dirtyChunkKeys = new Set<string>();
+
+      // Recovery can explicitly forget processed events. Keep the chunks in
+      // sync so a restart cannot bring a forgotten id back into memory.
+      for (const [key, ids] of nextChunkIds) {
+        const retainedIds = ids.filter((id) => stateSet.has(id));
+        if (retainedIds.length === ids.length) continue;
+        nextChunkIds.set(key, retainedIds);
+        for (const id of ids) {
+          if (!stateSet.has(id)) nextPersistedIds.delete(id);
+        }
+        dirtyChunkKeys.add(key);
+      }
+
+      for (const id of stateSet) {
+        if (nextPersistedIds.has(id)) continue;
+        let key = nextChunkKeys[nextChunkKeys.length - 1];
+        let ids = key ? nextChunkIds.get(key) : undefined;
+        if (!key || !ids || serializedStateSetChunkSize([...ids, id]) > STATE_SET_CHUNK_MAX_BYTES) {
+          key = `${layout.chunkPrefix}${nextChunkKeys.length.toString().padStart(5, "0")}`;
+          ids = [];
+          nextChunkKeys.push(key);
+          nextChunkIds.set(key, ids);
+        } else if (!dirtyChunkKeys.has(key)) {
+          ids = [...ids];
+          nextChunkIds.set(key, ids);
+        }
+        ids.push(id);
+        nextPersistedIds.add(id);
+        dirtyChunkKeys.add(key);
+      }
+
+      for (const key of dirtyChunkKeys) {
+        const ids = nextChunkIds.get(key);
+        if (!ids) throw new Error(`missing staged state-set chunk ${key}`);
+        writes[key] = { ids };
+      }
+      if (nextChunkKeys.length !== layout.chunkKeys.length) writes[layout.indexKey] = nextChunkKeys;
+      commits.push(() => {
+        layout.chunkKeys = nextChunkKeys;
+        layout.chunkIds = nextChunkIds;
+        layout.persistedIds = nextPersistedIds;
+      });
+    }
+
+    return { writes, commit: () => commits.forEach((commit) => commit()) };
+  }
+
   private async reloadCoreState(): Promise<void> {
     this.engine = new Engine(await this.loadConfig());
     this.state = await this.loadState();
     this.journal = await this.loadJournal();
+    await this.loadStateSetChunks();
     this.backfillLegacyAppliedDepositBatches();
   }
 
@@ -782,7 +909,7 @@ export class OperatorDO extends DurableObject<Env> {
       rebuilt.balances = this.state.balances;
       rebuilt.pendingTaxSweep = this.state.pendingTaxSweep;
       this.state = rebuilt;
-      await this.ctx.storage.put("state", serializeState(this.state));
+      await this.ctx.storage.put("state", serializeStateForStorage(this.state));
     }
     this.rootInitialized = true;
   }
@@ -1648,6 +1775,14 @@ function staticAncestors(state: ProtocolState, user: string, maxDepth: number): 
 function parseSqliteUtcMs(value: string): number | null {
   const ms = Date.parse(`${value.replace(" ", "T")}Z`);
   return Number.isFinite(ms) ? ms : null;
+}
+
+function stateSetNames(): StateSetName[] {
+  return ["processed-events", "processed-settlements", "applied-deposit-batches"];
+}
+
+function serializedStateSetChunkSize(ids: string[]): number {
+  return new TextEncoder().encode(JSON.stringify({ ids })).byteLength;
 }
 
 // ---- slot formatting (runtime.rs:345-391) ----
