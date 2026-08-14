@@ -6,6 +6,12 @@
  */
 import { DurableObject } from "cloudflare:workers";
 import { BscTransactionClient, type ChainExecutionContext } from "./chain";
+import {
+  applyPendingRewardCancellation,
+  buildPendingRewardCancellationPlan,
+  cancellationSnapshotMaterial,
+  type PendingRewardCancellationPlan,
+} from "./cancellation";
 import { bps, defaultProtocolConfig, type ProtocolConfig } from "./config";
 import { Engine } from "./engine";
 import type { OperatorCommand } from "./executor";
@@ -47,6 +53,9 @@ const SCAN_INTERVAL_MS = 5_000;
 const MAX_BACKOFF_MS = 30_000;
 const SUBMIT_LOCK_KEY = "lock:submit-pending";
 const SUBMIT_LOCK_TTL_MS = 15 * 60 * 1000;
+const SUBMIT_BACKOFF_KEY = "submit:backoff";
+const SUBMIT_BACKOFF_BASE_MS = 5_000;
+const SUBMIT_BACKOFF_MAX_MS = 2 * 60 * 1000;
 const SLOT_CLAIM_TTL_MS = 2 * 60 * 1000;
 const DEFLATION_SYNC_LOOKBACK_BLOCKS = 40_000n;
 const JOURNAL_LEGACY_KEY = "journal";
@@ -75,6 +84,11 @@ interface SubmitLock {
   owner: string;
   reason: string;
   expiresAt: number;
+}
+
+interface SubmitBackoff {
+  failures: number;
+  until: number;
 }
 
 interface SlotClaim {
@@ -175,10 +189,10 @@ export class OperatorDO extends DurableObject<Env> {
 
     const chunkKeys = await this.ctx.storage.get<string[]>(JOURNAL_CHUNK_INDEX_KEY);
     if (chunkKeys && chunkKeys.length > 0) {
-      const records: SerializedCommandRecord[] = [];
+      const journal = new ExecutionJournal();
       this.journalChunkKeys = [...chunkKeys];
-      for (let offset = 0; offset < chunkKeys.length; offset += 128) {
-        const keyBatch = chunkKeys.slice(offset, offset + 128);
+      for (let offset = 0; offset < chunkKeys.length; offset += 16) {
+        const keyBatch = chunkKeys.slice(offset, offset + 16);
         const chunks = await this.ctx.storage.get<{ records: SerializedCommandRecord[] }>(keyBatch);
         for (const key of keyBatch) {
           const chunk = chunks.get(key);
@@ -186,10 +200,10 @@ export class OperatorDO extends DurableObject<Env> {
           const ids = chunk.records.map((record) => record.id);
           this.journalChunkRecordIds.set(key, ids);
           for (const id of ids) this.journalChunkByRecord.set(id, key);
-          records.push(...chunk.records);
+          journal.loadSerializedRecords(chunk.records);
         }
       }
-      return ExecutionJournal.fromJSON({ records });
+      return journal;
     }
     const raw = await this.ctx.storage.get<{ records: SerializedCommandRecord[] }>(JOURNAL_LEGACY_KEY);
     if (!raw) return new ExecutionJournal();
@@ -274,6 +288,24 @@ export class OperatorDO extends DurableObject<Env> {
 
     this.journal.markPersisted(dirtyIds);
     stateSetWrites.commit();
+    this.journalIndexDirty = false;
+    this.journalNeedsLegacyDelete = false;
+  }
+
+  /** Persist command status without rewriting the much larger protocol state. */
+  private async persistJournalOnly(): Promise<void> {
+    const dirtyIds = this.journal.dirtyRecordIds();
+    if (dirtyIds.length === 0 && !this.journalIndexDirty && !this.journalNeedsLegacyDelete) return;
+    const { writes, indexChanged } = this.prepareJournalWrites(dirtyIds);
+    if (indexChanged) writes[JOURNAL_CHUNK_INDEX_KEY] = [...this.journalChunkKeys];
+    await this.ctx.storage.transaction(async (txn) => {
+      const entries = Object.entries(writes);
+      for (let offset = 0; offset < entries.length; offset += 128) {
+        await txn.put(Object.fromEntries(entries.slice(offset, offset + 128)));
+      }
+      if (this.journalNeedsLegacyDelete) await txn.delete(JOURNAL_LEGACY_KEY);
+    });
+    this.journal.markPersisted(dirtyIds);
     this.journalIndexDirty = false;
     this.journalNeedsLegacyDelete = false;
   }
@@ -369,6 +401,9 @@ export class OperatorDO extends DurableObject<Env> {
   }
 
   private async reloadCoreState(): Promise<void> {
+    // Drop the large live journal before loading another copy. Keeping both
+    // 130k-record maps alive at once can exceed the isolate memory limit.
+    this.journal = new ExecutionJournal();
     this.engine = new Engine(await this.loadConfig());
     this.state = await this.loadState();
     this.journal = await this.loadJournal();
@@ -469,7 +504,10 @@ export class OperatorDO extends DurableObject<Env> {
   }
 
   private async submitPendingLocked(reason: string): Promise<string[]> {
+    if (this.env.OPERATOR_MAINTENANCE_PAUSED === "true") return [];
     if (!this.journal.hasSubmitWork()) return [];
+    const backoff = await this.ctx.storage.get<SubmitBackoff>(SUBMIT_BACKOFF_KEY);
+    if (backoff && backoff.until > Date.now()) return [];
     const lockOwner = await this.acquireSubmitLock(reason);
     if (!lockOwner) {
       console.warn(`submitPending skipped; another runner holds ${SUBMIT_LOCK_KEY} (${reason})`);
@@ -480,13 +518,21 @@ export class OperatorDO extends DurableObject<Env> {
       // submitting so a stale isolate cannot send a command already confirmed by
       // the isolate that acquired the lock first.
       await this.reloadCoreState();
+      await this.cancelUnsafePendingDeflations();
       if (!this.journal.hasSubmitWork()) return [];
       const service = this.newService(
         new EventCache(this.state.processedEvents),
         async () => this.assertAndRenewSubmitLock(lockOwner),
       );
       const txHashes = await service.submitPending();
-      await this.persist();
+      await this.persistJournalOnly();
+      if (service.lastSubmitError) {
+        const failures = Math.min((backoff?.failures ?? 0) + 1, 6);
+        const delay = Math.min(SUBMIT_BACKOFF_BASE_MS * (2 ** (failures - 1)), SUBMIT_BACKOFF_MAX_MS);
+        await this.ctx.storage.put(SUBMIT_BACKOFF_KEY, { failures, until: Date.now() + delay } satisfies SubmitBackoff);
+      } else if (txHashes.length !== 0 && backoff) {
+        await this.ctx.storage.delete(SUBMIT_BACKOFF_KEY);
+      }
       return txHashes;
     } finally {
       await this.releaseSubmitLock(lockOwner);
@@ -508,9 +554,51 @@ export class OperatorDO extends DurableObject<Env> {
       this.journal,
       cache,
       chain,
-      () => this.persist(),
+      (_id, command) => command.kind === "DepositBatch" ? this.persist() : this.persistJournalOnly(),
       beforeCommandSubmit,
     );
+  }
+
+  /**
+   * A scheduled command is only permission to act in its own hour. Re-check the
+   * live contract config immediately before submission so disabled, stale, or
+   * over-cap deflation can never be drained from an old backlog.
+   */
+  private async cancelUnsafePendingDeflations(): Promise<void> {
+    const pending = this.journal.pendingCommands().filter(([, command]) => command.kind === "PullPairTokens");
+    if (pending.length === 0) return;
+
+    const rpc = new BscRpcClient(this.settings.rpcUrl, this.settings.tokenAddress);
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    const chainConfig = await rpc.protocolConfig();
+    await this.syncDeflationUsageFromChain(rpc, now);
+    const currentSlot = formatHourSlot(now);
+    let cancelled = 0;
+    let keptCurrent = false;
+    for (const [id, command] of pending) {
+      if (command.kind !== "PullPairTokens") continue;
+      const expectedId = `deflation:${currentSlot}:0:pull-pair-tokens`;
+      const safe =
+        !keptCurrent &&
+        id === expectedId &&
+        chainConfig.config.deflationEnabled &&
+        command.bps === chainConfig.config.deflationHourlyBps &&
+        this.state.deflationUsedBps <= chainConfig.config.deflationDailyCapBps;
+      if (safe) {
+        keptCurrent = true;
+        continue;
+      }
+      if (this.journal.cancelPending(id, "cancelled by submit-time deflation safety check")) cancelled += 1;
+    }
+
+    if (cancelled !== 0) {
+      await Promise.all([
+        this.syncPairReserves(rpc),
+        this.syncBuilderTokenBalance(rpc),
+      ]);
+      this.engine.config = chainConfig.config;
+      await this.persist();
+    }
   }
 
   private chainContext(): ChainExecutionContext {
@@ -540,7 +628,8 @@ export class OperatorDO extends DurableObject<Env> {
   private newChain(): ChainClient {
     const client = this.newTransactionClient();
     return {
-      submit: (command) => client.submit(command),
+      submit: (command, onBroadcast) => client.submit(command, onBroadcast),
+      submittedTransactionStatus: (txHash) => client.submittedTransactionStatus(txHash),
       findConfirmedCommand: (id, command, anchorTxHash) => client.findConfirmedCommand(id, command, anchorTxHash),
       afterConfirmed: async (id, command, txHash) => {
         if (command.kind === "RedeemUserLp") {
@@ -641,6 +730,7 @@ export class OperatorDO extends DurableObject<Env> {
     if (!(await this.canRunScheduledWork())) return;
     let nextDelay = SCAN_INTERVAL_MS;
     try {
+      if (this.env.OPERATOR_MAINTENANCE_PAUSED === "true") return;
       await this.scanOnce();
       this.scanFailures = 0;
     } catch (err) {
@@ -660,6 +750,7 @@ export class OperatorDO extends DurableObject<Env> {
   /** Cron-driven scheduled ticks. Port of runtime.rs run_scheduled_ticks. */
   async runScheduledTicks(): Promise<void> {
     if (!(await this.canRunScheduledWork())) return;
+    if (this.env.OPERATOR_MAINTENANCE_PAUSED === "true") return;
     const now = BigInt(Math.floor(Date.now() / 1000));
     const rpc = new BscRpcClient(this.settings.rpcUrl, this.settings.tokenAddress);
     let canDeflate = false;
@@ -686,10 +777,13 @@ export class OperatorDO extends DurableObject<Env> {
     const taxSweepSlot = formatMinuteSlot(now);
     const buybackSlot = formatMinuteSlot(now);
 
-    const requestedSlots = [
-      { key: "slot:settlement", slot: settlementSlot },
-      { key: "slot:tax-sweep", slot: taxSweepSlot },
-    ];
+    const requestedSlots = [{ key: "slot:tax-sweep", slot: taxSweepSlot }];
+    // Do not accrue another full settlement while a previous settlement still
+    // has unsent work. Missing a slot is safer than compounding unpaid rewards
+    // and exit-cap state against a growing backlog.
+    if (!this.journal.hasUnfinishedStaticSettlements()) {
+      requestedSlots.push({ key: "slot:settlement", slot: settlementSlot });
+    }
     if (canDeflate) requestedSlots.push({ key: "slot:deflation", slot: deflationSlot });
     if (canBuyback) requestedSlots.push({ key: "slot:buyback", slot: buybackSlot });
     const claims = await this.claimSlots(requestedSlots);
@@ -1127,12 +1221,13 @@ export class OperatorDO extends DurableObject<Env> {
       submitted_commands: counts.submitted,
       confirmed_commands: counts.confirmed,
       failed_commands: counts.failed,
+      cancelled_commands: counts.cancelled,
       protocol_config_initialized: true,
     };
   }
 
-  private statusCounts(): { pending: number; submitted: number; confirmed: number; failed: number } {
-    const counts = { pending: 0, submitted: 0, confirmed: 0, failed: 0 };
+  private statusCounts(): { pending: number; submitted: number; confirmed: number; failed: number; cancelled: number } {
+    const counts = { pending: 0, submitted: 0, confirmed: 0, failed: 0, cancelled: 0 };
     for (const r of this.journal.records.values()) {
       counts[r.status.state.toLowerCase() as keyof typeof counts] += 1;
     }
@@ -1291,11 +1386,12 @@ export class OperatorDO extends DurableObject<Env> {
   }
 
   async queryJournalList(limit: number, offset: number, status: string): Promise<unknown> {
-    const eventSortKeys = await this.journalEventSortKeys([...this.journal.records.values()]);
-    const all = [...this.journal.records.values()].sort((a, b) => compareJournalRecordsNewestFirst(a, b, eventSortKeys));
     const mapStatus = (s: import("./journal").CommandStatus) => s.state.toLowerCase();
-    const filtered =
-      status === "all" ? all : all.filter((r) => mapStatus(r.status) === status.toLowerCase());
+    const candidates = status === "all"
+      ? [...this.journal.records.values()]
+      : [...this.journal.records.values()].filter((r) => mapStatus(r.status) === status.toLowerCase());
+    const eventSortKeys = await this.journalEventSortKeys(candidates);
+    const filtered = candidates.sort((a, b) => compareJournalRecordsNewestFirst(a, b, eventSortKeys));
     const counts = this.statusCounts();
     const total = filtered.length;
     const items = filtered.slice(offset, offset + limit).map((r) => ({
@@ -1306,11 +1402,73 @@ export class OperatorDO extends DurableObject<Env> {
       status: mapStatus(r.status),
       tx_hash:
         r.status.state === "Submitted" || r.status.state === "Confirmed" ? r.status.txHash : null,
-      error: r.status.state === "Failed" ? r.status.error : null,
+      error:
+        r.status.state === "Failed"
+          ? r.status.error
+          : r.status.state === "Cancelled"
+            ? r.status.reason
+            : null,
       attempts: r.attempts,
       payload: serializeCommandForApi(r.command),
     }));
     return { total, limit, offset, items, counts };
+  }
+
+  async previewPendingRewardCancellation(): Promise<unknown> {
+    const plan = buildPendingRewardCancellationPlan(this.state, this.journal, this.engine.config);
+    const snapshot = await sha256Hex(cancellationSnapshotMaterial(plan));
+    return pendingRewardCancellationResponse(plan, snapshot);
+  }
+
+  async cancelPendingRewards(snapshot: string): Promise<unknown> {
+    if (this.env.OPERATOR_MAINTENANCE_PAUSED !== "true") {
+      throw new Error("operator maintenance pause is required");
+    }
+    const plan = buildPendingRewardCancellationPlan(this.state, this.journal, this.engine.config);
+    const currentSnapshot = await sha256Hex(cancellationSnapshotMaterial(plan));
+    if (!snapshot || snapshot !== currentSnapshot) {
+      throw new Error(`pending reward snapshot changed; expected ${currentSnapshot}`);
+    }
+    const applied = applyPendingRewardCancellation(
+      this.state,
+      this.journal,
+      this.engine.config,
+      plan,
+      currentSnapshot,
+    );
+    await this.persist();
+    await this.ctx.storage.delete(SUBMIT_LOCK_KEY);
+    return {
+      ...pendingRewardCancellationResponse(plan, currentSnapshot),
+      cancelled: plan.rewardRecordIds.length,
+      cancelled_dependent_redeems: plan.dependentRedeemRecordIds.length,
+      reopened_users: applied.reopenedUsers,
+      replacement_redeems: applied.replacementRedeems,
+    };
+  }
+
+  async confirmPendingTaxSweepFromTransaction(id: string, txHash: string): Promise<unknown> {
+    if (this.env.OPERATOR_MAINTENANCE_PAUSED !== "true") {
+      throw new Error("operator maintenance pause is required");
+    }
+    const record = this.journal.records.get(id);
+    if (!record || record.command.kind !== "SweepTaxToBnb") {
+      throw new Error("pending tax sweep command not found");
+    }
+    if (record.status.state !== "Pending" && record.status.state !== "Submitted") {
+      throw new Error(`tax sweep is not pending: ${record.status.state}`);
+    }
+    const client = this.newTransactionClient();
+    if (!(await client.verifySweepTaxTransaction(txHash, record.command))) {
+      throw new Error("transaction does not match the pending tax sweep");
+    }
+    this.journal.markConfirmed(id, txHash.toLowerCase());
+    await this.persistJournalOnly();
+    await Promise.all([
+      this.ctx.storage.delete(SUBMIT_LOCK_KEY),
+      this.ctx.storage.delete(SUBMIT_BACKOFF_KEY),
+    ]);
+    return { id, tx_hash: txHash.toLowerCase(), status: "confirmed" };
   }
 
   private async journalEventSortKeys(records: CommandRecord[]): Promise<Map<string, JournalEventSortKey>> {
@@ -1746,6 +1904,31 @@ function parseStaticJournalRecordId(
 
 function fixedPaymentsFingerprint(payments: FixedSettlementPayment[]): string {
   return JSON.stringify(payments, (_key, value) => (typeof value === "bigint" ? value.toString() : value));
+}
+
+function pendingRewardCancellationResponse(
+  plan: PendingRewardCancellationPlan,
+  snapshot: string,
+): Record<string, unknown> {
+  return {
+    snapshot,
+    pending_rewards: plan.rewardRecordIds.length,
+    dependent_redeems: plan.dependentRedeemRecordIds.length,
+    settlement_batches: plan.settlementBatches.length,
+    settlement_slots: plan.settlementSlots,
+    affected_users: plan.affectedUsers.length,
+    reward_bnb: plan.rewardBnb.toString(),
+    static_rollback_bnb: plan.staticRollbackBnb.toString(),
+    dynamic_rollback_bnb: plan.dynamicRollbackBnb.toString(),
+    remaining_pending_by_kind: plan.remainingPendingByKind,
+    blockers: plan.blockers,
+    warnings: plan.warnings,
+  };
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function staticReferralDepth(state: ProtocolState, user: string): number {

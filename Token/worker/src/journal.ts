@@ -14,7 +14,8 @@ export type CommandStatus =
   | { state: "Pending" }
   | { state: "Submitted"; txHash: string }
   | { state: "Confirmed"; txHash: string }
-  | { state: "Failed"; error: string };
+  | { state: "Failed"; error: string }
+  | { state: "Cancelled"; reason: string };
 
 export interface CommandRecord {
   id: string;
@@ -22,6 +23,8 @@ export interface CommandRecord {
   attempts: number;
   status: CommandStatus;
   order?: CommandOrder;
+  /** Monotonic journal insertion order. Unlike command ids, this preserves time order. */
+  sequence: number;
 }
 
 export interface SerializedCommandRecord {
@@ -30,6 +33,7 @@ export interface SerializedCommandRecord {
   attempts: number;
   status: CommandStatus;
   order?: SerializedCommandOrder;
+  sequence?: number;
 }
 
 export interface CommandOrder {
@@ -54,6 +58,7 @@ export class JournalError extends Error {
 export class ExecutionJournal {
   records = new Map<string, CommandRecord>();
   private dirtyIds = new Set<string>();
+  private nextSequence = 0;
 
   recordsInExecutionOrder(): CommandRecord[] {
     return [...this.records.values()].sort(compareRecords);
@@ -70,6 +75,7 @@ export class ExecutionJournal {
           attempts: 0,
           status: { state: "Pending" },
           order: order ? { ...order, sequence: index } : undefined,
+          sequence: this.nextSequence++,
         });
         this.dirtyIds.add(id);
       }
@@ -81,6 +87,13 @@ export class ExecutionJournal {
     return this.recordsInExecutionOrder()
       .filter((r) => r.status.state === "Pending")
       .map((r) => [r.id, r.command]);
+  }
+
+  submittedCommands(): [string, OperatorCommand, string][] {
+    return this.recordsInExecutionOrder()
+      .filter((record): record is CommandRecord & { status: Extract<CommandStatus, { state: "Submitted" }> } =>
+        record.status.state === "Submitted")
+      .map((record) => [record.id, record.command, record.status.txHash]);
   }
 
   /**
@@ -161,6 +174,15 @@ export class ExecutionJournal {
     this.dirtyIds.add(id);
   }
 
+  cancelPending(id: string, reason: string): boolean {
+    const record = this.records.get(id);
+    if (!record) throw new JournalError("MissingCommand");
+    if (record.status.state !== "Pending") return false;
+    record.status = { state: "Cancelled", reason };
+    this.dirtyIds.add(id);
+    return true;
+  }
+
   /** Retry all Failed commands that haven't exceeded MAX_ATTEMPTS. */
   retryFailed(): number {
     let count = 0;
@@ -199,6 +221,18 @@ export class ExecutionJournal {
     return false;
   }
 
+  hasUnfinishedStaticSettlements(): boolean {
+    for (const record of this.records.values()) {
+      if (!record.id.startsWith("static:")) continue;
+      if (
+        record.status.state === "Pending" ||
+        record.status.state === "Submitted" ||
+        record.status.state === "Failed"
+      ) return true;
+    }
+    return false;
+  }
+
   confirmedCount(): number {
     return this.recordsInExecutionOrder().filter((r) => r.status.state === "Confirmed").length;
   }
@@ -215,16 +249,23 @@ export class ExecutionJournal {
     records: SerializedCommandRecord[];
   }): ExecutionJournal {
     const journal = new ExecutionJournal();
-    for (const r of data.records) {
-      journal.records.set(r.id, {
+    journal.loadSerializedRecords(data.records);
+    return journal;
+  }
+
+  loadSerializedRecords(records: SerializedCommandRecord[]): void {
+    for (const r of records) {
+      const sequence = r.sequence ?? this.nextSequence;
+      this.records.set(r.id, {
         id: r.id,
         command: deserializeCommand(r.command),
         attempts: r.attempts,
         status: r.status,
         order: r.order ? deserializeOrder(r.order) : undefined,
+        sequence,
       });
+      this.nextSequence = Math.max(this.nextSequence, sequence + 1);
     }
-    return journal;
   }
 
   serializedRecords(ids: Iterable<string>): SerializedCommandRecord[] {
@@ -251,6 +292,7 @@ function serializeRecord(record: CommandRecord): SerializedCommandRecord {
     attempts: record.attempts,
     status: record.status,
     order: record.order ? serializeOrder(record.order) : undefined,
+    sequence: record.sequence,
   };
 }
 
@@ -271,11 +313,7 @@ function deserializeOrder(order: SerializedCommandOrder): CommandOrder {
 }
 
 function compareRecords(a: CommandRecord, b: CommandRecord): number {
-  if (a.order && b.order) {
-    if (a.order.blockNumber !== b.order.blockNumber) return a.order.blockNumber < b.order.blockNumber ? -1 : 1;
-    if (a.order.logIndex !== b.order.logIndex) return a.order.logIndex - b.order.logIndex;
-    if (a.order.sequence !== b.order.sequence) return a.order.sequence - b.order.sequence;
-  }
+  if (a.sequence !== b.sequence) return a.sequence - b.sequence;
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
@@ -299,7 +337,12 @@ function isTransientSubmitError(error: string): boolean {
     msg.includes("already known") ||
     msg.includes("known transaction") ||
     msg.includes("receiptfailed") ||
-    msg.includes("receipttimeout")
+    msg.includes("receipttimeout") ||
+    msg.includes("http 429") ||
+    msg.includes("rate limit") ||
+    msg.includes("too many requests") ||
+    msg.includes("network") ||
+    msg.includes("fetch failed")
   );
 }
 

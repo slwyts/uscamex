@@ -31,6 +31,10 @@ export interface Env {
   RPC_RESERVES_TTL_SECS: string;
   RPC_VAULT_BALANCE_TTL_SECS: string;
 
+  // Emergency maintenance guard. When true, the DO keeps its alarm alive but
+  // does not scan, plan, or submit any chain command.
+  OPERATOR_MAINTENANCE_PAUSED?: string;
+
   // AMM swap fee in bps-of-input kept after fee (Uniswap V2 numerator).
   // PancakeSwap V2 = 9975 (0.25%); QuickSwap/SushiSwap V2 = 9970 (0.30%).
   // Optional; the operator also tries to auto-detect from the pair when possible.

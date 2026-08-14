@@ -241,6 +241,41 @@ export async function handleAdmin(req: Request, ctx: AdminContext): Promise<Resp
       // @ts-expect-error DO RPC
       return json({ signer, ...(await stub.queryJournalList(limit, offset, status)) });
     }
+    case "/api/admin/pending-reward-cancellation": {
+      if (req.method === "GET") {
+        // @ts-expect-error DO RPC
+        return json({ signer, ...(await stub.previewPendingRewardCancellation()) });
+      }
+      if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+      if (signer === "bypass") return json({ error: "owner signature required to cancel rewards" }, 403);
+      const body = (await req.json().catch(() => ({}))) as {
+        snapshot?: unknown;
+        confirm?: unknown;
+      };
+      if (body.confirm !== "CANCEL_PENDING_REWARDS" || typeof body.snapshot !== "string") {
+        return json({ error: "snapshot and explicit cancellation confirmation are required" }, 400);
+      }
+      // @ts-expect-error DO RPC
+      return json({ signer, ...(await stub.cancelPendingRewards(body.snapshot)) });
+    }
+    case "/api/admin/confirm-pending-tax-sweep": {
+      if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+      if (signer === "bypass") return json({ error: "owner signature required to confirm a tax sweep" }, 403);
+      const body = (await req.json().catch(() => ({}))) as {
+        id?: unknown;
+        txHash?: unknown;
+        confirm?: unknown;
+      };
+      if (
+        body.confirm !== "CONFIRM_EXECUTED_TAX_SWEEP" ||
+        typeof body.id !== "string" ||
+        typeof body.txHash !== "string"
+      ) {
+        return json({ error: "id, txHash and explicit confirmation are required" }, 400);
+      }
+      // @ts-expect-error DO RPC
+      return json({ signer, ...(await stub.confirmPendingTaxSweepFromTransaction(body.id, body.txHash)) });
+    }
     case "/api/admin/retry-failed": {
       if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
       let ids: string[] | undefined;

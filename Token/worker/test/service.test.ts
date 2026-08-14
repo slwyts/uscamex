@@ -54,6 +54,86 @@ function serviceWith(
 }
 
 describe("service: submit reconciliation", () => {
+  it("persists the signed transaction hash before waiting for its receipt", async () => {
+    const journal = new ExecutionJournal();
+    const [id] = journal.planBatch("static:0xuser:slot", [
+      { kind: "PayRewardTokenByBnbValue", to: "alice", amount: 1n },
+    ]);
+    const persistedStates: string[] = [];
+    const service = new OperatorService(
+      new Engine(defaultProtocolConfig()),
+      new ProtocolState("root"),
+      journal,
+      { containsEvent: () => false, insertEvent: () => undefined },
+      {
+        async submit(_command, onBroadcast) {
+          await onBroadcast?.(TX_HASH);
+          expect(journal.records.get(id)?.status).toEqual({ state: "Submitted", txHash: TX_HASH });
+          return TX_HASH;
+        },
+      },
+      async () => { persistedStates.push(journal.records.get(id)!.status.state); },
+    );
+
+    await expect(service.submitPending()).resolves.toEqual([TX_HASH]);
+    expect(persistedStates).toEqual(["Submitted", "Confirmed"]);
+  });
+
+  it("reconciles a broadcast transaction after an interrupted receipt wait without resubmitting", async () => {
+    const journal = new ExecutionJournal();
+    const [id] = journal.planBatch("static:0xuser:slot", [
+      { kind: "PayRewardTokenByBnbValue", to: "alice", amount: 1n },
+    ]);
+    let submits = 0;
+    const interrupted = serviceWith({
+      async submit(_command, onBroadcast) {
+        submits += 1;
+        await onBroadcast?.(TX_HASH);
+        throw new Error("receipt connection interrupted");
+      },
+    }, journal);
+
+    await expect(interrupted.submitPending()).resolves.toEqual([]);
+    expect(journal.records.get(id)?.status).toEqual({ state: "Submitted", txHash: TX_HASH });
+
+    const recovered = serviceWith({
+      async submittedTransactionStatus() { return "confirmed"; },
+      async submit() { submits += 1; throw new Error("must not resubmit"); },
+    }, journal);
+    await expect(recovered.submitPending()).resolves.toEqual([TX_HASH]);
+    expect(submits).toBe(1);
+    expect(journal.records.get(id)?.status).toEqual({ state: "Confirmed", txHash: TX_HASH });
+  });
+
+  it("stops the drain after the first submission error and persists that status", async () => {
+    const journal = new ExecutionJournal();
+    const ids = journal.planBatch("static:0xuser:slot", [
+      { kind: "PayRewardTokenByBnbValue", to: "alice", amount: 1n },
+      { kind: "PayRewardTokenByBnbValue", to: "bob", amount: 2n },
+    ]);
+    const submitted: string[] = [];
+    const persisted: string[] = [];
+    const service = new OperatorService(
+      new Engine(defaultProtocolConfig()),
+      new ProtocolState("root"),
+      journal,
+      { containsEvent: () => false, insertEvent: () => undefined },
+      {
+        async submit(command) {
+          if (command.kind === "PayRewardTokenByBnbValue") submitted.push(command.to);
+          throw new Error("http 429");
+        },
+      },
+      async (id) => { persisted.push(id); },
+    );
+
+    await expect(service.submitPending()).resolves.toEqual([]);
+    expect(submitted).toEqual(["alice"]);
+    expect(persisted).toEqual([ids[0]]);
+    expect(journal.records.get(ids[0])?.status.state).toBe("Pending");
+    expect(journal.records.get(ids[1])?.attempts).toBe(0);
+  });
+
   it("reclaims an already-executed retryable DepositBatch as confirmed without resubmitting", async () => {
     const journal = new ExecutionJournal();
     const [id] = journal.planBatch(`deposit:0x${"1".repeat(64)}:46`, [depositBatch]);

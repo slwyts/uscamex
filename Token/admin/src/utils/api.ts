@@ -202,7 +202,7 @@ export interface PositionsResponse {
 export interface JournalEntry {
   id: string;
   kind: string;
-  status: "pending" | "submitted" | "confirmed" | "failed";
+  status: "pending" | "submitted" | "confirmed" | "failed" | "cancelled";
   tx_hash: string | null;
   error: string | null;
   attempts: number;
@@ -215,7 +215,7 @@ export interface JournalListResponse {
   limit: number;
   offset: number;
   items: JournalEntry[];
-  counts: { pending: number; submitted: number; confirmed: number; failed: number };
+  counts: { pending: number; submitted: number; confirmed: number; failed: number; cancelled: number };
 }
 
 export interface ConfigHistoryItem {
@@ -278,6 +278,7 @@ export interface GlobalStats {
   submitted_commands: number;
   confirmed_commands: number;
   failed_commands: number;
+  cancelled_commands: number;
   protocol_config_initialized: boolean;
 }
 

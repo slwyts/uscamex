@@ -28,6 +28,10 @@ const DEPOSIT_BATCH_EXECUTED_TOPIC = keccak256(
   toHex("DepositBatchExecuted(address,uint256,uint256,uint256,uint256,uint256,address,uint256,uint256)"),
 );
 const LP_REDEEMED_TOPIC = keccak256(toHex("LpRedeemed(address,uint256,uint256,uint256)"));
+const TRANSFER_TOPIC = keccak256(toHex("Transfer(address,address,uint256)"));
+
+export type OnTransactionBroadcast = (txHash: string) => Promise<void>;
+export type SubmittedTransactionStatus = "confirmed" | "failed" | "pending";
 
 export interface ChainExecutionContext {
   tokenAddress: string;
@@ -66,6 +70,18 @@ function normalizeAddress(value: string): Hex {
 
 function addressTopic(value: string): Hex {
   return `0x${normalizeAddress(value).slice(2).padStart(64, "0")}` as Hex;
+}
+
+function transferLogMatches(log: RpcLogJson, from: string, to: string, amount: bigint): boolean {
+  if (log.address && normalizeAddress(log.address) !== normalizeAddress(from)) return false;
+  if (log.topics[0]?.toLowerCase() !== TRANSFER_TOPIC) return false;
+  if (log.topics[1]?.toLowerCase() !== addressTopic(from)) return false;
+  if (log.topics[2]?.toLowerCase() !== addressTopic(to)) return false;
+  try {
+    return BigInt(log.data) === amount;
+  } catch {
+    return false;
+  }
 }
 
 function u256ToU128(value: bigint): bigint {
@@ -207,10 +223,17 @@ interface RpcReceiptJson {
 }
 
 interface RpcLogJson {
+  address?: string;
   transactionHash: string;
   topics: string[];
   data: string;
   removed?: boolean;
+}
+
+interface RpcTransactionJson {
+  from: string;
+  to: string | null;
+  input: string;
 }
 
 export interface DepositBatchExecution {
@@ -459,7 +482,7 @@ export class BscTransactionClient {
     }
   }
 
-  private async submitEvmCall(call: EvmCall): Promise<string> {
+  private async submitEvmCall(call: EvmCall, onBroadcast?: OnTransactionBroadcast): Promise<string> {
     const target = normalizeAddress(call.target);
     const [nonceHex, gasPriceHex, gasLimit] = await Promise.all([
       this.rpc<string>("eth_getTransactionCount", [this.walletAddress(), "pending"]),
@@ -484,11 +507,13 @@ export class BscTransactionClient {
       const signedTxHash = keccak256(signed);
       try {
         const txHash = await this.rpc<string>("eth_sendRawTransaction", [signed]);
+        await onBroadcast?.(txHash);
         await this.waitForConfirmedReceipt(txHash, BigInt(Math.max(1, this.confirmations)));
         return txHash;
       } catch (err) {
         lastErr = err;
         if (isAlreadyKnown(err)) {
+          await onBroadcast?.(signedTxHash);
           await this.waitForConfirmedReceipt(signedTxHash, BigInt(Math.max(1, this.confirmations)));
           return signedTxHash;
         }
@@ -498,6 +523,40 @@ export class BscTransactionClient {
     }
 
     throw lastErr instanceof Error ? lastErr : new ChainError(errorMessage(lastErr));
+  }
+
+  async submittedTransactionStatus(txHash: string): Promise<SubmittedTransactionStatus> {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) throw new ChainError("InvalidTransactionHash");
+    const receipt = await this.rpc<RpcReceiptJson | null>("eth_getTransactionReceipt", [txHash]).catch(() => null);
+    if (!receipt) return "pending";
+    return receipt.status === "0x1" ? "confirmed" : "failed";
+  }
+
+  async verifySweepTaxTransaction(
+    txHash: string,
+    command: Extract<OperatorCommand, { kind: "SweepTaxToBnb" }>,
+  ): Promise<boolean> {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) return false;
+    const [tx, receipt, pair] = await Promise.all([
+      this.rpc<RpcTransactionJson | null>("eth_getTransactionByHash", [txHash]).catch(() => null),
+      this.rpc<(RpcReceiptJson & { logs?: RpcLogJson[] }) | null>("eth_getTransactionReceipt", [txHash]).catch(() => null),
+      this.pairAddress(),
+    ]);
+    if (!tx || !receipt || receipt.status !== "0x1") return false;
+    if (normalizeAddress(tx.from) !== this.walletAddress() || !tx.to || normalizeAddress(tx.to) !== this.token) return false;
+    if (!tx.input.toLowerCase().startsWith(toFunctionSelector("function operatorBatchCall(address[] targets, uint256[] values, bytes[] datas)"))) return false;
+
+    const sellAmount = command.taxTokenAmount - command.builderTokenAmount - command.burnTokenAmount;
+    if (sellAmount < 0n) return false;
+    const logs = receipt.logs ?? [];
+    if (sellAmount !== 0n && !logs.some((log) => transferLogMatches(log, this.token, pair, sellAmount))) {
+      return false;
+    }
+    if (command.burnTokenAmount !== 0n && !logs.some((log) =>
+      transferLogMatches(log, this.token, ZERO_ADDRESS, command.burnTokenAmount))) {
+      return false;
+    }
+    return sellAmount !== 0n || command.burnTokenAmount !== 0n;
   }
 
   private async waitForConfirmedReceipt(txHash: string, confirmations: bigint): Promise<void> {
@@ -592,7 +651,7 @@ export class BscTransactionClient {
     directReferrer: string | null;
     directBnb: bigint;
     nodePayouts: { to: string; amount: bigint }[];
-  }): Promise<string> {
+  }, onBroadcast?: OnTransactionBroadcast): Promise<string> {
     await this.detectFee();
     const reserves = await this.pairReserves();
     const pair = await this.pairAddress();
@@ -675,7 +734,7 @@ export class BscTransactionClient {
         },
       ],
     });
-    return this.submitEvmCall({ target: this.token, value: 0n, data });
+    return this.submitEvmCall({ target: this.token, value: 0n, data }, onBroadcast);
   }
 
   async findConfirmedCommand(
@@ -896,7 +955,7 @@ export class BscTransactionClient {
     return true;
   }
 
-  private async submitBuyback(bnbAmount: bigint): Promise<string> {
+  private async submitBuyback(bnbAmount: bigint, onBroadcast?: OnTransactionBroadcast): Promise<string> {
     await this.detectFee();
     const reserves = await this.pairReserves();
     const tokenOut = v2AmountOut(bnbAmount, reserves.bnbReserve, reserves.tokenReserve, this.feeBps);
@@ -913,10 +972,14 @@ export class BscTransactionClient {
       functionName: "execute",
       args: [this.router, bnbAmount, swap],
     });
-    return this.submitOperatorCall(this.vault, 0n, vaultExecute);
+    return this.submitEvmCall({
+      target: this.token,
+      value: 0n,
+      data: this.encodeOperatorCall(this.vault, 0n, vaultExecute),
+    }, onBroadcast);
   }
 
-  private async submitRewardToken(to: string, amount: bigint): Promise<string> {
+  private async submitRewardToken(to: string, amount: bigint, onBroadcast?: OnTransactionBroadcast): Promise<string> {
     const reserves = await this.pairReserves();
     const tokenAmount = quoteTokenAmount(amount, reserves);
     const transfer = encodeFunctionData({
@@ -924,14 +987,22 @@ export class BscTransactionClient {
       functionName: "transfer",
       args: [normalizeAddress(to), tokenAmount],
     });
-    return this.submitOperatorCall(this.token, 0n, transfer);
+    return this.submitEvmCall({
+      target: this.token,
+      value: 0n,
+      data: this.encodeOperatorCall(this.token, 0n, transfer),
+    }, onBroadcast);
   }
 
-  private async submitBurnTokenByBnbValue(amount: bigint): Promise<string> {
+  private async submitBurnTokenByBnbValue(amount: bigint, onBroadcast?: OnTransactionBroadcast): Promise<string> {
     const reserves = await this.pairReserves();
     const burnAmount = quoteTokenAmount(amount, reserves);
     const burn = encodeFunctionData({ abi: [ABI.burn], functionName: "burn", args: [burnAmount] });
-    return this.submitOperatorCall(this.token, 0n, burn);
+    return this.submitEvmCall({
+      target: this.token,
+      value: 0n,
+      data: this.encodeOperatorCall(this.token, 0n, burn),
+    }, onBroadcast);
   }
 
   private async submitSweepTaxToBnb(
@@ -940,6 +1011,7 @@ export class BscTransactionClient {
     burnTokenAmount: bigint,
     ownerBnbBpsOfSold: number,
     vaultBnbBpsOfSold: number,
+    onBroadcast?: OnTransactionBroadcast,
   ): Promise<string> {
     if (
       taxTokenAmount === 0n ||
@@ -1004,10 +1076,14 @@ export class BscTransactionClient {
       target: this.token,
       value: 0n,
       data: this.encodeOperatorBatchCall(targets, values, datas),
-    });
+    }, onBroadcast);
   }
 
-  private async submitRedeemUserLp(user: string, lpTokenAmount: bigint): Promise<string> {
+  private async submitRedeemUserLp(
+    user: string,
+    lpTokenAmount: bigint,
+    onBroadcast?: OnTransactionBroadcast,
+  ): Promise<string> {
     if (lpTokenAmount === 0n) throw new ChainError("InvalidAmount");
     const pair = await this.pairAddress();
     const lpCustody = await this.erc20BalanceOf(pair, this.token);
@@ -1031,7 +1107,7 @@ export class BscTransactionClient {
         this.deadline(),
       ],
     });
-    return this.submitEvmCall({ target: this.token, value: 0n, data: redeem });
+    return this.submitEvmCall({ target: this.token, value: 0n, data: redeem }, onBroadcast);
   }
 
   private encodeCommandCall(command: OperatorCommand): EvmCall {
@@ -1056,20 +1132,20 @@ export class BscTransactionClient {
   }
 
   /** chain.rs:715 dispatch. */
-  async submit(command: OperatorCommand): Promise<string> {
+  async submit(command: OperatorCommand, onBroadcast?: OnTransactionBroadcast): Promise<string> {
     switch (command.kind) {
       case "AddLiquidity":
         return this.submitAddLiquidity(command.bnbAmount, command.tokenValueBnb);
       case "BuilderBuy":
         return (await this.submitPlatformTokenBuy(command.bnbAmount))[0];
       case "Buyback":
-        return this.submitBuyback(command.bnbAmount);
+        return this.submitBuyback(command.bnbAmount, onBroadcast);
       case "PayRewardTokenByBnbValue":
-        return this.submitRewardToken(command.to, command.amount);
+        return this.submitRewardToken(command.to, command.amount, onBroadcast);
       case "BurnTokenByBnbValue":
-        return this.submitBurnTokenByBnbValue(command.amount);
+        return this.submitBurnTokenByBnbValue(command.amount, onBroadcast);
       case "RedeemUserLp":
-        return this.submitRedeemUserLp(command.user, command.lpTokenAmount);
+        return this.submitRedeemUserLp(command.user, command.lpTokenAmount, onBroadcast);
       case "SweepTaxToBnb":
         return this.submitSweepTaxToBnb(
           command.taxTokenAmount,
@@ -1077,13 +1153,14 @@ export class BscTransactionClient {
           command.burnTokenAmount,
           command.ownerBnbBpsOfSold,
           command.vaultBnbBpsOfSold,
+          onBroadcast,
         );
       case "ExitPosition":
         throw new ChainError("legacy exit-position is replaced by separate burn/refund commands");
       case "TransferBnb":
       case "CreditVault":
       case "PullPairTokens":
-        return this.submitEvmCall(this.encodeCommandCall(command));
+        return this.submitEvmCall(this.encodeCommandCall(command), onBroadcast);
       case "DepositBatch":
         return this.submitDepositBatch({
           lpBnb: command.lpBnb,
@@ -1095,7 +1172,7 @@ export class BscTransactionClient {
           directReferrer: command.directReferrer,
           directBnb: command.directBnb,
           nodePayouts: command.nodePayouts,
-        });
+        }, onBroadcast);
     }
   }
 }

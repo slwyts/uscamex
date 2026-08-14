@@ -116,6 +116,33 @@ describe("journal idempotency", () => {
     expect(journal.pendingCommands().map(([id]) => id)).toEqual([firstId, secondId]);
   });
 
+  it("keeps scheduled commands in insertion order instead of lexical id order", () => {
+    const journal = new ExecutionJournal();
+    const first = journal.planBatch("static:0xffff:first", [commands[0]])[0];
+    const second = journal.planBatch("deflation:second", [commands[1]])[0];
+    expect(first > second).toBe(true);
+    expect(journal.pendingCommands().map(([id]) => id)).toEqual([first, second]);
+  });
+
+  it("keeps cancelled records terminal across serialization", () => {
+    const journal = new ExecutionJournal();
+    const [id] = journal.planBatch("static:0xuser:slot", [commands[0]]);
+    expect(journal.cancelPending(id, "operator cancellation")).toBe(true);
+    const restored = ExecutionJournal.fromJSON(journal.toJSON() as never);
+    expect(restored.records.get(id)?.status).toEqual({ state: "Cancelled", reason: "operator cancellation" });
+    expect(restored.hasSubmitWork()).toBe(false);
+    expect(restored.hasUnfinishedStaticSettlements()).toBe(false);
+  });
+
+  it("blocks a new settlement slot until the prior static batch is terminal", () => {
+    const journal = new ExecutionJournal();
+    const [id] = journal.planBatch("static:0xuser:slot", [commands[0]]);
+    expect(journal.hasUnfinishedStaticSettlements()).toBe(true);
+    journal.markSubmitted(id, "0xabc");
+    journal.markConfirmed(id);
+    expect(journal.hasUnfinishedStaticSettlements()).toBe(false);
+  });
+
   it("preserves chain ordering metadata through JSON", () => {
     const journal = new ExecutionJournal();
     const firstId = journal.planBatch(`deposit:0x${"f".repeat(64)}:0`, [commands[0]], {

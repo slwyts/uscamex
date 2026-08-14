@@ -310,6 +310,11 @@ function StatsCard() {
             tone="warn"
             tip="上链后被还原或超时以致失败的交易数。可在「链下执行流水」中查看详细错误原因。"
           />
+          <Metric
+            title="已取消交易"
+            value={data.cancelled_commands}
+            tip="已由维护操作明确取消、不会再提交上链的历史命令数。"
+          />
         </Row>
       </Card>
     </Space>

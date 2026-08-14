@@ -17,6 +17,7 @@ const STATUS_OPTIONS = [
   { value: "submitted", label: "已提交" },
   { value: "confirmed", label: "已确认" },
   { value: "failed", label: "失败" },
+  { value: "cancelled", label: "已取消" },
 ];
 
 const STATUS_COLOR: Record<string, string> = {
@@ -24,6 +25,7 @@ const STATUS_COLOR: Record<string, string> = {
   submitted: "blue",
   confirmed: "green",
   failed: "red",
+  cancelled: "orange",
 };
 
 // 业务类型（journal kind）中文映射。命名沿用 origin.md 规格术语。
@@ -129,6 +131,7 @@ const STATUS_TEXT: Record<string, string> = {
   submitted: "已提交",
   confirmed: "已确认",
   failed: "失败",
+  cancelled: "已取消",
 };
 
 export default function QueryJournal() {
@@ -191,6 +194,9 @@ function JournalPanel() {
             </Col>
             <Col xs={12} md={6}>
               <Statistic title="失败" value={query.data.counts.failed} valueStyle={{ color: "#ff7875" }} />
+            </Col>
+            <Col xs={12} md={6}>
+              <Statistic title="已取消" value={query.data.counts.cancelled} valueStyle={{ color: "#fa8c16" }} />
             </Col>
           </Row>
         </Card>

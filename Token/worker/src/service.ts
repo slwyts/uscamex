@@ -28,12 +28,16 @@ export interface ServiceDatabase {
 
 /** Chain client interface (BscTransactionClient or a test recorder). */
 export interface ChainClient {
-  submit(command: OperatorCommand): Promise<string>;
+  submit(command: OperatorCommand, onBroadcast?: (txHash: string) => Promise<void>): Promise<string>;
+  submittedTransactionStatus?(txHash: string): Promise<"confirmed" | "failed" | "pending">;
   afterConfirmed?(id: string, command: OperatorCommand, txHash: string): Promise<void>;
   findConfirmedCommand?(id: string, command: OperatorCommand, anchorTxHash?: string): Promise<string | null>;
 }
 
 export type BeforeCommandSubmit = (id: string, command: OperatorCommand) => Promise<void>;
+export type PersistCommand = (id: string, command: OperatorCommand) => Promise<void>;
+
+const MAX_COMMANDS_PER_SUBMISSION_RUN = 5;
 
 export interface FixedSettlementPayment {
   to: string;
@@ -42,6 +46,7 @@ export interface FixedSettlementPayment {
 
 export class OperatorService {
   private planningState: ProtocolState;
+  lastSubmitError: string | null = null;
 
   constructor(
     public engine: Engine,
@@ -49,7 +54,7 @@ export class OperatorService {
     public journal: ExecutionJournal,
     public eventCache: ServiceDatabase,
     public chain: ChainClient,
-    private onPersist?: () => Promise<void>,
+    private onPersist?: PersistCommand,
     private beforeCommandSubmit?: BeforeCommandSubmit,
   ) {
     this.planningState = buildPlanningState(engine, state, journal);
@@ -206,10 +211,33 @@ export class OperatorService {
   }
 
   /** service.rs:220 — drain pending; on error stop. Returns tx hashes. */
-  async submitPending(): Promise<string[]> {
+  async submitPending(maxCommands = MAX_COMMANDS_PER_SUBMISSION_RUN): Promise<string[]> {
     const txHashes: string[] = [];
+    this.lastSubmitError = null;
+    let processed = 0;
+
+    for (const [id, command, txHash] of this.journal.submittedCommands()) {
+      if (processed >= maxCommands) return txHashes;
+      const status = await this.chain.submittedTransactionStatus?.(txHash) ?? "pending";
+      if (status === "pending") return txHashes;
+      if (status === "failed") {
+        this.journal.markFailed(id, `submitted transaction reverted: ${txHash}`);
+        if (this.journal.canRetry(id, `submitted transaction reverted: ${txHash}`)) {
+          this.journal.resetToPending(id);
+        }
+        await this.onPersist?.(id, command);
+        return txHashes;
+      }
+      await this.chain.afterConfirmed?.(id, command, txHash);
+      this.journal.markConfirmed(id, txHash);
+      await this.onPersist?.(id, command);
+      txHashes.push(txHash);
+      processed += 1;
+    }
+
     this.journal.retryFailed();
-    for (const [id, command] of this.journal.pendingCommands()) {
+    const pending = this.journal.pendingCommands().slice(0, Math.max(0, maxCommands - processed));
+    for (const [id, command] of pending) {
       // The pending list is a snapshot. A long settlement drain can outlive a
       // submission lease, so validate/renew that lease before every command.
       // Keep this outside the command try/catch: losing the lease must stop the
@@ -237,25 +265,37 @@ export class OperatorService {
         if (existingTxHash) {
           await this.chain.afterConfirmed?.(id, command, existingTxHash);
           this.journal.markConfirmed(id, existingTxHash);
-          await this.onPersist?.();
+          await this.onPersist?.(id, command);
           txHashes.push(existingTxHash);
           continue;
         }
-        const txHash = await this.chain.submit(command);
-        this.journal.markSubmitted(id, txHash);
+        const txHash = await this.chain.submit(command, async (broadcastHash) => {
+          this.journal.markSubmitted(id, broadcastHash);
+          await this.onPersist?.(id, command);
+        });
+        if (this.journal.records.get(id)?.status.state === "Pending") {
+          this.journal.markSubmitted(id, txHash);
+        }
         await this.chain.afterConfirmed?.(id, command, txHash);
         this.journal.markConfirmed(id);
-        await this.onPersist?.();
+        await this.onPersist?.(id, command);
         txHashes.push(txHash);
       } catch (e) {
         const err = String((e as Error).message ?? e);
+        this.lastSubmitError = err;
         console.error(`submitPending: ${id} failed: ${err}`);
+        if (this.journal.records.get(id)?.status.state === "Submitted") {
+          await this.onPersist?.(id, command);
+          break;
+        }
         if (this.journal.canRetry(id, err)) {
           this.journal.markFailed(id, err);
           this.journal.resetToPending(id);
         } else {
           this.journal.markFailed(id, err);
         }
+        await this.onPersist?.(id, command);
+        break;
       }
     }
     return txHashes;
