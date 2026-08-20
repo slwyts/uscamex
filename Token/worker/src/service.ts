@@ -29,7 +29,7 @@ export interface ServiceDatabase {
 /** Chain client interface (BscTransactionClient or a test recorder). */
 export interface ChainClient {
   submit(command: OperatorCommand, onBroadcast?: (txHash: string) => Promise<void>): Promise<string>;
-  submittedTransactionStatus?(txHash: string): Promise<"confirmed" | "failed" | "pending">;
+  submittedTransactionStatus?(txHash: string): Promise<"confirmed" | "failed" | "pending" | "dropped">;
   afterConfirmed?(id: string, command: OperatorCommand, txHash: string): Promise<void>;
   findConfirmedCommand?(id: string, command: OperatorCommand, anchorTxHash?: string): Promise<string | null>;
 }
@@ -38,6 +38,7 @@ export type BeforeCommandSubmit = (id: string, command: OperatorCommand) => Prom
 export type PersistCommand = (id: string, command: OperatorCommand) => Promise<void>;
 
 const MAX_COMMANDS_PER_SUBMISSION_RUN = 5;
+const SUBMITTED_NOT_FOUND_GRACE_MS = 2 * 60 * 1000;
 
 export interface FixedSettlementPayment {
   to: string;
@@ -216,10 +217,25 @@ export class OperatorService {
     this.lastSubmitError = null;
     let processed = 0;
 
-    for (const [id, command, txHash] of this.journal.submittedCommands()) {
+    for (const [id, command, txHash, submittedAtMs] of this.journal.submittedCommands()) {
       if (processed >= maxCommands) return txHashes;
-      const status = await this.chain.submittedTransactionStatus?.(txHash) ?? "pending";
+      let status: "confirmed" | "failed" | "pending" | "dropped";
+      try {
+        status = await this.chain.submittedTransactionStatus?.(txHash) ?? "pending";
+      } catch (e) {
+        this.lastSubmitError = `submitted transaction status check failed: ${String((e as Error).message ?? e)}`;
+        return txHashes;
+      }
       if (status === "pending") return txHashes;
+      if (status === "dropped") {
+        if (submittedAtMs !== undefined && Date.now() - submittedAtMs < SUBMITTED_NOT_FOUND_GRACE_MS) {
+          return txHashes;
+        }
+        this.journal.markFailedForManualRetry(id, `submitted transaction dropped or replaced: ${txHash}`);
+        await this.onPersist?.(id, command);
+        processed += 1;
+        continue;
+      }
       if (status === "failed") {
         this.journal.markFailed(id, `submitted transaction reverted: ${txHash}`);
         if (this.journal.canRetry(id, `submitted transaction reverted: ${txHash}`)) {
@@ -236,7 +252,8 @@ export class OperatorService {
     }
 
     this.journal.retryFailed();
-    const pending = this.journal.pendingCommands().slice(0, Math.max(0, maxCommands - processed));
+    const pending = prioritizePendingCommands(this.journal.pendingCommands())
+      .slice(0, Math.max(0, maxCommands - processed));
     for (const [id, command] of pending) {
       // The pending list is a snapshot. A long settlement drain can outlive a
       // submission lease, so validate/renew that lease before every command.
@@ -329,6 +346,28 @@ export class OperatorService {
   }
 }
 
+/**
+ * Tax is already withheld by the token contract during the user swap, but the
+ * follow-up conversion to BNB is an operator command. Do not leave that market
+ * action behind a large independent reward backlog. Journal order remains the
+ * tie-breaker, so tax sweeps still execute in the order they were planned.
+ */
+function prioritizePendingCommands(
+  commands: [string, OperatorCommand][],
+): [string, OperatorCommand][] {
+  return commands
+    .map((entry, index) => ({ entry, index }))
+    .sort((left, right) => {
+      const priority = commandSubmissionPriority(left.entry[1]) - commandSubmissionPriority(right.entry[1]);
+      return priority !== 0 ? priority : left.index - right.index;
+    })
+    .map(({ entry }) => entry);
+}
+
+function commandSubmissionPriority(command: OperatorCommand): number {
+  return command.kind === "SweepTaxToBnb" ? 0 : 1;
+}
+
 export class ServiceError extends Error {}
 export { EngineError };
 
@@ -351,9 +390,8 @@ export function depositAllocationFromCommand(command: Extract<OperatorCommand, {
 
 function buildPlanningState(engine: Engine, state: ProtocolState, journal: ExecutionJournal): ProtocolState {
   const planning = deserializeState(serializeState(state));
-  const records = journal.recordsInExecutionOrder();
+  const records = journal.unfinishedDepositBatchesInExecutionOrder();
   for (const record of records) {
-    if (record.status.state === "Confirmed") continue;
     if (record.command.kind !== "DepositBatch") continue;
     if (planning.appliedDepositBatches.has(record.id)) continue;
     engine.applyDeposit(planning, depositAllocationFromCommand(record.command));

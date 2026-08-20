@@ -28,6 +28,7 @@ import {
   type SystemEvent,
 } from "./indexer";
 import { BscRpcClient } from "./rpc";
+import { rpcSnapshotIsFresh } from "./rpc-refresh";
 import {
   type BeforeCommandSubmit,
   depositAllocationFromCommand,
@@ -53,6 +54,7 @@ const SCAN_INTERVAL_MS = 5_000;
 const MAX_BACKOFF_MS = 30_000;
 const SUBMIT_LOCK_KEY = "lock:submit-pending";
 const SUBMIT_LOCK_TTL_MS = 15 * 60 * 1000;
+const SUBMIT_LOCK_STALE_MS = 5 * 60 * 1000;
 const SUBMIT_BACKOFF_KEY = "submit:backoff";
 const SUBMIT_BACKOFF_BASE_MS = 5_000;
 const SUBMIT_BACKOFF_MAX_MS = 2 * 60 * 1000;
@@ -62,6 +64,7 @@ const JOURNAL_LEGACY_KEY = "journal";
 const JOURNAL_CHUNK_INDEX_KEY = "journal:chunks";
 const JOURNAL_CHUNK_PREFIX = "journal:chunk:";
 const JOURNAL_CHUNK_RECORDS = 250;
+const CORE_REVISION_KEY = "core:revision";
 const STATE_SET_CHUNK_MAX_BYTES = 96 * 1024;
 
 type StateSetName = "processed-events" | "processed-settlements" | "applied-deposit-batches";
@@ -84,6 +87,7 @@ interface SubmitLock {
   owner: string;
   reason: string;
   expiresAt: number;
+  heartbeatAt?: number;
 }
 
 interface SubmitBackoff {
@@ -147,15 +151,27 @@ export class OperatorDO extends DurableObject<Env> {
   private journalIndexDirty = false;
   private journalNeedsLegacyDelete = false;
   private stateSetLayouts = new Map<StateSetName, StateSetLayout>();
+  private rpcConfigSyncedAtMs = 0;
+  private rpcNodesSyncedAtMs = 0;
+  private rpcReservesSyncedAtMs = 0;
+  private rpcBuilderBalanceSyncedAtMs = 0;
+  private rpcVaultBalanceSyncedAtMs = 0;
+  private coreRevision = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       this.settings = loadSettings(env);
+      const revisionBefore = (await this.ctx.storage.get<number>(CORE_REVISION_KEY)) ?? 0;
       this.engine = new Engine(await this.loadConfig());
       this.state = await this.loadState();
       this.journal = await this.loadJournal();
       await this.loadStateSetChunks();
+      const revisionAfter = (await this.ctx.storage.get<number>(CORE_REVISION_KEY)) ?? 0;
+      if (revisionAfter !== revisionBefore) {
+        throw new Error(`core state changed during initialization: ${revisionBefore} -> ${revisionAfter}`);
+      }
+      this.coreRevision = revisionAfter;
       this.backfillLegacyAppliedDepositBatches();
       this.lastSettlementSlot = slotValue(await this.ctx.storage.get("slot:settlement"));
       this.lastDeflationSlot = slotValue(await this.ctx.storage.get("slot:deflation"));
@@ -278,7 +294,10 @@ export class OperatorDO extends DurableObject<Env> {
       } satisfies SlotClaim;
     }
 
+    let committedRevision = this.coreRevision;
     await this.ctx.storage.transaction(async (txn) => {
+      committedRevision = ((await txn.get<number>(CORE_REVISION_KEY)) ?? 0) + 1;
+      writes[CORE_REVISION_KEY] = committedRevision;
       const entries = Object.entries(writes);
       for (let offset = 0; offset < entries.length; offset += 128) {
         await txn.put(Object.fromEntries(entries.slice(offset, offset + 128)));
@@ -286,6 +305,7 @@ export class OperatorDO extends DurableObject<Env> {
       if (this.journalNeedsLegacyDelete) await txn.delete(JOURNAL_LEGACY_KEY);
     });
 
+    this.coreRevision = committedRevision;
     this.journal.markPersisted(dirtyIds);
     stateSetWrites.commit();
     this.journalIndexDirty = false;
@@ -298,13 +318,17 @@ export class OperatorDO extends DurableObject<Env> {
     if (dirtyIds.length === 0 && !this.journalIndexDirty && !this.journalNeedsLegacyDelete) return;
     const { writes, indexChanged } = this.prepareJournalWrites(dirtyIds);
     if (indexChanged) writes[JOURNAL_CHUNK_INDEX_KEY] = [...this.journalChunkKeys];
+    let committedRevision = this.coreRevision;
     await this.ctx.storage.transaction(async (txn) => {
+      committedRevision = ((await txn.get<number>(CORE_REVISION_KEY)) ?? 0) + 1;
+      writes[CORE_REVISION_KEY] = committedRevision;
       const entries = Object.entries(writes);
       for (let offset = 0; offset < entries.length; offset += 128) {
         await txn.put(Object.fromEntries(entries.slice(offset, offset + 128)));
       }
       if (this.journalNeedsLegacyDelete) await txn.delete(JOURNAL_LEGACY_KEY);
     });
+    this.coreRevision = committedRevision;
     this.journal.markPersisted(dirtyIds);
     this.journalIndexDirty = false;
     this.journalNeedsLegacyDelete = false;
@@ -401,6 +425,7 @@ export class OperatorDO extends DurableObject<Env> {
   }
 
   private async reloadCoreState(): Promise<void> {
+    const revisionBefore = (await this.ctx.storage.get<number>(CORE_REVISION_KEY)) ?? 0;
     // Drop the large live journal before loading another copy. Keeping both
     // 130k-record maps alive at once can exceed the isolate memory limit.
     this.journal = new ExecutionJournal();
@@ -409,6 +434,11 @@ export class OperatorDO extends DurableObject<Env> {
     this.journal = await this.loadJournal();
     await this.loadStateSetChunks();
     this.backfillLegacyAppliedDepositBatches();
+    const revisionAfter = (await this.ctx.storage.get<number>(CORE_REVISION_KEY)) ?? 0;
+    if (revisionAfter !== revisionBefore) {
+      throw new Error(`core state changed during reload: ${revisionBefore} -> ${revisionAfter}`);
+    }
+    this.coreRevision = revisionAfter;
   }
 
   private async claimSlots(requested: { key: string; slot: string }[]): Promise<ClaimedSlot[]> {
@@ -461,10 +491,16 @@ export class OperatorDO extends DurableObject<Env> {
   private async acquireSubmitLock(reason: string): Promise<string | null> {
     const owner = `${Date.now()}:${crypto.randomUUID()}:${reason}`;
     const now = Date.now();
-    const lock: SubmitLock = { owner, reason, expiresAt: now + SUBMIT_LOCK_TTL_MS };
+    const lock: SubmitLock = {
+      owner,
+      reason,
+      expiresAt: now + SUBMIT_LOCK_TTL_MS,
+      heartbeatAt: now,
+    };
     return this.ctx.storage.transaction(async (txn) => {
       const existing = await txn.get<SubmitLock>(SUBMIT_LOCK_KEY);
-      if (existing && existing.expiresAt > now) return null;
+      if (existing && submitLockIsActive(existing, now)) return null;
+      if (existing) console.warn(`replacing stale ${SUBMIT_LOCK_KEY} (${existing.reason})`);
       await txn.put(SUBMIT_LOCK_KEY, lock);
       return owner;
     });
@@ -492,6 +528,7 @@ export class OperatorDO extends DurableObject<Env> {
       await txn.put(SUBMIT_LOCK_KEY, {
         ...existing,
         expiresAt: now + SUBMIT_LOCK_TTL_MS,
+        heartbeatAt: now,
       });
       return true;
     });
@@ -514,10 +551,12 @@ export class OperatorDO extends DurableObject<Env> {
       return [];
     }
     try {
-      // A deploy can leave two isolates briefly alive. Always reload before
-      // submitting so a stale isolate cannot send a command already confirmed by
-      // the isolate that acquired the lock first.
-      await this.reloadCoreState();
+      // A deploy can leave two isolates briefly alive. Reload only when another
+      // writer advanced the persisted revision; the active isolate already has
+      // the current journal, and reloading 150k+ records every five commands can
+      // exceed the Durable Object memory limit.
+      const storedRevision = (await this.ctx.storage.get<number>(CORE_REVISION_KEY)) ?? 0;
+      if (storedRevision !== this.coreRevision) await this.reloadCoreState();
       await this.cancelUnsafePendingDeflations();
       if (!this.journal.hasSubmitWork()) return [];
       const service = this.newService(
@@ -622,6 +661,7 @@ export class OperatorDO extends DurableObject<Env> {
       this.chainContext(),
       this.settings.confirmations,
       this.settings.ammFeeBps,
+      this.settings.rpcStatusFallbackUrl,
     );
   }
 
@@ -761,7 +801,9 @@ export class OperatorDO extends DurableObject<Env> {
     });
     let canBuyback = false;
     try {
-      await this.syncVaultBalance(rpc);
+      // This balance gates a possible buyback command, so do not make the
+      // spending decision from the 30-second display/indexer cache.
+      await this.syncVaultBalance(rpc, true);
       canBuyback = true;
     } catch (err) {
       console.error("sync vault before buyback failed:", err);
@@ -983,9 +1025,14 @@ export class OperatorDO extends DurableObject<Env> {
     if (changed !== 0) await this.persist();
   }
 
-  private async syncProtocolConfig(rpc: BscRpcClient): Promise<void> {
+  private async syncProtocolConfig(rpc: BscRpcClient, force = false): Promise<void> {
+    if (!force && rpcSnapshotIsFresh(
+      this.rpcConfigSyncedAtMs,
+      this.settings.rpcConfigTtlSecs,
+    )) return;
     const chainConfig = await rpc.protocolConfig();
     this.engine.config = chainConfig.config;
+    this.rpcConfigSyncedAtMs = Date.now();
   }
 
   /**
@@ -1007,11 +1054,21 @@ export class OperatorDO extends DurableObject<Env> {
     }
     this.rootInitialized = true;
   }
-  private async syncNodes(rpc: BscRpcClient, _storage: D1Storage): Promise<void> {
+  private async syncNodes(rpc: BscRpcClient, _storage: D1Storage, force = false): Promise<void> {
+    if (!force && rpcSnapshotIsFresh(
+      this.rpcNodesSyncedAtMs,
+      this.settings.rpcNodesTtlSecs,
+    )) return;
     this.state.nodes = await rpc.nodes();
+    this.rpcNodesSyncedAtMs = Date.now();
   }
-  private async syncPairReserves(rpc: BscRpcClient): Promise<void> {
+  private async syncPairReserves(rpc: BscRpcClient, force = false): Promise<void> {
+    if (!force && rpcSnapshotIsFresh(
+      this.rpcReservesSyncedAtMs,
+      this.settings.rpcReservesTtlSecs,
+    )) return;
     const reserves = await rpc.pairReserves();
+    this.rpcReservesSyncedAtMs = Date.now();
     if (!reserves) return;
     this.state.pair.tokenReserve = reserves.tokenReserve;
     this.state.pair.bnbReserve = reserves.bnbReserve;
@@ -1041,16 +1098,26 @@ export class OperatorDO extends DurableObject<Env> {
       this.state.deflationUsedBps = actualUsedBps;
     }
   }
-  private async syncBuilderTokenBalance(rpc: BscRpcClient): Promise<void> {
+  private async syncBuilderTokenBalance(rpc: BscRpcClient, force = false): Promise<void> {
+    if (!force && rpcSnapshotIsFresh(
+      this.rpcBuilderBalanceSyncedAtMs,
+      this.settings.rpcReservesTtlSecs,
+    )) return;
     this.state.balances.builderTokenAmount = await rpc.tokenBalance(this.settings.tokenAddress);
+    this.rpcBuilderBalanceSyncedAtMs = Date.now();
   }
-  private async syncVaultBalance(rpc: BscRpcClient): Promise<void> {
+  private async syncVaultBalance(rpc: BscRpcClient, force = false): Promise<void> {
+    if (!force && rpcSnapshotIsFresh(
+      this.rpcVaultBalanceSyncedAtMs,
+      this.settings.rpcVaultBalanceTtlSecs,
+    )) return;
     const vault = await rpc.vault();
     if (vault !== this.vaultAddress) {
       this.vaultAddress = vault;
       await this.ctx.storage.put("vault", vault);
     }
     this.state.balances.vaultBnb = await rpc.nativeBalance(vault);
+    this.rpcVaultBalanceSyncedAtMs = Date.now();
   }
 
   private async applySystemEvents(
@@ -1074,6 +1141,7 @@ export class OperatorDO extends DurableObject<Env> {
           changed += 1;
         }
         this.engine.config = chainConfig.config;
+        this.rpcConfigSyncedAtMs = Date.now();
       } else {
         const updatedBy = `chain-event:${event.txHash}`;
         if (
@@ -1091,6 +1159,7 @@ export class OperatorDO extends DurableObject<Env> {
     }
     if (changed > 0) {
       this.state.nodes = await rpc.nodes();
+      this.rpcNodesSyncedAtMs = Date.now();
     }
   }
 
@@ -1387,14 +1456,20 @@ export class OperatorDO extends DurableObject<Env> {
 
   async queryJournalList(limit: number, offset: number, status: string): Promise<unknown> {
     const mapStatus = (s: import("./journal").CommandStatus) => s.state.toLowerCase();
-    const candidates = status === "all"
-      ? [...this.journal.records.values()]
-      : [...this.journal.records.values()].filter((r) => mapStatus(r.status) === status.toLowerCase());
-    const eventSortKeys = await this.journalEventSortKeys(candidates);
-    const filtered = candidates.sort((a, b) => compareJournalRecordsNewestFirst(a, b, eventSortKeys));
+    const normalizedStatus = status.toLowerCase();
+    const matchesStatus = (record: CommandRecord) =>
+      normalizedStatus === "all" || mapStatus(record.status) === normalizedStatus;
+    const eventSortKeys = await this.journalEventSortKeys(this.journal.records.values());
+    const pageEnd = Math.min(Number.MAX_SAFE_INTEGER, offset + limit);
+    const pageRecords: CommandRecord[] = [];
+    let total = 0;
+    for (const record of this.journal.records.values()) {
+      if (!matchesStatus(record)) continue;
+      total += 1;
+      insertJournalPageRecord(pageRecords, record, pageEnd, eventSortKeys);
+    }
     const counts = this.statusCounts();
-    const total = filtered.length;
-    const items = filtered.slice(offset, offset + limit).map((r) => ({
+    const items = pageRecords.slice(offset, offset + limit).map((r) => ({
       id: r.id,
       // id = "{batchKey}:{index}:{commandKind}"; batchKey itself contains colons
       // (e.g. "deposit:0xtx:0"), so the command kind is the last segment.
@@ -1471,8 +1546,13 @@ export class OperatorDO extends DurableObject<Env> {
     return { id, tx_hash: txHash.toLowerCase(), status: "confirmed" };
   }
 
-  private async journalEventSortKeys(records: CommandRecord[]): Promise<Map<string, JournalEventSortKey>> {
-    const ids = [...new Set(records.map((record) => eventIdFromJournalId(record.id)).filter((id): id is string => id != null))];
+  private async journalEventSortKeys(records: Iterable<CommandRecord>): Promise<Map<string, JournalEventSortKey>> {
+    const idSet = new Set<string>();
+    for (const record of records) {
+      const id = eventIdFromJournalId(record.id);
+      if (id != null) idSet.add(id);
+    }
+    const ids = [...idSet];
     const keys = new Map<string, JournalEventSortKey>();
     if (ids.length === 0) return keys;
 
@@ -1820,6 +1900,25 @@ function compareJournalRecordsNewestFirst(
   return ak.id < bk.id ? 1 : ak.id > bk.id ? -1 : 0;
 }
 
+function insertJournalPageRecord(
+  records: CommandRecord[],
+  record: CommandRecord,
+  maxRecords: number,
+  eventSortKeys: Map<string, JournalEventSortKey>,
+): void {
+  if (maxRecords <= 0) return;
+  let low = 0;
+  let high = records.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (compareJournalRecordsNewestFirst(record, records[middle], eventSortKeys) < 0) high = middle;
+    else low = middle + 1;
+  }
+  if (low >= maxRecords) return;
+  records.splice(low, 0, record);
+  if (records.length > maxRecords) records.pop();
+}
+
 function journalDisplaySortKey(
   record: CommandRecord,
   eventSortKeys: Map<string, JournalEventSortKey>,
@@ -1953,6 +2052,23 @@ function staticAncestors(state: ProtocolState, user: string, maxDepth: number): 
     cursor = referrer;
   }
   return out;
+}
+
+function submitLockIsActive(lock: SubmitLock, now: number): boolean {
+  if (lock.expiresAt <= now) return false;
+  const heartbeatAt = lock.heartbeatAt ?? submitLockStartedAt(lock.owner);
+  // Unknown legacy lock formats retain their recorded expiry. Locks written by
+  // this Worker encode a start time and can be recovered after an interrupted
+  // deployment instead of blocking all later commands for the full 15 minutes.
+  if (heartbeatAt == null) return true;
+  return now - heartbeatAt <= SUBMIT_LOCK_STALE_MS;
+}
+
+function submitLockStartedAt(owner: string): number | null {
+  const separator = owner.indexOf(":");
+  const raw = separator === -1 ? owner : owner.slice(0, separator);
+  const startedAt = Number(raw);
+  return Number.isFinite(startedAt) && startedAt > 0 ? startedAt : null;
 }
 
 function parseSqliteUtcMs(value: string): number | null {

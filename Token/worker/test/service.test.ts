@@ -68,7 +68,7 @@ describe("service: submit reconciliation", () => {
       {
         async submit(_command, onBroadcast) {
           await onBroadcast?.(TX_HASH);
-          expect(journal.records.get(id)?.status).toEqual({ state: "Submitted", txHash: TX_HASH });
+          expect(journal.records.get(id)?.status).toMatchObject({ state: "Submitted", txHash: TX_HASH });
           return TX_HASH;
         },
       },
@@ -94,7 +94,7 @@ describe("service: submit reconciliation", () => {
     }, journal);
 
     await expect(interrupted.submitPending()).resolves.toEqual([]);
-    expect(journal.records.get(id)?.status).toEqual({ state: "Submitted", txHash: TX_HASH });
+    expect(journal.records.get(id)?.status).toMatchObject({ state: "Submitted", txHash: TX_HASH });
 
     const recovered = serviceWith({
       async submittedTransactionStatus() { return "confirmed"; },
@@ -103,6 +103,86 @@ describe("service: submit reconciliation", () => {
     await expect(recovered.submitPending()).resolves.toEqual([TX_HASH]);
     expect(submits).toBe(1);
     expect(journal.records.get(id)?.status).toEqual({ state: "Confirmed", txHash: TX_HASH });
+  });
+
+  it("parks a dropped legacy submission for manual retry and continues independent pending work", async () => {
+    const journal = new ExecutionJournal();
+    const ids = journal.planBatch("static:0xuser:slot", [
+      { kind: "PayRewardTokenByBnbValue", to: "alice", amount: 1n },
+      { kind: "PayRewardTokenByBnbValue", to: "bob", amount: 2n },
+    ]);
+    journal.records.get(ids[0])!.attempts = 1;
+    journal.records.get(ids[0])!.status = { state: "Submitted", txHash: TX_HASH };
+    const submitted: string[] = [];
+    const service = serviceWith({
+      async submittedTransactionStatus() { return "dropped"; },
+      async submit(command) {
+        if (command.kind === "PayRewardTokenByBnbValue") submitted.push(command.to);
+        return `0x${"b".repeat(64)}`;
+      },
+    }, journal);
+
+    await expect(service.submitPending()).resolves.toEqual([`0x${"b".repeat(64)}`]);
+    expect(journal.records.get(ids[0])?.status).toEqual({
+      state: "Failed",
+      error: `submitted transaction dropped or replaced: ${TX_HASH}`,
+    });
+    expect(journal.records.get(ids[0])?.attempts).toBe(3);
+    expect(journal.records.get(ids[1])?.status.state).toBe("Confirmed");
+    expect(submitted).toEqual(["bob"]);
+  });
+
+  it("does not turn an RPC status-check error into a pending transaction", async () => {
+    const journal = new ExecutionJournal();
+    const [id] = journal.planBatch("static:0xuser:slot", [
+      { kind: "PayRewardTokenByBnbValue", to: "alice", amount: 1n },
+    ]);
+    journal.markSubmitted(id, TX_HASH);
+    const service = serviceWith({
+      async submittedTransactionStatus() { throw new Error("rpc unavailable"); },
+      async submit() { throw new Error("must not submit"); },
+    }, journal);
+
+    await expect(service.submitPending()).resolves.toEqual([]);
+    expect(service.lastSubmitError).toContain("rpc unavailable");
+    expect(journal.records.get(id)?.status.state).toBe("Submitted");
+  });
+
+  it("submits tax sweeps ahead of an older independent reward backlog", async () => {
+    const journal = new ExecutionJournal();
+    const rewardIds = journal.planBatch("static:0xuser:slot", [
+      { kind: "PayRewardTokenByBnbValue", to: "alice", amount: 1n },
+      { kind: "PayRewardTokenByBnbValue", to: "bob", amount: 2n },
+    ]);
+    const firstTaxId = journal.planBatch("tax:2026-08-20T10:23Z", [{
+      kind: "SweepTaxToBnb",
+      taxTokenAmount: 3n,
+      builderTokenAmount: 0n,
+      burnTokenAmount: 0n,
+      ownerBnbBpsOfSold: 0,
+      vaultBnbBpsOfSold: 10_000,
+    }])[0];
+    const secondTaxId = journal.planBatch("tax:2026-08-20T10:24Z", [{
+      kind: "SweepTaxToBnb",
+      taxTokenAmount: 4n,
+      builderTokenAmount: 0n,
+      burnTokenAmount: 0n,
+      ownerBnbBpsOfSold: 0,
+      vaultBnbBpsOfSold: 10_000,
+    }])[0];
+    const submittedTaxAmounts: bigint[] = [];
+    const service = serviceWith({
+      async submit(command) {
+        if (command.kind === "SweepTaxToBnb") submittedTaxAmounts.push(command.taxTokenAmount);
+        return TX_HASH;
+      },
+    }, journal);
+
+    await expect(service.submitPending(2)).resolves.toEqual([TX_HASH, TX_HASH]);
+    expect(submittedTaxAmounts).toEqual([3n, 4n]);
+    expect(journal.records.get(firstTaxId)?.status.state).toBe("Confirmed");
+    expect(journal.records.get(secondTaxId)?.status.state).toBe("Confirmed");
+    expect(rewardIds.map((id) => journal.records.get(id)?.status.state)).toEqual(["Pending", "Pending"]);
   });
 
   it("stops the drain after the first submission error and persists that status", async () => {

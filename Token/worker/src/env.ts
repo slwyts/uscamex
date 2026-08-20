@@ -30,6 +30,7 @@ export interface Env {
   RPC_NODES_TTL_SECS: string;
   RPC_RESERVES_TTL_SECS: string;
   RPC_VAULT_BALANCE_TTL_SECS: string;
+  RPC_STATUS_FALLBACK_URL?: string;
 
   // Emergency maintenance guard. When true, the DO keeps its alarm alive but
   // does not scan, plan, or submit any chain command.
@@ -51,6 +52,7 @@ export interface Env {
 
 export interface OperatorSettings {
   rpcUrl: string;
+  rpcStatusFallbackUrl: string;
   operatorPrivateKey: `0x${string}`;
   chainId: number;
   tokenAddress: `0x${string}`;
@@ -132,6 +134,7 @@ export function loadSettings(env: Env): OperatorSettings {
 
   return {
     rpcUrl: env.RPC_URL,
+    rpcStatusFallbackUrl: env.RPC_STATUS_FALLBACK_URL?.trim() || "",
     operatorPrivateKey: key as `0x${string}`,
     chainId,
     tokenAddress: requireAddress("TOKEN_ADDRESS", env.TOKEN_ADDRESS),

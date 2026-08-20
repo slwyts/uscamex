@@ -64,6 +64,8 @@
     "RPC_NODES_TTL_SECS": "60",
     "RPC_RESERVES_TTL_SECS": "30",
     "RPC_VAULT_BALANCE_TTL_SECS": "30",
+    // Read-only fallback for throttled chain reads and already-broadcast transaction reconciliation.
+    "RPC_STATUS_FALLBACK_URL": "https://bsc-dataseed.bnbchain.org",
     // AMM swap fee numerator. BSC PancakeSwap = 9975 (0.25%); Polygon QuickSwap/Sushi = 9970 (0.30%).
     // Defaults by chain id when unset; the operator also tries to auto-detect from the pair.
     "AMM_FEE_BPS": "9975",

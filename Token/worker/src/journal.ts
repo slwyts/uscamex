@@ -12,7 +12,7 @@ const TRANSIENT_MAX_ATTEMPTS = 8;
 
 export type CommandStatus =
   | { state: "Pending" }
-  | { state: "Submitted"; txHash: string }
+  | { state: "Submitted"; txHash: string; submittedAtMs?: number }
   | { state: "Confirmed"; txHash: string }
   | { state: "Failed"; error: string }
   | { state: "Cancelled"; reason: string };
@@ -61,7 +61,20 @@ export class ExecutionJournal {
   private nextSequence = 0;
 
   recordsInExecutionOrder(): CommandRecord[] {
-    return [...this.records.values()].sort(compareRecords);
+    return this.recordsMatchingInExecutionOrder(() => true);
+  }
+
+  unfinishedDepositBatchesInExecutionOrder(): CommandRecord[] {
+    return this.recordsMatchingInExecutionOrder((record) =>
+      record.status.state !== "Confirmed" && record.command.kind === "DepositBatch");
+  }
+
+  private recordsMatchingInExecutionOrder(predicate: (record: CommandRecord) => boolean): CommandRecord[] {
+    const records: CommandRecord[] = [];
+    for (const record of this.records.values()) {
+      if (predicate(record)) records.push(record);
+    }
+    return records.sort(compareRecords);
   }
 
   /** journal.rs:34 — id = "{batchKey}:{index}:{kind}", or_insert => replanning is a no-op. */
@@ -84,16 +97,15 @@ export class ExecutionJournal {
   }
 
   pendingCommands(): [string, OperatorCommand][] {
-    return this.recordsInExecutionOrder()
-      .filter((r) => r.status.state === "Pending")
+    return this.recordsMatchingInExecutionOrder((record) => record.status.state === "Pending")
       .map((r) => [r.id, r.command]);
   }
 
-  submittedCommands(): [string, OperatorCommand, string][] {
-    return this.recordsInExecutionOrder()
+  submittedCommands(): [string, OperatorCommand, string, number | undefined][] {
+    return this.recordsMatchingInExecutionOrder((record) => record.status.state === "Submitted")
       .filter((record): record is CommandRecord & { status: Extract<CommandStatus, { state: "Submitted" }> } =>
         record.status.state === "Submitted")
-      .map((record) => [record.id, record.command, record.status.txHash]);
+      .map((record) => [record.id, record.command, record.status.txHash, record.status.submittedAtMs]);
   }
 
   /**
@@ -137,7 +149,7 @@ export class ExecutionJournal {
     if (!record) throw new JournalError("MissingCommand");
     if (record.status.state === "Confirmed") throw new JournalError("AlreadyConfirmed");
     record.attempts += 1;
-    record.status = { state: "Submitted", txHash };
+    record.status = { state: "Submitted", txHash, submittedAtMs: Date.now() };
     this.dirtyIds.add(id);
   }
 
@@ -157,6 +169,21 @@ export class ExecutionJournal {
     if (!record) throw new JournalError("MissingCommand");
     if (record.status.state === "Confirmed") throw new JournalError("AlreadyConfirmed");
     record.attempts += 1;
+    record.status = { state: "Failed", error };
+    this.dirtyIds.add(id);
+  }
+
+  /**
+   * Park a command that was broadcast but can no longer be found on-chain.
+   * Automatic retry is unsafe here because the original transaction may have
+   * been replaced under another hash. An owner can explicitly re-arm it after
+   * checking the account nonce and replacement transaction history.
+   */
+  markFailedForManualRetry(id: string, error: string): void {
+    const record = this.records.get(id);
+    if (!record) throw new JournalError("MissingCommand");
+    if (record.status.state === "Confirmed") throw new JournalError("AlreadyConfirmed");
+    record.attempts = Math.max(record.attempts + 1, maxAttempts(error));
     record.status = { state: "Failed", error };
     this.dirtyIds.add(id);
   }
@@ -216,6 +243,7 @@ export class ExecutionJournal {
   hasSubmitWork(): boolean {
     for (const record of this.records.values()) {
       if (record.status.state === "Pending") return true;
+      if (record.status.state === "Submitted") return true;
       if (record.status.state === "Failed" && record.attempts < maxAttempts(record.status.error)) return true;
     }
     return false;
@@ -234,7 +262,11 @@ export class ExecutionJournal {
   }
 
   confirmedCount(): number {
-    return this.recordsInExecutionOrder().filter((r) => r.status.state === "Confirmed").length;
+    let count = 0;
+    for (const record of this.records.values()) {
+      if (record.status.state === "Confirmed") count += 1;
+    }
+    return count;
   }
 
   // ---- (de)serialization (bigint-safe) for DO storage + admin listing ----

@@ -10,6 +10,9 @@ import { ALL_TOPICS, type RawLog } from "./indexer";
 export const OWNER_SELECTOR = "0x8da5cb5b"; // owner()
 export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 export const PAIR_TOKENS_PULLED_TOPIC = keccak256(toHex("PairTokensPulled(uint256,uint16)"));
+const RPC_REQUEST_TIMEOUT_MS = 10_000;
+const RPC_RETRY_DELAYS_MS = [500, 1_500] as const;
+const RETRIABLE_HTTP_STATUSES = new Set([429, 502, 503, 504]);
 
 export interface PairReserves {
   pair: string;
@@ -33,6 +36,14 @@ export interface ChainProtocolConfig {
 }
 
 export class RpcError extends Error {}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function wait(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
 
 function functionSelector(signature: string): string {
   return keccak256(toHex(signature)).slice(0, 10); // 0x + 8 hex = 4 bytes
@@ -127,16 +138,52 @@ export class BscRpcClient {
   }
 
   private async rpc<T>(method: string, params: unknown[]): Promise<T> {
-    const res = await fetch(this.rpcUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-    });
-    if (!res.ok) throw new RpcError(`http ${res.status}`);
-    const body = (await res.json()) as { result?: T; error?: { message: string } };
-    if (body.error) throw new RpcError(body.error.message);
-    if (body.result === undefined || body.result === null) throw new RpcError("MissingResult");
-    return body.result;
+    const requestBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params });
+    for (let attempt = 0; attempt <= RPC_RETRY_DELAYS_MS.length; attempt += 1) {
+      let res: Response;
+      try {
+        res = await fetch(this.rpcUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: requestBody,
+          signal: AbortSignal.timeout(RPC_REQUEST_TIMEOUT_MS),
+        });
+      } catch (error) {
+        if (attempt >= RPC_RETRY_DELAYS_MS.length) {
+          throw new RpcError(`fetch failed: ${errorMessage(error)}`);
+        }
+        const delayMs = RPC_RETRY_DELAYS_MS[attempt];
+        console.warn(JSON.stringify({
+          message: "read RPC retry",
+          method,
+          reason: "fetch failed",
+          attempt: attempt + 1,
+          delayMs,
+        }));
+        await wait(delayMs);
+        continue;
+      }
+
+      if (RETRIABLE_HTTP_STATUSES.has(res.status) && attempt < RPC_RETRY_DELAYS_MS.length) {
+        await res.body?.cancel().catch(() => undefined);
+        const delayMs = RPC_RETRY_DELAYS_MS[attempt];
+        console.warn(JSON.stringify({
+          message: "read RPC retry",
+          method,
+          status: res.status,
+          attempt: attempt + 1,
+          delayMs,
+        }));
+        await wait(delayMs);
+        continue;
+      }
+      if (!res.ok) throw new RpcError(`http ${res.status}`);
+      const body = (await res.json()) as { result?: T; error?: { message: string } };
+      if (body.error) throw new RpcError(body.error.message);
+      if (body.result === undefined || body.result === null) throw new RpcError("MissingResult");
+      return body.result;
+    }
+    throw new RpcError("read RPC retry exhausted");
   }
 
   private async ethCall(data: string): Promise<string> {

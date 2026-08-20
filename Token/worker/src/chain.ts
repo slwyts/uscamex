@@ -19,6 +19,10 @@ export const MAX_GAS_LIMIT = 10_000_000n;
 export const MAX_RECONCILIATION_BLOCKS = 40_000n;
 const RECEIPT_POLL_INTERVAL_MS = 2_000;
 const RECEIPT_POLL_LIMIT = 60;
+const SUBMITTED_STATUS_RPC_TIMEOUT_MS = 10_000;
+const TRANSACTION_READ_RPC_TIMEOUT_MS = 10_000;
+const TRANSACTION_READ_RPC_RETRY_DELAYS_MS = [500, 1_500] as const;
+const RETRIABLE_READ_RPC_STATUSES = new Set([429, 502, 503, 504]);
 const GAS_PRICE_BUMP_BPS = [12_000n, 20_000n, 40_000n, 80_000n];
 const GAS_ESTIMATE_BUFFER_BPS = 17_500n;
 const GAS_ESTIMATE_MIN_BUFFER = 300_000n;
@@ -31,7 +35,7 @@ const LP_REDEEMED_TOPIC = keccak256(toHex("LpRedeemed(address,uint256,uint256,ui
 const TRANSFER_TOPIC = keccak256(toHex("Transfer(address,address,uint256)"));
 
 export type OnTransactionBroadcast = (txHash: string) => Promise<void>;
-export type SubmittedTransactionStatus = "confirmed" | "failed" | "pending";
+export type SubmittedTransactionStatus = "confirmed" | "failed" | "pending" | "dropped";
 
 export interface ChainExecutionContext {
   tokenAddress: string;
@@ -177,6 +181,17 @@ function isAlreadyKnown(err: unknown): boolean {
   return msg.includes("already known") || msg.includes("known transaction");
 }
 
+function isRetriableReadRpcError(err: unknown): boolean {
+  const name = err instanceof Error ? err.name : "";
+  if (name === "AbortError" || name === "TimeoutError" || name === "TypeError") return true;
+  const match = /^http (\d+)$/.exec(errorMessage(err));
+  return match != null && RETRIABLE_READ_RPC_STATUSES.has(Number(match[1]));
+}
+
+async function wait(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
 function rpcQuantity(value: bigint): Hex {
   return `0x${value.toString(16)}` as Hex;
 }
@@ -312,6 +327,8 @@ export class BscTransactionClient {
     private confirmations: number = 1,
     /** Configured AMM fee numerator (kept-after-fee bps); used as fallback if auto-detect fails. */
     feeBps: number = 9975,
+    /** Read-only fallback for reconciling hashes already broadcast through the primary RPC. */
+    private statusFallbackRpcUrl: string = "",
   ) {
     this.account = privateKeyToAccount(privateKey);
     this.token = normalizeAddress(ctx.tokenAddress);
@@ -357,15 +374,110 @@ export class BscTransactionClient {
 
   // ---- raw RPC ----
   private async rpc<T>(method: string, params: unknown[]): Promise<T> {
-    const res = await fetch(this.rpcUrl, {
+    // A raw transaction is a write with an ambiguous outcome if the response is
+    // lost. Never retry it here. All other calls in this client are read-only
+    // transaction preparation/reconciliation and may be retried safely.
+    if (method === "eth_sendRawTransaction") return this.rpcAt<T>(this.rpcUrl, method, params);
+    return this.readRpcWithRetry<T>(method, params, false) as Promise<T>;
+  }
+
+  private async readRpcWithRetry<T>(
+    method: string,
+    params: unknown[],
+    nullable: boolean,
+  ): Promise<T | null> {
+    try {
+      return await this.readRpcAtWithRetry<T>(this.rpcUrl, method, params, nullable, "primary");
+    } catch (err) {
+      if (!isRetriableReadRpcError(err) || !this.canUseReadFallback(method, params)) throw err;
+      console.warn(JSON.stringify({
+        message: "transaction read RPC fallback",
+        method,
+        reason: errorMessage(err),
+      }));
+      return this.readRpcAtWithRetry<T>(this.statusFallbackRpcUrl, method, params, nullable, "fallback");
+    }
+  }
+
+  private async readRpcAtWithRetry<T>(
+    rpcUrl: string,
+    method: string,
+    params: unknown[],
+    nullable: boolean,
+    source: "primary" | "fallback",
+  ): Promise<T | null> {
+    for (let attempt = 0; attempt <= TRANSACTION_READ_RPC_RETRY_DELAYS_MS.length; attempt += 1) {
+      try {
+        const signal = AbortSignal.timeout(TRANSACTION_READ_RPC_TIMEOUT_MS);
+        return nullable
+          ? await this.rpcNullableAt<T>(rpcUrl, method, params, signal)
+          : await this.rpcAt<T>(rpcUrl, method, params, signal);
+      } catch (err) {
+        if (!isRetriableReadRpcError(err) || attempt >= TRANSACTION_READ_RPC_RETRY_DELAYS_MS.length) throw err;
+        const delayMs = TRANSACTION_READ_RPC_RETRY_DELAYS_MS[attempt];
+        console.warn(JSON.stringify({
+          message: "transaction read RPC retry",
+          method,
+          source,
+          reason: errorMessage(err),
+          attempt: attempt + 1,
+          delayMs,
+        }));
+        await wait(delayMs);
+      }
+    }
+    throw new ChainError("transaction read RPC retry exhausted");
+  }
+
+  private canUseReadFallback(method: string, params: unknown[]): boolean {
+    if (!this.hasStatusFallback()) return false;
+    // Pending nonce must come from the same mempool endpoint that receives the
+    // raw transaction. Falling back here could reuse a nonce for a different
+    // command and replace an already-broadcast payment.
+    if (method === "eth_getTransactionCount" && params[1] === "pending") return false;
+    return method !== "eth_sendRawTransaction";
+  }
+
+  private async rpcAt<T>(
+    rpcUrl: string,
+    method: string,
+    params: unknown[],
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const res = await fetch(rpcUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      signal,
     });
     if (!res.ok) throw new ChainError(`http ${res.status}`);
     const body = (await res.json()) as { result?: T; error?: { message: string } };
     if (body.error) throw new ChainError(body.error.message);
     if (body.result === undefined || body.result === null) throw new ChainError("MissingResult");
+    return body.result;
+  }
+
+  /** JSON-RPC methods such as receipt/transaction lookup use a valid null result for "not found". */
+  private async rpcNullable<T>(method: string, params: unknown[]): Promise<T | null> {
+    return this.readRpcWithRetry<T>(method, params, true);
+  }
+
+  private async rpcNullableAt<T>(
+    rpcUrl: string,
+    method: string,
+    params: unknown[],
+    signal?: AbortSignal,
+  ): Promise<T | null> {
+    const res = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      signal,
+    });
+    if (!res.ok) throw new ChainError(`http ${res.status}`);
+    const body = (await res.json()) as { result?: T | null; error?: { message: string } };
+    if (body.error) throw new ChainError(body.error.message);
+    if (body.result === undefined) throw new ChainError("MissingResult");
     return body.result;
   }
 
@@ -527,9 +639,68 @@ export class BscTransactionClient {
 
   async submittedTransactionStatus(txHash: string): Promise<SubmittedTransactionStatus> {
     if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) throw new ChainError("InvalidTransactionHash");
-    const receipt = await this.rpc<RpcReceiptJson | null>("eth_getTransactionReceipt", [txHash]).catch(() => null);
-    if (!receipt) return "pending";
-    return receipt.status === "0x1" ? "confirmed" : "failed";
+    let primaryStatus: SubmittedTransactionStatus | null = null;
+    try {
+      primaryStatus = await this.submittedTransactionStatusWithTimeout(this.rpcUrl, txHash);
+      if (primaryStatus === "confirmed" || primaryStatus === "failed" || !this.hasStatusFallback()) {
+        return primaryStatus;
+      }
+    } catch (primaryError) {
+      if (!this.hasStatusFallback()) throw primaryError;
+      console.warn(`primary submitted transaction lookup failed; using read fallback: ${errorMessage(primaryError)}`);
+    }
+
+    try {
+      const fallbackStatus = await this.submittedTransactionStatusWithTimeout(this.statusFallbackRpcUrl, txHash);
+      if (fallbackStatus === "confirmed" || fallbackStatus === "failed") return fallbackStatus;
+      if (primaryStatus === "pending" || fallbackStatus === "pending") return "pending";
+      return "dropped";
+    } catch (fallbackError) {
+      // If the primary positively found the transaction, a failed fallback read
+      // must not turn that conservative pending result into a retry.
+      if (primaryStatus === "pending") return "pending";
+      throw fallbackError;
+    }
+  }
+
+  private hasStatusFallback(): boolean {
+    return this.statusFallbackRpcUrl.length !== 0 && this.statusFallbackRpcUrl !== this.rpcUrl;
+  }
+
+  private async submittedTransactionStatusWithTimeout(
+    rpcUrl: string,
+    txHash: string,
+  ): Promise<SubmittedTransactionStatus> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SUBMITTED_STATUS_RPC_TIMEOUT_MS);
+    try {
+      return await this.submittedTransactionStatusAt(rpcUrl, txHash, controller.signal);
+    } catch (error) {
+      if (controller.signal.aborted) throw new ChainError("submitted transaction status lookup timed out");
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async submittedTransactionStatusAt(
+    rpcUrl: string,
+    txHash: string,
+    signal?: AbortSignal,
+  ): Promise<SubmittedTransactionStatus> {
+    const receipt = await this.rpcNullableAt<RpcReceiptJson>(rpcUrl, "eth_getTransactionReceipt", [txHash], signal);
+    if (receipt) return receipt.status === "0x1" ? "confirmed" : "failed";
+
+    // A missing receipt does not prove the transaction is still pending. Check
+    // both the hash and the operator account's pending nonce before allowing a
+    // stale journal entry to block every command behind it.
+    const transaction = await this.rpcNullableAt<RpcTransactionJson>(rpcUrl, "eth_getTransactionByHash", [txHash], signal);
+    if (transaction) return "pending";
+    const [latestNonceHex, pendingNonceHex] = await Promise.all([
+      this.rpcAt<string>(rpcUrl, "eth_getTransactionCount", [this.walletAddress(), "latest"], signal),
+      this.rpcAt<string>(rpcUrl, "eth_getTransactionCount", [this.walletAddress(), "pending"], signal),
+    ]);
+    return BigInt(pendingNonceHex) > BigInt(latestNonceHex) ? "pending" : "dropped";
   }
 
   async verifySweepTaxTransaction(
@@ -560,13 +731,24 @@ export class BscTransactionClient {
   }
 
   private async waitForConfirmedReceipt(txHash: string, confirmations: bigint): Promise<void> {
+    let consecutiveReadFailures = 0;
     for (let i = 0; i < RECEIPT_POLL_LIMIT; i++) {
-      const receipt = await this.rpc<{ status: string; blockNumber: string } | null>(
-        "eth_getTransactionReceipt",
-        [txHash],
-      ).catch(() => null);
+      let receipt: { status: string; blockNumber: string } | null = null;
+      try {
+        receipt = await this.rpcNullable<{ status: string; blockNumber: string }>(
+          "eth_getTransactionReceipt",
+          [txHash],
+        );
+        consecutiveReadFailures = 0;
+      } catch (err) {
+        consecutiveReadFailures += 1;
+        if (consecutiveReadFailures >= 3) {
+          throw new ChainError(`ReceiptLookupFailed: ${txHash}: ${errorMessage(err)}`);
+        }
+      }
       if (receipt) {
         if (receipt.status !== "0x1") throw new ChainError(`ReceiptFailed: ${txHash}`);
+        if (confirmations <= 1n) return;
         const receiptBlock = BigInt(receipt.blockNumber);
         const target = receiptBlock + (confirmations - 1n);
         const head = BigInt(await this.rpc<string>("eth_blockNumber", []));
